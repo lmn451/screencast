@@ -26,7 +26,7 @@ function saveFile(blob, filename) {
   console.log('Preview: PREVIEW_READY response:', {
     ok: res?.ok,
     error: res?.error,
-    arrayBufferSize: res?.arrayBuffer?.byteLength || 0,
+    dataArraySize: res?.dataArray?.length || 0,
     mimeType: res?.mimeType
   });
   
@@ -34,7 +34,17 @@ function saveFile(blob, filename) {
     document.body.textContent = res?.error || 'Failed to load recording';
     return;
   }
-  const { arrayBuffer, mimeType } = res;
+  
+  // Validate and convert dataArray back to ArrayBuffer
+  const { dataArray, mimeType } = res;
+  if (!Array.isArray(dataArray) || dataArray.length === 0) {
+    console.error('Preview: Missing or empty dataArray in response');
+    document.body.textContent = 'Recording data missing or empty.';
+    return;
+  }
+  const uint8Array = new Uint8Array(dataArray);
+  const arrayBuffer = uint8Array.buffer.slice(uint8Array.byteOffset, uint8Array.byteOffset + uint8Array.byteLength);
+  console.log('Preview: Converted dataArray to ArrayBuffer, size:', arrayBuffer.byteLength);
   console.log('Preview: Creating blob from arrayBuffer:', arrayBuffer.byteLength, 'bytes');
   const blob = new Blob([arrayBuffer], { type: mimeType || 'video/webm' });
   console.log('Preview: Created blob:', blob.size, 'bytes, type:', blob.type);

@@ -114,7 +114,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
       }
       case 'OFFSCREEN_STARTED': {
-        // no-op; kept for debugging
+        // Acknowledge start to avoid async-channel warnings
+        sendResponse({ ok: true });
         break;
       }
       case 'OFFSCREEN_DATA': {
@@ -127,7 +128,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         });
         
         // Convert dataArray back to ArrayBuffer
-        const arrayBuffer = new Uint8Array(dataArray).buffer;
+        const uint8Array = new Uint8Array(dataArray);
+        const arrayBuffer = uint8Array.buffer.slice(uint8Array.byteOffset, uint8Array.byteOffset + uint8Array.byteLength);
         console.log('Background: Converted to ArrayBuffer, size:', arrayBuffer.byteLength);
         
         recordingStore.set(recordingId, { arrayBuffer, mimeType });
@@ -150,13 +152,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const { recordingId } = message;
         const data = recordingStore.get(recordingId);
         if (data) {
-          // Transfer the ArrayBuffer for efficiency
-          try {
-            sendResponse({ ok: true, recordingId, mimeType: data.mimeType, arrayBuffer: data.arrayBuffer }, [data.arrayBuffer]);
-          } catch (e) {
-            // Fallback if transferable fails
-            sendResponse({ ok: true, recordingId, mimeType: data.mimeType, arrayBuffer: data.arrayBuffer });
-          }
+          // Convert ArrayBuffer to Array for transfer (same as OFFSCREEN_DATA)
+          const uint8Array = new Uint8Array(data.arrayBuffer);
+          const dataArray = Array.from(uint8Array);
+          
+          console.log('Background: Converting ArrayBuffer to Array for preview, size:', dataArray.length);
+          sendResponse({ ok: true, recordingId, mimeType: data.mimeType, dataArray });
           recordingStore.delete(recordingId);
         } else {
           sendResponse({ ok: false, error: 'Recording not found or already consumed.' });
