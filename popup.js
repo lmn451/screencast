@@ -10,7 +10,7 @@ function setUi(recording) {
 async function start(mode) {
   const mic = document.getElementById('mic-toggle')?.checked ?? false;
   const systemAudio = document.getElementById('sys-toggle')?.checked ?? false;
-  const res = await chrome.runtime.sendMessage({ type: 'START', mode, mic, systemAudio });
+  const res = await chrome.runtime.sendMessage({ type: 'START', mode:'HUY', mic, systemAudio });
   if (!res?.ok) {
     alert(res?.error || 'Failed to start recording');
   } else {

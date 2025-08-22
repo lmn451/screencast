@@ -21,15 +21,14 @@ let recordingStartTime = null;
 let micStream = null;
 
 function getConstraintsFromMode(mode, includeAudio) {
-  // getDisplayMedia can capture system/tab audio, but not microphone
-  // For mic, we'd need getUserMedia separately (but it may not work in offscreen)
-  return { 
-    video: true, 
+
+  return {
+    video: true,
     audio: includeAudio ? {
-      echoCancellation: false,
-      noiseSuppression: false,
-      autoGainControl: false
-    } : false 
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true
+    } : false
   };
 }
 
@@ -37,9 +36,9 @@ async function startCapture(mode, recordingId, includeAudio) {
   if (mediaRecorder) throw new Error('Already recording');
   currentId = recordingId;
   chunks = [];
-  
+
   console.log('OFFSCREEN: Starting capture with mode:', mode, 'includeAudio:', includeAudio);
-  
+
   try {
     console.log('OFFSCREEN: Requesting display media with audio:', includeAudio);
     const displayStream = await navigator.mediaDevices.getDisplayMedia(getConstraintsFromMode(mode, includeAudio));
@@ -50,8 +49,6 @@ async function startCapture(mode, recordingId, includeAudio) {
       audioTracks: displayStream.getAudioTracks().length
     });
 
-    // Note: getUserMedia for microphone doesn't work in offscreen documents
-    // We can only capture system/tab audio through getDisplayMedia
     mediaStream = displayStream;
   } catch (error) {
     console.error('OFFSCREEN: getDisplayMedia failed:', error);
@@ -80,12 +77,12 @@ async function startCapture(mode, recordingId, includeAudio) {
   }
 
   mediaRecorder = new MediaRecorder(mediaStream, options);
-  
+
   mediaRecorder.onstart = () => {
     recordingStartTime = Date.now();
     console.log('MediaRecorder onstart event fired');
   };
-  
+
   mediaRecorder.ondataavailable = (e) => {
     const elapsed = Date.now() - recordingStartTime;
     console.log(`MediaRecorder data available at ${elapsed}ms:`, e.data?.size, 'bytes');
@@ -94,7 +91,7 @@ async function startCapture(mode, recordingId, includeAudio) {
       console.log(`Added chunk ${chunks.length}, total chunks: ${chunks.length}`);
     }
   };
-  
+
   mediaRecorder.onerror = (e) => {
     console.error('MediaRecorder error:', e);
   };
@@ -109,20 +106,20 @@ async function startCapture(mode, recordingId, includeAudio) {
       const blob = new Blob(chunks, { type: mediaRecorder.mimeType || 'video/webm' });
       console.log('Created blob:', blob.size, 'bytes, type:', blob.type);
       const arrayBuffer = await blob.arrayBuffer();
-      
+
       // Send data to background script
       try {
         // Convert ArrayBuffer to Array for transfer (Chrome extensions can't transfer ArrayBuffers directly)
         const uint8Array = new Uint8Array(arrayBuffer);
         const dataArray = Array.from(uint8Array);
-        
+
         console.log('OFFSCREEN: Converting ArrayBuffer to Array for transfer, size:', dataArray.length);
-        
-        const response = await chrome.runtime.sendMessage({ 
-          type: 'OFFSCREEN_DATA', 
-          recordingId: currentId, 
-          dataArray, 
-          mimeType: blob.type 
+
+        const response = await chrome.runtime.sendMessage({
+          type: 'OFFSCREEN_DATA',
+          recordingId: currentId,
+          dataArray,
+          mimeType: blob.type
         });
         console.log('OFFSCREEN_DATA response:', response);
       } catch (error) {
