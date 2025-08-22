@@ -54,9 +54,39 @@ function saveFile(blob, filename) {
   video.src = url;
   // Important: Do NOT revoke the URL immediately; the video element may request ranges during playback.
   // Revoke on page unload to avoid net::ERR_FILE_NOT_FOUND and truncated playback.
+  const fixDurationAndReset = () => {
+    // If duration is Infinity, do the large-seek trick and then snap back to 0 on timeupdate
+    if (!isFinite(video.duration) || video.duration === Infinity) {
+      const onTimeUpdate = () => {
+        // First time we get a timeupdate after the large seek, snap to 0 and stop listening
+        video.removeEventListener('timeupdate', onTimeUpdate);
+        try { video.pause(); } catch {}
+        try { video.currentTime = 0; } catch {}
+        console.log('Preview: Duration resolved; reset to start');
+      };
+      video.addEventListener('timeupdate', onTimeUpdate);
+      try { video.currentTime = 1e101; } catch {}
+    } else {
+      try { video.pause(); } catch {}
+      try { video.currentTime = 0; } catch {}
+      console.log('Preview: Finite duration; reset to start');
+    }
+  };
   video.onloadedmetadata = () => {
     console.log('Preview: Video metadata loaded:', { duration: video.duration, mimeType });
+    fixDurationAndReset();
   };
+  // Reset to start if browser fires ended immediately after load
+  const onEndedReset = () => {
+    try { video.currentTime = 0; } catch {}
+    try { video.pause(); } catch {}
+    console.log('Preview: Ended event caught, reset to start');
+  };
+  video.addEventListener('ended', onEndedReset);
+
+  // Extra guard in case metadata was already loaded
+  if (video.readyState >= 1) fixDurationAndReset();
+
   window.addEventListener('beforeunload', () => URL.revokeObjectURL(url));
   video.onerror = (e) => {
     console.error('Preview: Video failed to load:', e);
