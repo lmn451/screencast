@@ -14,6 +14,18 @@ const STATE = {
 
 // Temporary in-memory store for large blobs keyed by recordingId
 const recordingStore = new Map();
+const STORE_TTL_MS = 10 * 60 * 1000; // keep recordings for 10 minutes for preview reloads
+
+function putRecording(recordingId, arrayBuffer, mimeType) {
+  try {
+    const existing = recordingStore.get(recordingId);
+    if (existing?.timeoutId) clearTimeout(existing.timeoutId);
+  } catch {}
+  const timeoutId = setTimeout(() => {
+    recordingStore.delete(recordingId);
+  }, STORE_TTL_MS);
+  recordingStore.set(recordingId, { arrayBuffer, mimeType, timeoutId, expiresAt: Date.now() + STORE_TTL_MS });
+}
 
 async function setBadgeRecording(isRecording) {
   try {
@@ -28,7 +40,7 @@ async function ensureOffscreenDocument() {
   const existing = await chrome.offscreen.hasDocument?.();
   console.log('Background: Checking offscreen document, existing:', existing);
   if (existing) return;
-  
+
   console.log('Background: Creating offscreen document');
   await chrome.offscreen.createDocument({
     url: chrome.runtime.getURL('offscreen.html'),
@@ -103,7 +115,7 @@ async function startRecording(mode, includeMic, includeSystemAudio) {
     STATE.strategy = 'page';
   } else {
     await ensureOffscreenDocument();
-    await chrome.runtime.sendMessage({ 
+    await chrome.runtime.sendMessage({
       type: 'OFFSCREEN_START',
       mode,
       includeAudio: STATE.includeSystemAudio,
@@ -160,13 +172,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           dataArraySize: dataArray?.length || 0,
           mimeType
         });
-        
+
         // Convert dataArray back to ArrayBuffer
         const uint8Array = new Uint8Array(dataArray);
         const arrayBuffer = uint8Array.buffer.slice(uint8Array.byteOffset, uint8Array.byteOffset + uint8Array.byteLength);
         console.log('Background: Converted to ArrayBuffer, size:', arrayBuffer.byteLength);
-        
-        recordingStore.set(recordingId, { arrayBuffer, mimeType });
+
+        putRecording(recordingId, arrayBuffer, mimeType);
         // Reset state
         await setBadgeRecording(false);
         const tabId = STATE.overlayTabId;
@@ -195,7 +207,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         });
         const uint8Array = new Uint8Array(dataArray);
         const arrayBuffer = uint8Array.buffer.slice(uint8Array.byteOffset, uint8Array.byteOffset + uint8Array.byteLength);
-        recordingStore.set(recordingId, { arrayBuffer, mimeType });
+        putRecording(recordingId, arrayBuffer, mimeType);
         await setBadgeRecording(false);
         const tabId = STATE.overlayTabId;
         if (tabId) await removeOverlay(tabId);
@@ -232,7 +244,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           
           console.log('Background: Converting ArrayBuffer to Array for preview, size:', dataArray.length);
           sendResponse({ ok: true, recordingId, mimeType: data.mimeType, dataArray });
-          recordingStore.delete(recordingId);
+          // Note: Do NOT delete here to allow reloads; TTL will clear later.
         } else {
           sendResponse({ ok: false, error: 'Recording not found or already consumed.' });
         }

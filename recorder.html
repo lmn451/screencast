@@ -1,0 +1,26 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>CaptureCast Recorder</title>
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 16px; }
+      .status { margin-bottom: 12px; color: #444; }
+      .hidden { display: none; }
+      video { max-width: 100%; background: #000; }
+      .controls { margin-top: 12px; }
+      button { padding: 8px 12px; font-size: 14px; border-radius: 8px; border: 1px solid #ddd; cursor: pointer; }
+      button.stop { background: #d93025; color: #fff; border: none; }
+    </style>
+  </head>
+  <body>
+    <div class="status" id="status">Click Start to begin screen recording.</div>
+    <div class="controls">
+      <button id="start" class="start">Start Recording</button>
+      <button id="stop" class="stop hidden">Stop</button>
+    </div>
+    <video id="preview" autoplay muted class="hidden"></video>
+    <script type="module" src="recorder.js"></script>
+  </body>
+</html>
+
