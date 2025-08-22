@@ -55,23 +55,90 @@ function saveFile(blob, filename) {
   // Important: Do NOT revoke the URL immediately; the video element may request ranges during playback.
   // Revoke on page unload to avoid net::ERR_FILE_NOT_FOUND and truncated playback.
   const fixDurationAndReset = () => {
-    // If duration is Infinity, do the large-seek trick and then snap back to 0 on timeupdate
+    // If duration is Infinity, we need to fix it
     if (!isFinite(video.duration) || video.duration === Infinity) {
-      const onTimeUpdate = () => {
-        // First time we get a timeupdate after the large seek, snap to 0 and stop listening
-        video.removeEventListener('timeupdate', onTimeUpdate);
-        try { video.pause(); } catch {}
-        try { video.currentTime = 0; } catch {}
-        console.log('Preview: Duration resolved; reset to start');
+      // Pause the video first to prevent playback during the fix
+      video.pause();
+      
+      // Store the original playback position (should be 0)
+      const originalTime = video.currentTime;
+      
+      // Temporarily hide the video to avoid visual jumps
+      const originalOpacity = video.style.opacity;
+      video.style.opacity = '0';
+      video.style.transition = 'opacity 0.2s';
+      
+      // Use a more controlled approach: seek to a large time to get the real duration
+      // but do it in a way that's less jarring
+      const seekToFix = () => {
+        // Create a promise to handle the duration fix
+        return new Promise((resolve) => {
+          let fixed = false;
+          
+          const onSeeked = () => {
+            if (!fixed && isFinite(video.duration)) {
+              fixed = true;
+              video.removeEventListener('seeked', onSeeked);
+              video.removeEventListener('timeupdate', onTimeUpdate);
+              
+              // Now that we have the real duration, reset to start
+              video.currentTime = 0;
+              console.log('Preview: Duration fixed:', video.duration, 'seconds');
+              resolve();
+            }
+          };
+          
+          const onTimeUpdate = () => {
+            if (!fixed && isFinite(video.duration)) {
+              fixed = true;
+              video.removeEventListener('seeked', onSeeked);
+              video.removeEventListener('timeupdate', onTimeUpdate);
+              
+              // Reset to original position
+              video.currentTime = originalTime;
+              console.log('Preview: Duration fixed via timeupdate:', video.duration, 'seconds');
+              resolve();
+            }
+          };
+          
+          video.addEventListener('seeked', onSeeked);
+          video.addEventListener('timeupdate', onTimeUpdate);
+          
+          // Perform the seek to fix duration
+          try {
+            video.currentTime = Number.MAX_SAFE_INTEGER;
+          } catch (e) {
+            // If seeking fails, just resolve
+            console.log('Preview: Seek failed, continuing anyway');
+            video.removeEventListener('seeked', onSeeked);
+            video.removeEventListener('timeupdate', onTimeUpdate);
+            resolve();
+          }
+        });
       };
-      video.addEventListener('timeupdate', onTimeUpdate);
-      try { video.currentTime = 1e101; } catch {}
+      
+      // Fix the duration asynchronously
+      seekToFix().then(() => {
+        // Ensure we're at the start
+        try { video.currentTime = 0; } catch {}
+        
+        // Restore video visibility with a smooth transition
+        setTimeout(() => {
+          video.style.opacity = originalOpacity || '1';
+          // Clean up transition after it completes
+          setTimeout(() => {
+            video.style.transition = '';
+          }, 200);
+        }, 50);
+      });
     } else {
+      // Duration is already finite, just ensure we're at the start
       try { video.pause(); } catch {}
       try { video.currentTime = 0; } catch {}
-      console.log('Preview: Finite duration; reset to start');
+      console.log('Preview: Finite duration detected:', video.duration, 'seconds');
     }
   };
+  
   video.onloadedmetadata = () => {
     console.log('Preview: Video metadata loaded:', { duration: video.duration, mimeType });
     fixDurationAndReset();
