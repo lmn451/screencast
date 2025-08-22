@@ -6,6 +6,10 @@ const STATE = {
   mode: null, // 'tab' | 'screen' | 'window'
   recordingId: null,
   overlayTabId: null,
+  includeMic: false,
+  includeSystemAudio: false,
+  recorderTabId: null,
+  strategy: null, // 'offscreen' | 'page'
 };
 
 // Temporary in-memory store for large blobs keyed by recordingId
@@ -72,16 +76,42 @@ async function getActiveTabId() {
   return tab?.id ?? null;
 }
 
-async function startRecording(mode) {
+async function focusTab(tabId) {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    if (tab?.windowId) {
+      try { await chrome.windows.update(tab.windowId, { focused: true }); } catch (e) {}
+    }
+    await chrome.tabs.update(tabId, { active: true });
+  } catch (e) {}
+}
+
+async function startRecording(mode, includeMic, includeSystemAudio) {
   if (STATE.recording) return { ok: false, error: 'Already recording' };
   STATE.mode = mode;
   STATE.recordingId = crypto.randomUUID();
   STATE.overlayTabId = await getActiveTabId();
+  STATE.includeMic = !!includeMic;
+  STATE.includeSystemAudio = !!includeSystemAudio;
 
-  await ensureOffscreenDocument();
-
-  // Ask offscreen to start capture and recording
-  await chrome.runtime.sendMessage({ type: 'OFFSCREEN_START', mode, recordingId: STATE.recordingId, targetTabId: STATE.overlayTabId });
+  // Decide strategy: mic -> recorder page; else -> offscreen
+  if (STATE.includeMic) {
+    // Use a dedicated recorder page (extension tab) where mic is allowed
+    const url = chrome.runtime.getURL(`recorder.html?id=${encodeURIComponent(STATE.recordingId)}&mode=${encodeURIComponent(mode)}&mic=1&sys=${STATE.includeSystemAudio ? 1 : 0}`);
+    const tab = await chrome.tabs.create({ url, active: true });
+    STATE.recorderTabId = tab.id ?? null;
+    STATE.strategy = 'page';
+  } else {
+    await ensureOffscreenDocument();
+    await chrome.runtime.sendMessage({ 
+      type: 'OFFSCREEN_START',
+      mode,
+      includeAudio: STATE.includeSystemAudio,
+      recordingId: STATE.recordingId,
+      targetTabId: STATE.overlayTabId
+    });
+    STATE.strategy = 'offscreen';
+  }
 
   // Best-effort overlay on the active tab
   if (STATE.overlayTabId) {
@@ -95,7 +125,11 @@ async function startRecording(mode) {
 
 async function stopRecording() {
   if (!STATE.recording) return { ok: false, error: 'Not recording' };
-  await chrome.runtime.sendMessage({ type: 'OFFSCREEN_STOP' });
+  if (STATE.strategy === 'page') {
+    await chrome.runtime.sendMessage({ type: 'RECORDER_STOP' });
+  } else {
+    await chrome.runtime.sendMessage({ type: 'OFFSCREEN_STOP' });
+  }
   return { ok: true };
 }
 
@@ -104,7 +138,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
     switch (message.type) {
       case 'START': {
-        const res = await startRecording(message.mode);
+        const res = await startRecording(message.mode, message.mic, message.systemAudio);
         sendResponse(res);
         break;
       }
@@ -140,11 +174,51 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         STATE.recording = false;
         STATE.mode = null;
         STATE.overlayTabId = null;
+        STATE.includeMic = false;
+        STATE.includeSystemAudio = false;
+        STATE.strategy = null;
 
         // Open preview page and pass the id in URL
         const url = chrome.runtime.getURL(`preview.html?id=${encodeURIComponent(recordingId)}`);
         await chrome.tabs.create({ url });
         await closeOffscreenDocumentIfIdle();
+        sendResponse({ ok: true });
+        break;
+      }
+      case 'RECORDER_DATA': {
+        // Receive recorded data from recorder page
+        const { recordingId, dataArray, mimeType } = message;
+        console.log('Background received RECORDER_DATA:', {
+          recordingId,
+          dataArraySize: dataArray?.length || 0,
+          mimeType
+        });
+        const uint8Array = new Uint8Array(dataArray);
+        const arrayBuffer = uint8Array.buffer.slice(uint8Array.byteOffset, uint8Array.byteOffset + uint8Array.byteLength);
+        recordingStore.set(recordingId, { arrayBuffer, mimeType });
+        await setBadgeRecording(false);
+        const tabId = STATE.overlayTabId;
+        if (tabId) await removeOverlay(tabId);
+        if (STATE.recorderTabId) {
+          try { await chrome.tabs.remove(STATE.recorderTabId); } catch (e) {}
+        }
+        STATE.recording = false;
+        STATE.mode = null;
+        STATE.overlayTabId = null;
+        STATE.includeMic = false;
+        STATE.includeSystemAudio = false;
+        STATE.recorderTabId = null;
+        STATE.strategy = null;
+
+        const url = chrome.runtime.getURL(`preview.html?id=${encodeURIComponent(recordingId)}`);
+        await chrome.tabs.create({ url });
+        sendResponse({ ok: true });
+        break;
+      }
+      case 'RECORDER_STARTED': {
+        if (STATE.overlayTabId) {
+          await focusTab(STATE.overlayTabId);
+        }
         sendResponse({ ok: true });
         break;
       }

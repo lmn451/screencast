@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "CaptureCast",
   "description": "Simple, privacy-focused screen recording: This Tab, Window, or Entire Screen.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "action": {
     "default_title": "CaptureCast",
     "default_popup": "popup.html"
@@ -26,7 +26,8 @@
       "resources": [
         "offscreen.html",
         "preview.html",
-        "overlay.js"
+        "overlay.js",
+        "recorder.html"
       ],
       "matches": ["<all_urls>"]
     }

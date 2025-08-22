@@ -52,10 +52,12 @@ function saveFile(blob, filename) {
   const url = URL.createObjectURL(blob);
   const video = document.getElementById('video');
   video.src = url;
-  video.onloadeddata = () => {
-    console.log('Preview: Video loaded successfully');
-    URL.revokeObjectURL(url);
+  // Important: Do NOT revoke the URL immediately; the video element may request ranges during playback.
+  // Revoke on page unload to avoid net::ERR_FILE_NOT_FOUND and truncated playback.
+  video.onloadedmetadata = () => {
+    console.log('Preview: Video metadata loaded:', { duration: video.duration, mimeType });
   };
+  window.addEventListener('beforeunload', () => URL.revokeObjectURL(url));
   video.onerror = (e) => {
     console.error('Preview: Video failed to load:', e);
   };

@@ -18,40 +18,51 @@ let mediaRecorder = null;
 let chunks = [];
 let currentId = null;
 let recordingStartTime = null;
+let micStream = null;
 
-function getConstraintsFromMode(mode) {
-  // getDisplayMedia ignores constraints like preferCurrentTab; selection is via browser prompt
-  return { video: true, audio: false }; // Phase 1: screen-only
+function getConstraintsFromMode(mode, includeAudio) {
+  // getDisplayMedia can capture system/tab audio, but not microphone
+  // For mic, we'd need getUserMedia separately (but it may not work in offscreen)
+  return { 
+    video: true, 
+    audio: includeAudio ? {
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false
+    } : false 
+  };
 }
 
-async function startCapture(mode, recordingId) {
+async function startCapture(mode, recordingId, includeAudio) {
   if (mediaRecorder) throw new Error('Already recording');
   currentId = recordingId;
   chunks = [];
   
-  console.log('OFFSCREEN: Starting capture with mode:', mode);
+  console.log('OFFSCREEN: Starting capture with mode:', mode, 'includeAudio:', includeAudio);
   
   try {
-    console.log('OFFSCREEN: Requesting display media...');
-    mediaStream = await navigator.mediaDevices.getDisplayMedia(getConstraintsFromMode(mode));
-    console.log('OFFSCREEN: Got media stream:', {
-      id: mediaStream.id,
-      active: mediaStream.active,
-      videoTracks: mediaStream.getVideoTracks().length,
-      audioTracks: mediaStream.getAudioTracks().length
+    console.log('OFFSCREEN: Requesting display media with audio:', includeAudio);
+    const displayStream = await navigator.mediaDevices.getDisplayMedia(getConstraintsFromMode(mode, includeAudio));
+    console.log('OFFSCREEN: Got display stream:', {
+      id: displayStream.id,
+      active: displayStream.active,
+      videoTracks: displayStream.getVideoTracks().length,
+      audioTracks: displayStream.getAudioTracks().length
     });
+
+    // Note: getUserMedia for microphone doesn't work in offscreen documents
+    // We can only capture system/tab audio through getDisplayMedia
+    mediaStream = displayStream;
   } catch (error) {
     console.error('OFFSCREEN: getDisplayMedia failed:', error);
     throw error;
   }
 
-  // Auto-stop when user stops sharing
+  // Auto-stop when the user stops sharing the screen (video track ends)
   mediaStream.getVideoTracks().forEach((t) => {
     t.addEventListener('ended', () => {
       console.log('Video track ended, auto-stopping recorder');
       if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-        console.log('Auto-stop: MediaRecorder state:', mediaRecorder.state);
-        // Request any remaining data before auto-stopping
         if (mediaRecorder.state === 'recording') {
           mediaRecorder.requestData();
         }
@@ -133,10 +144,14 @@ function cleanup() {
   try {
     mediaStream?.getTracks().forEach((t) => t.stop());
   } catch {}
+  try {
+    micStream?.getTracks().forEach((t) => t.stop());
+  } catch {}
   mediaStream = null;
   mediaRecorder = null;
   chunks = [];
   currentId = null;
+  micStream = null;
 }
 
 async function stopCapture() {
@@ -155,7 +170,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type === 'OFFSCREEN_START') {
       try {
         console.log('OFFSCREEN: Received START message:', message);
-        await startCapture(message.mode, message.recordingId);
+        await startCapture(message.mode, message.recordingId, message.includeAudio);
         console.log('OFFSCREEN: startCapture completed successfully');
         sendResponse({ ok: true });
       } catch (e) {

@@ -10,11 +10,21 @@
       button { padding: 8px 10px; font-size: 14px; border-radius: 8px; border: 1px solid #ddd; cursor: pointer; }
       button.primary { background: #1a73e8; color: #fff; border: none; }
       .recording { color: #d93025; font-weight: 600; }
+      .option { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #444; }
+      .option input[type="checkbox"] { width: 16px; height: 16px; }
     </style>
   </head>
   <body>
     <h1>CaptureCast</h1>
     <div id="idle-ui" class="mode">
+      <div class="option">
+        <input type="checkbox" id="mic-toggle" />
+        <label for="mic-toggle">Include microphone</label>
+      </div>
+      <div class="option">
+        <input type="checkbox" id="sys-toggle" />
+        <label for="sys-toggle">Include system/tab audio</label>
+      </div>
       <button id="btn-tab" class="primary">Record This Tab</button>
       <button id="btn-window">Record Application Window</button>
       <button id="btn-screen">Record Entire Screen</button>
