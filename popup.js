@@ -28,8 +28,6 @@ async function stop() {
 (async () => {
   const state = await getState();
   setUi(state.recording);
-  document.getElementById('btn-tab').addEventListener('click', () => start('tab'));
-  document.getElementById('btn-window').addEventListener('click', () => start('window'));
-  document.getElementById('btn-screen').addEventListener('click', () => start('screen'));
+  document.getElementById('btn-tab').addEventListener('click', start);
   document.getElementById('btn-stop').addEventListener('click', stop);
 })();
