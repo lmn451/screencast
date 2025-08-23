@@ -3,14 +3,25 @@
   "name": "CaptureCast",
   "description": "Simple, privacy-focused screen recording: This Tab, Window, or Entire Screen.",
   "version": "0.2.0",
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
   "action": {
     "default_title": "CaptureCast",
-    "default_popup": "popup.html"
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png",
+      "128": "icons/icon-128.png"
+    }
   },
   "permissions": [
     "activeTab",
     "scripting",
-    "tabCapture",
     "offscreen",
     "tabs"
   ],
