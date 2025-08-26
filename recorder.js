@@ -55,7 +55,9 @@ async function start() {
     stopBtn.classList.remove('hidden');
 
     // Setup MediaRecorder
-    let options = { mimeType: 'video/webm;codecs=vp9,opus' };
+    let options = { mimeType: 'video/webm;codecs=av01,opus' };
+    if (!MediaRecorder.isTypeSupported(options.mimeType)) options.mimeType = 'video/webm;codecs=av1,opus';
+    if (!MediaRecorder.isTypeSupported(options.mimeType)) options.mimeType = 'video/webm;codecs=vp9,opus';
     if (!MediaRecorder.isTypeSupported(options.mimeType)) options.mimeType = 'video/webm;codecs=vp8,opus';
     if (!MediaRecorder.isTypeSupported(options.mimeType)) options.mimeType = 'video/webm';
 
