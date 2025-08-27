@@ -36,6 +36,17 @@ async function start() {
       audio: wantSys ? { echoCancellation: false, noiseSuppression: false, autoGainControl: false } : false,
     });
 
+    // Hint encoders: screen/text detail and system audio type
+    try {
+      const vtrack = displayStream.getVideoTracks?.()[0];
+      if (vtrack && 'contentHint' in vtrack) vtrack.contentHint = 'detail';
+      if (wantSys) {
+        for (const atrack of displayStream.getAudioTracks?.() || []) {
+          if ('contentHint' in atrack) atrack.contentHint = 'music';
+        }
+      }
+    } catch {}
+
     let micStream = null;
     if (wantMic) {
       try {
@@ -44,6 +55,11 @@ async function start() {
           audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
           video: false,
         });
+        // Hint encoder: speech for microphone
+        try {
+          const micTrack = micStream?.getAudioTracks?.()[0];
+          if (micTrack && 'contentHint' in micTrack) micTrack.contentHint = 'speech';
+        } catch {}
       } catch (e) {
         console.warn('RECORDER: Mic request failed, proceeding without mic', e);
       }

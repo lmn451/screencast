@@ -42,6 +42,16 @@ async function startCapture(mode, recordingId, includeAudio) {
   try {
     console.log('OFFSCREEN: Requesting display media with audio:', includeAudio);
     const displayStream = await navigator.mediaDevices.getDisplayMedia(getConstraintsFromMode(mode, includeAudio));
+    // Hint encoders: screen/text detail and system audio type
+    try {
+      const vtrack = displayStream.getVideoTracks?.()[0];
+      if (vtrack && 'contentHint' in vtrack) vtrack.contentHint = 'detail';
+      if (includeAudio) {
+        for (const atrack of displayStream.getAudioTracks?.() || []) {
+          if ('contentHint' in atrack) atrack.contentHint = 'music';
+        }
+      }
+    } catch {}
     console.log('OFFSCREEN: Got display stream:', {
       id: displayStream.id,
       active: displayStream.active,
