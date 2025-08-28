@@ -137,6 +137,17 @@ async function startRecording(mode, includeMic, includeSystemAudio) {
 
 async function stopRecording() {
   if (!STATE.recording) return { ok: false, error: 'Not recording' };
+
+  // Best-effort immediate overlay removal to avoid it lingering if final data is delayed
+  try {
+    if (STATE.overlayTabId) {
+      // Ask the overlay to remove itself (works if the script is still alive)
+      try { await chrome.tabs.sendMessage(STATE.overlayTabId, { type: 'OVERLAY_REMOVE' }); } catch (e) {}
+      // Also attempt DOM removal via scripting (in case listener isn't present)
+      await removeOverlay(STATE.overlayTabId);
+    }
+  } catch (e) {}
+
   if (STATE.strategy === 'page') {
     await chrome.runtime.sendMessage({ type: 'RECORDER_STOP' });
   } else {

@@ -27,6 +27,15 @@
     chrome.runtime.sendMessage({ type: 'STOP' });
   });
 
+  // Allow background to request removal explicitly (extra safety)
+  try {
+    chrome.runtime.onMessage.addListener((msg) => {
+      if (msg && msg.type === 'OVERLAY_REMOVE') {
+        try { root.remove(); } catch {}
+      }
+    });
+  } catch {}
+
   root.appendChild(btn);
   document.documentElement.appendChild(root);
 })();
