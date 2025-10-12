@@ -1,7 +1,7 @@
 // CaptureCast background service worker (MV3)
 // Manages offscreen document, recording state, overlay injection, and preview handoff
 
-const STATE = {
+let STATE = {
   recording: false,
   mode: null, // 'tab' | 'screen' | 'window'
   recordingId: null,
@@ -11,6 +11,18 @@ const STATE = {
   recorderTabId: null,
   strategy: null, // 'offscreen' | 'page'
 };
+
+const initialState = { ...STATE };
+
+async function saveState() {
+  await chrome.storage.local.set({ recordingState: STATE });
+}
+
+async function clearState() {
+  Object.assign(STATE, initialState);
+  await chrome.storage.local.remove('recordingState');
+}
+
 
 // Temporary in-memory store for large blobs keyed by recordingId
 const recordingStore = new Map();
@@ -132,6 +144,7 @@ async function startRecording(mode, includeMic, includeSystemAudio) {
 
   STATE.recording = true;
   await setBadgeRecording(true);
+  await saveState();
   return { ok: true };
 }
 
@@ -149,9 +162,27 @@ async function stopRecording() {
   } catch (e) {}
 
   if (STATE.strategy === 'page') {
-    await chrome.runtime.sendMessage({ type: 'RECORDER_STOP' });
+    try {
+      await chrome.runtime.sendMessage({ type: 'RECORDER_STOP' });
+    } catch (e) {
+      console.warn('Failed to send RECORDER_STOP, likely tab was closed', e);
+      // Manually clear state if recorder is gone
+      await setBadgeRecording(false);
+      if (STATE.recorderTabId) {
+        try { await chrome.tabs.remove(STATE.recorderTabId); } catch (e) {}
+      }
+      await clearState();
+    }
   } else {
-    await chrome.runtime.sendMessage({ type: 'OFFSCREEN_STOP' });
+    try {
+      await chrome.runtime.sendMessage({ type: 'OFFSCREEN_STOP' });
+    } catch (e) {
+      console.warn('Failed to send OFFSCREEN_STOP, likely document was closed', e);
+      // Manually clear state if offscreen is gone
+      await setBadgeRecording(false);
+      await clearState();
+      await closeOffscreenDocumentIfIdle();
+    }
   }
   return { ok: true };
 }
@@ -194,12 +225,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         await setBadgeRecording(false);
         const tabId = STATE.overlayTabId;
         if (tabId) await removeOverlay(tabId);
-        STATE.recording = false;
-        STATE.mode = null;
-        STATE.overlayTabId = null;
-        STATE.includeMic = false;
-        STATE.includeSystemAudio = false;
-        STATE.strategy = null;
+        await clearState();
+
 
         // Open preview page and pass the id in URL
         const url = chrome.runtime.getURL(`preview.html?id=${encodeURIComponent(recordingId)}`);
@@ -225,13 +252,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (STATE.recorderTabId) {
           try { await chrome.tabs.remove(STATE.recorderTabId); } catch (e) {}
         }
-        STATE.recording = false;
-        STATE.mode = null;
-        STATE.overlayTabId = null;
-        STATE.includeMic = false;
-        STATE.includeSystemAudio = false;
-        STATE.recorderTabId = null;
-        STATE.strategy = null;
+        await clearState();
+
 
         const url = chrome.runtime.getURL(`preview.html?id=${encodeURIComponent(recordingId)}`);
         await chrome.tabs.create({ url });
@@ -284,3 +306,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 chrome.runtime.onInstalled.addListener(async () => {
   await setBadgeRecording(false);
 });
+
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  if (
+    STATE.recording &&
+    STATE.mode === 'tab' &&
+    tabId === STATE.overlayTabId &&
+    changeInfo.status === 'complete'
+  ) {
+    await injectOverlay(tabId);
+  }
+});
+
+// Restore state on startup
+(async () => {
+  const { recordingState } = await chrome.storage.local.get('recordingState');
+  if (recordingState) {
+    Object.assign(STATE, recordingState);
+  }
+})();
