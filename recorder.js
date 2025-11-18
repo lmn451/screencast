@@ -1,3 +1,5 @@
+import { saveRecording } from './db.js';
+
 function getQueryParam(name) {
   const url = new URL(location.href);
   return url.searchParams.get(name);
@@ -80,17 +82,24 @@ async function start() {
     mediaRecorder = new MediaRecorder(mediaStream, options);
     mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
     mediaRecorder.onstop = async () => {
-      const blob = new Blob(chunks, { type: mediaRecorder.mimeType || 'video/webm' });
-      const arrayBuffer = await blob.arrayBuffer();
-      const uint8Array = new Uint8Array(arrayBuffer);
-      const dataArray = Array.from(uint8Array);
-      await chrome.runtime.sendMessage({
-        type: 'RECORDER_DATA',
-        recordingId,
-        dataArray,
-        mimeType: blob.type,
-      });
-      window.close();
+      try {
+        const blob = new Blob(chunks, { type: mediaRecorder.mimeType || 'video/webm' });
+
+        // Save to IndexedDB
+        await saveRecording(recordingId, blob, blob.type);
+        console.log('RECORDER: Saved recording to DB');
+
+        await chrome.runtime.sendMessage({
+          type: 'RECORDER_DATA',
+          recordingId,
+          mimeType: blob.type,
+        });
+      } finally {
+        try {
+          mediaStream?.getTracks().forEach((t) => t.stop());
+        } catch (e) {}
+        window.close();
+      }
     };
 
     mediaRecorder.start(100);

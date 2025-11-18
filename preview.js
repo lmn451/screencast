@@ -1,3 +1,5 @@
+import { getRecording } from './db.js';
+
 function getQueryParam(name) {
   const url = new URL(location.href);
   return url.searchParams.get(name);
@@ -138,6 +140,11 @@ export function fixDurationAndReset(video, opts = {}) {
 if (typeof window !== 'undefined' && window.location.search.includes('test')) {
   window.__TEST__ = window.__TEST__ || {};
   window.__TEST__.fixDurationAndReset = fixDurationAndReset;
+  // Expose DB helpers for tests
+  import('./db.js').then(db => {
+    window.__TEST__.saveRecording = db.saveRecording;
+    window.__TEST__.getRecording = db.getRecording;
+  });
 }
 
 (async () => {
@@ -154,48 +161,36 @@ if (typeof window !== 'undefined' && window.location.search.includes('test')) {
       document.body.textContent = 'Missing recording id';
       return;
     }
-    const res = await chrome.runtime.sendMessage({ type: 'PREVIEW_READY', recordingId: id });
-    console.log('Preview: PREVIEW_READY response:', {
-      ok: res?.ok,
-      error: res?.error,
-      dataArraySize: res?.dataArray?.length || 0,
-      mimeType: res?.mimeType
-    });
-    
-    if (!res?.ok) {
-      document.body.textContent = res?.error || 'Failed to load recording';
+
+    // Load from DB
+    try {
+      const record = await getRecording(id);
+      if (!record || !record.blob) {
+        throw new Error('Recording not found in DB');
+      }
+      blob = record.blob;
+      mimeType = record.mimeType;
+      console.log('Preview: Loaded from DB:', blob.size, 'bytes');
+    } catch (e) {
+      console.error('Preview: Failed to load from DB:', e);
+      document.body.textContent = 'Failed to load recording: ' + e.message;
       return;
     }
-    
-    // Validate and convert dataArray back to ArrayBuffer
-    const { dataArray } = res;
-    mimeType = res.mimeType;
-    if (!Array.isArray(dataArray) || dataArray.length === 0) {
-      console.error('Preview: Missing or empty dataArray in response');
-      document.body.textContent = 'Recording data missing or empty.';
-      return;
-    }
-    const uint8Array = new Uint8Array(dataArray);
-    const arrayBuffer = uint8Array.buffer.slice(uint8Array.byteOffset, uint8Array.byteOffset + uint8Array.byteLength);
-    console.log('Preview: Converted dataArray to ArrayBuffer, size:', arrayBuffer.byteLength);
-    console.log('Preview: Creating blob from arrayBuffer:', arrayBuffer.byteLength, 'bytes');
-    blob = new Blob([arrayBuffer], { type: mimeType || 'video/webm' });
-    console.log('Preview: Created blob:', blob.size, 'bytes, type:', blob.type);
   }
-  
+
   const url = URL.createObjectURL(blob);
   const video = document.getElementById('video');
   video.src = url;
   // Start hidden until normalized to avoid visible jump
   if (video.dataset) video.dataset.stable = 'false';
-  
+
   // Important: Do NOT revoke the URL immediately; the video element may request ranges during playback.
   // Revoke on page unload to avoid net::ERR_FILE_NOT_FOUND and truncated playback.
-  
+
   const startNormalization = () => {
     fixDurationAndReset(video, { timeoutMs: 2000 });
   };
-  
+
   video.onloadedmetadata = () => {
     console.log('Preview: Video metadata loaded:', { duration: video.duration, mimeType });
     startNormalization();
@@ -218,7 +213,10 @@ if (typeof window !== 'undefined' && window.location.search.includes('test')) {
 
   document.getElementById('btn-download').addEventListener('click', () => {
     const ts = new Date().toISOString().replace(/[:.]/g, '-');
-    const ext = (mimeType || 'video/webm').includes('webm') ? 'webm' : 'webm';
+    const mt = mimeType || 'video/webm';
+    let ext = 'webm';
+    if (mt.includes('mp4')) ext = 'mp4';
+    else if (mt.includes('webm')) ext = 'webm';
     const filename = `CaptureCast-${ts}.${ext}`;
     console.log('Preview: Downloading file:', filename, 'Size:', blob.size, 'bytes');
     saveFile(blob, filename);

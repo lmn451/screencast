@@ -1,3 +1,5 @@
+import { saveRecording } from './db.js';
+
 // Offscreen document script to handle getDisplayMedia + MediaRecorder
 
 console.log('OFFSCREEN: Document loaded and script executing');
@@ -18,10 +20,10 @@ let mediaRecorder = null;
 let chunks = [];
 let currentId = null;
 let recordingStartTime = null;
-let micStream = null;
 
 function getConstraintsFromMode(mode, includeAudio) {
-
+  // For now, mode is informative only; actual selection (tab/window/screen)
+  // is performed by the browser's picker. Constraints can diverge by mode later.
   return {
     video: true,
     audio: includeAudio ? {
@@ -112,7 +114,6 @@ async function startCapture(mode, recordingId, includeAudio) {
     console.error('MediaRecorder error:', e);
   };
   mediaRecorder.onstop = async () => {
-    const elapsed = Date.now() - recordingStartTime;
     console.log(`MediaRecorder stopped after ${elapsed}ms. Total chunks:`, chunks.length, 'Total size:', chunks.reduce((sum, chunk) => sum + chunk.size, 0), 'bytes');
     try {
       // Request a final chunk before creating blob
@@ -121,20 +122,16 @@ async function startCapture(mode, recordingId, includeAudio) {
       }
       const blob = new Blob(chunks, { type: mediaRecorder.mimeType || 'video/webm' });
       console.log('Created blob:', blob.size, 'bytes, type:', blob.type);
-      const arrayBuffer = await blob.arrayBuffer();
+
+      // Save to IndexedDB
+      await saveRecording(currentId, blob, blob.type);
+      console.log('OFFSCREEN: Saved recording to DB');
 
       // Send data to background script
       try {
-        // Convert ArrayBuffer to Array for transfer (Chrome extensions can't transfer ArrayBuffers directly)
-        const uint8Array = new Uint8Array(arrayBuffer);
-        const dataArray = Array.from(uint8Array);
-
-        console.log('OFFSCREEN: Converting ArrayBuffer to Array for transfer, size:', dataArray.length);
-
         const response = await chrome.runtime.sendMessage({
           type: 'OFFSCREEN_DATA',
           recordingId: currentId,
-          dataArray,
           mimeType: blob.type
         });
         console.log('OFFSCREEN_DATA response:', response);
@@ -157,14 +154,10 @@ function cleanup() {
   try {
     mediaStream?.getTracks().forEach((t) => t.stop());
   } catch {}
-  try {
-    micStream?.getTracks().forEach((t) => t.stop());
-  } catch {}
   mediaStream = null;
   mediaRecorder = null;
   chunks = [];
   currentId = null;
-  micStream = null;
 }
 
 async function stopCapture() {
