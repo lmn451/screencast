@@ -273,6 +273,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ ok: true });
         break;
       }
+      case 'OFFSCREEN_ERROR': {
+        console.error('Background received OFFSCREEN_ERROR:', message.error);
+        // We can't easily alert from background, but we can ensure we don't hang
+        STATE.recording = false;
+        await setBadgeRecording(false);
+        break;
+      }
       case 'GET_STATE': {
         sendResponse({ ...STATE });
         break;

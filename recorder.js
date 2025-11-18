@@ -86,8 +86,14 @@ async function start() {
         const blob = new Blob(chunks, { type: mediaRecorder.mimeType || 'video/webm' });
 
         // Save to IndexedDB
-        await saveRecording(recordingId, blob, blob.type);
-        console.log('RECORDER: Saved recording to DB');
+        try {
+          await saveRecording(recordingId, blob, blob.type);
+          console.log('RECORDER: Saved recording to DB');
+        } catch (dbError) {
+          console.error('RECORDER: Failed to save to DB:', dbError);
+          alert('Failed to save recording: ' + dbError.message);
+          return;
+        }
 
         await chrome.runtime.sendMessage({
           type: 'RECORDER_DATA',

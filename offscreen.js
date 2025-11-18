@@ -13,6 +13,16 @@ console.log('OFFSCREEN: Document loaded and script executing');
   } catch (error) {
     console.error('OFFSCREEN: Test message failed:', error);
   }
+
+  // Test DB access
+  try {
+    console.log('OFFSCREEN: Testing IndexedDB access...');
+    const request = indexedDB.open('TestDB', 1);
+    request.onerror = () => console.error('OFFSCREEN: IndexedDB open failed:', request.error);
+    request.onsuccess = () => console.log('OFFSCREEN: IndexedDB open success');
+  } catch (e) {
+    console.error('OFFSCREEN: IndexedDB threw error:', e);
+  }
 })();
 
 let mediaStream = null;
@@ -114,6 +124,7 @@ async function startCapture(mode, recordingId, includeAudio) {
     console.error('MediaRecorder error:', e);
   };
   mediaRecorder.onstop = async () => {
+    const elapsed = Date.now() - recordingStartTime;
     console.log(`MediaRecorder stopped after ${elapsed}ms. Total chunks:`, chunks.length, 'Total size:', chunks.reduce((sum, chunk) => sum + chunk.size, 0), 'bytes');
     try {
       // Request a final chunk before creating blob
@@ -124,8 +135,18 @@ async function startCapture(mode, recordingId, includeAudio) {
       console.log('Created blob:', blob.size, 'bytes, type:', blob.type);
 
       // Save to IndexedDB
-      await saveRecording(currentId, blob, blob.type);
-      console.log('OFFSCREEN: Saved recording to DB');
+      try {
+        await saveRecording(currentId, blob, blob.type);
+        console.log('OFFSCREEN: Saved recording to DB');
+      } catch (dbError) {
+        console.error('OFFSCREEN: Failed to save to DB:', dbError);
+        // Try to send error to background so it can alert the user
+        chrome.runtime.sendMessage({
+          type: 'OFFSCREEN_ERROR',
+          error: 'Failed to save recording: ' + dbError.message
+        });
+        throw dbError; // Re-throw to stop execution
+      }
 
       // Send data to background script
       try {
