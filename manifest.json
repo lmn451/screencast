@@ -23,7 +23,8 @@
     "activeTab",
     "scripting",
     "offscreen",
-    "tabs"
+    "tabs",
+    "storage"
   ],
   "background": {
     "service_worker": "background.js",
