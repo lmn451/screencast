@@ -6,7 +6,7 @@ CaptureCast is a browser extension that records your screen locally in your brow
 
 Information Collection and Use
 - CaptureCast does not collect, transmit, or store any personal data on external servers.
-- All processing happens locally in your browser. Your recordings are kept in-memory only for the duration of the session and are downloaded directly to your device when you choose to save them.
+- All processing happens locally in your browser. Your recordings are stored temporarily in your browser's IndexedDB until you download them or delete them. You can delete recordings at any time from the preview page.
 
 Permissions
 - The extension requests only the minimum permissions necessary to function (activeTab, scripting, offscreen, tabs) in order to start/stop recordings, display a small in-page Stop button, and open a preview page.
