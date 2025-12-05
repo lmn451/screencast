@@ -24,7 +24,22 @@
     cursor: 'pointer',
   });
   btn.addEventListener('click', () => {
-    chrome.runtime.sendMessage({ type: 'STOP' });
+    // Prevent multiple clicks and provide visual feedback
+    btn.disabled = true;
+    btn.textContent = 'Saving...';
+    btn.style.opacity = '0.7';
+    btn.style.cursor = 'not-allowed';
+    
+    chrome.runtime.sendMessage({ type: 'STOP' }, (response) => {
+      if (!response?.ok) {
+        // Re-enable on error
+        btn.disabled = false;
+        btn.textContent = 'Stop (Retry)';
+        btn.style.opacity = '1';
+        btn.style.cursor = 'pointer';
+      }
+      // On success, overlay will be removed anyway
+    });
   });
 
   // Allow background to request removal explicitly (extra safety)
