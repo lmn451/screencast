@@ -211,7 +211,8 @@ if (typeof window !== 'undefined' && window.location.search.includes('test')) {
     console.error('Preview: Video failed to load:', e);
   };
 
-  document.getElementById('btn-download').addEventListener('click', () => {
+  const downloadBtn = document.getElementById('btn-download');
+  downloadBtn.addEventListener('click', () => {
     const ts = new Date().toISOString().replace(/[:.]/g, '-');
     const mt = mimeType || 'video/webm';
     let ext = 'webm';
@@ -221,4 +222,22 @@ if (typeof window !== 'undefined' && window.location.search.includes('test')) {
     console.log('Preview: Downloading file:', filename, 'Size:', blob.size, 'bytes');
     saveFile(blob, filename);
   });
+
+  // Add cleanup button
+  const deleteBtn = document.createElement('button');
+  deleteBtn.textContent = 'Delete Recording';
+  deleteBtn.style.background = '#d93025';
+  deleteBtn.style.color = '#fff';
+  deleteBtn.style.border = 'none';
+  deleteBtn.addEventListener('click', async () => {
+    if (!confirm('Delete this recording? This cannot be undone.')) return;
+    try {
+      const { deleteRecording } = await import('./db.js');
+      await deleteRecording(id);
+      document.body.innerHTML = '<h1>Recording Deleted</h1><p>You can close this tab.</p>';
+    } catch (e) {
+      alert('Failed to delete recording: ' + e.message);
+    }
+  });
+  document.querySelector('.actions').appendChild(deleteBtn);
 })();
