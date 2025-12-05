@@ -47,14 +47,16 @@ async function ensureOffscreenDocument() {
 }
 
 async function closeOffscreenDocumentIfIdle() {
-  // Optional: Could close when not recording to save resources
   try {
     if (!canUseOffscreen()) return;
     const existing = await chrome.offscreen.hasDocument?.();
     if (existing && !STATE.recording) {
+      console.log('BACKGROUND: Closing idle offscreen document to free resources');
       await chrome.offscreen.closeDocument?.();
     }
-  } catch (e) {}
+  } catch (e) {
+    console.warn('BACKGROUND: Failed to close offscreen document:', e);
+  }
 }
 
 async function injectOverlay(tabId) {
@@ -63,8 +65,10 @@ async function injectOverlay(tabId) {
       target: { tabId },
       files: ['overlay.js']
     });
+    return true;
   } catch (e) {
-    console.warn('Overlay injection failed', e);
+    console.warn('Overlay injection failed (may be restricted page like chrome:// or extension pages)', e);
+    return false;
   }
 }
 
@@ -126,13 +130,14 @@ async function startRecording(mode, includeMic, includeSystemAudio) {
   }
 
   // Best-effort overlay on the active tab
+  let overlayInjected = false;
   if (STATE.overlayTabId) {
-    await injectOverlay(STATE.overlayTabId);
+    overlayInjected = await injectOverlay(STATE.overlayTabId);
   }
 
   STATE.recording = true;
   await setBadgeRecording(true);
-  return { ok: true };
+  return { ok: true, overlayInjected };
 }
 
 async function stopRecording() {
@@ -148,41 +153,71 @@ async function stopRecording() {
     }
   } catch (e) {}
 
+  // Cancel any existing timeout
   if (STATE.stopTimeoutId) {
     clearTimeout(STATE.stopTimeoutId);
     STATE.stopTimeoutId = null;
   }
 
+  // Set a safety timeout to reset state if data never arrives
   STATE.stopTimeoutId = setTimeout(async () => {
-    try {
-      await setBadgeRecording(false);
-    } catch (e) {}
-    try {
-      if (STATE.overlayTabId) {
-        await removeOverlay(STATE.overlayTabId);
-      }
-    } catch (e) {}
-    STATE.recording = false;
-    STATE.mode = null;
-    STATE.overlayTabId = null;
-    STATE.includeMic = false;
-    STATE.includeSystemAudio = false;
-    STATE.recorderTabId = null;
-    STATE.strategy = null;
-    STATE.recordingId = null;
-    STATE.stopTimeoutId = null;
+    console.warn('BACKGROUND: Stop timeout reached - recording may have failed to save properly');
+    await resetRecordingState();
   }, 10_000);
 
-  if (STATE.strategy === 'page') {
-    await chrome.runtime.sendMessage({ type: 'RECORDER_STOP' });
-  } else {
-    await chrome.runtime.sendMessage({ type: 'OFFSCREEN_STOP' });
+  // Send stop message to recorder/offscreen
+  try {
+    if (STATE.strategy === 'page') {
+      await chrome.runtime.sendMessage({ type: 'RECORDER_STOP' });
+    } else {
+      await chrome.runtime.sendMessage({ type: 'OFFSCREEN_STOP' });
+    }
+  } catch (e) {
+    console.error('BACKGROUND: Failed to send stop message:', e);
+    // If we can't send stop message, still clean up state
+    clearTimeout(STATE.stopTimeoutId);
+    STATE.stopTimeoutId = null;
+    await resetRecordingState();
+    return { ok: false, error: 'Failed to stop recording: ' + e.message };
   }
   return { ok: true };
 }
 
+async function resetRecordingState() {
+  try {
+    await setBadgeRecording(false);
+  } catch (e) {}
+  try {
+    if (STATE.overlayTabId) {
+      await removeOverlay(STATE.overlayTabId);
+    }
+  } catch (e) {}
+  try {
+    if (STATE.recorderTabId) {
+      await chrome.tabs.remove(STATE.recorderTabId);
+    }
+  } catch (e) {}
+  
+  STATE.recording = false;
+  STATE.mode = null;
+  STATE.overlayTabId = null;
+  STATE.includeMic = false;
+  STATE.includeSystemAudio = false;
+  STATE.recorderTabId = null;
+  STATE.strategy = null;
+  STATE.recordingId = null;
+  STATE.stopTimeoutId = null;
+}
+
 // Handle messages from popup, overlay, offscreen, and preview
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // Validate message sender for security
+  if (sender.id !== chrome.runtime.id) {
+    console.warn('BACKGROUND: Ignoring message from unauthorized sender:', sender.id);
+    sendResponse({ ok: false, error: 'Unauthorized sender' });
+    return;
+  }
+  
   (async () => {
     try {
       switch (message.type) {
@@ -212,17 +247,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
 
         // Reset state
-        await setBadgeRecording(false);
-        const tabId = STATE.overlayTabId;
-        if (tabId) await removeOverlay(tabId);
-        STATE.recording = false;
-        STATE.mode = null;
-        STATE.overlayTabId = null;
-        STATE.includeMic = false;
-        STATE.includeSystemAudio = false;
-        STATE.strategy = null;
-        STATE.recorderTabId = null;
-        STATE.recordingId = null;
+        await resetRecordingState();
 
         // Open preview page and pass the id in URL
         const url = chrome.runtime.getURL(`preview.html?id=${encodeURIComponent(recordingId)}`);
@@ -241,20 +266,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           STATE.stopTimeoutId = null;
         }
 
-        await setBadgeRecording(false);
-        const tabId = STATE.overlayTabId;
-        if (tabId) await removeOverlay(tabId);
-        if (STATE.recorderTabId) {
-          try { await chrome.tabs.remove(STATE.recorderTabId); } catch (e) {}
-        }
-        STATE.recording = false;
-        STATE.mode = null;
-        STATE.overlayTabId = null;
-        STATE.includeMic = false;
-        STATE.includeSystemAudio = false;
-        STATE.recorderTabId = null;
-        STATE.strategy = null;
-        STATE.recordingId = null;
+        await resetRecordingState();
 
         const url = chrome.runtime.getURL(`preview.html?id=${encodeURIComponent(recordingId)}`);
         await chrome.tabs.create({ url });
@@ -276,8 +288,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case 'OFFSCREEN_ERROR': {
         console.error('Background received OFFSCREEN_ERROR:', message.error);
         // We can't easily alert from background, but we can ensure we don't hang
-        STATE.recording = false;
-        await setBadgeRecording(false);
+        if (STATE.stopTimeoutId) {
+          clearTimeout(STATE.stopTimeoutId);
+          STATE.stopTimeoutId = null;
+        }
+        await resetRecordingState();
+        sendResponse({ ok: false, error: message.error });
         break;
       }
       case 'GET_STATE': {
