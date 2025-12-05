@@ -103,6 +103,10 @@ async function startCapture(mode, recordingId, includeAudio) {
   if (!MediaRecorder.isTypeSupported(options.mimeType)) {
     options.mimeType = 'video/webm';
   }
+  
+  if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+    throw new Error('No supported video codec found. Your browser may not support video recording.');
+  }
 
   mediaRecorder = new MediaRecorder(mediaStream, options);
 
@@ -165,7 +169,11 @@ async function startCapture(mode, recordingId, includeAudio) {
   };
   mediaRecorder.start(100); // gather in smaller chunks more frequently
   console.log('MediaRecorder started with state:', mediaRecorder.state, 'mimeType:', mediaRecorder.mimeType);
-  await chrome.runtime.sendMessage({ type: 'OFFSCREEN_STARTED' });
+  try {
+    await chrome.runtime.sendMessage({ type: 'OFFSCREEN_STARTED' });
+  } catch (e) {
+    console.warn('OFFSCREEN: Failed to send OFFSCREEN_STARTED message, continuing anyway', e);
+  }
 }
 
 function cleanup() {

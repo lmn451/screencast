@@ -20,7 +20,8 @@ function combineStreams({ displayStream, micStream }) {
 }
 
 async function start() {
-  const mode = getQueryParam('mode') || 'tab';
+  const modeParam = getQueryParam('mode');
+  const mode = ['tab', 'window', 'screen'].includes(modeParam) ? modeParam : 'tab';
   recordingId = getQueryParam('id');
   const wantMic = getQueryParam('mic') === '1';
   const wantSys = getQueryParam('sys') === '1';
@@ -78,6 +79,10 @@ async function start() {
     if (!MediaRecorder.isTypeSupported(options.mimeType)) options.mimeType = 'video/webm;codecs=vp9,opus';
     if (!MediaRecorder.isTypeSupported(options.mimeType)) options.mimeType = 'video/webm;codecs=vp8,opus';
     if (!MediaRecorder.isTypeSupported(options.mimeType)) options.mimeType = 'video/webm';
+    
+    if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+      throw new Error('No supported video codec found. Your browser may not support video recording.');
+    }
 
     mediaRecorder = new MediaRecorder(mediaStream, options);
     mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
@@ -109,7 +114,11 @@ async function start() {
     };
 
     mediaRecorder.start(100);
-    await chrome.runtime.sendMessage({ type: 'RECORDER_STARTED' });
+    try {
+      await chrome.runtime.sendMessage({ type: 'RECORDER_STARTED' });
+    } catch (e) {
+      console.warn('RECORDER: Failed to send RECORDER_STARTED message, continuing anyway', e);
+    }
     status.textContent = 'Recording…';
     stopBtn.focus();
 
