@@ -1,7 +1,11 @@
 import { cleanupOldRecordings } from './db.js';
+import { createLogger } from './logger.js';
+import { STOP_TIMEOUT_MS, AUTO_DELETE_AGE_MS } from './constants.js';
 
 // CaptureCast background service worker (MV3)
 // Manages offscreen document, recording state, overlay injection, and preview handoff
+
+const logger = createLogger('Background');
 
 const STATE = {
   status: 'IDLE', // 'IDLE' | 'RECORDING' | 'SAVING'
@@ -43,16 +47,16 @@ async function ensureOffscreenDocument() {
     throw new Error('Offscreen API is not available; cannot create offscreen document.');
   }
   const existing = await chrome.offscreen.hasDocument?.();
-  console.log('Background: Checking offscreen document, existing:', existing);
+  logger.log('Checking offscreen document, existing:', existing);
   if (existing) return;
 
-  console.log('Background: Creating offscreen document');
+  logger.log('Creating offscreen document');
   await chrome.offscreen.createDocument({
     url: chrome.runtime.getURL('offscreen.html'),
     reasons: ['USER_MEDIA', 'BLOBS'],
     justification: 'Record a screen capture stream using MediaRecorder in an offscreen document.'
   });
-  console.log('Background: Offscreen document created');
+  logger.log('Offscreen document created');
 }
 
 async function closeOffscreenDocumentIfIdle() {
@@ -60,11 +64,11 @@ async function closeOffscreenDocumentIfIdle() {
     if (!canUseOffscreen()) return;
     const existing = await chrome.offscreen.hasDocument?.();
     if (existing && STATE.status === 'IDLE') {
-      console.log('BACKGROUND: Closing idle offscreen document to free resources');
+      logger.log('Closing idle offscreen document to free resources');
       await chrome.offscreen.closeDocument?.();
     }
   } catch (e) {
-    console.warn('BACKGROUND: Failed to close offscreen document:', e);
+    logger.warn('Failed to close offscreen document:', e);
   }
 }
 
@@ -76,7 +80,7 @@ async function injectOverlay(tabId) {
     });
     return true;
   } catch (e) {
-    console.warn('Overlay injection failed (may be restricted page like chrome:// or extension pages)', e);
+    logger.log('Overlay injection failed (may be restricted page):', e.message);
     return false;
   }
 }
@@ -170,9 +174,9 @@ async function stopRecording() {
   // Set a safety timeout (very long) just in case the offscreen/recorder crashes completely
   if (STATE.stopTimeoutId) clearTimeout(STATE.stopTimeoutId);
   STATE.stopTimeoutId = setTimeout(async () => {
-    console.error('BACKGROUND: Save timeout reached (300s) - forcing reset');
+    logger.error(`Save timeout reached (${STOP_TIMEOUT_MS / 1000}s) - forcing reset`);
     await resetRecordingState();
-  }, 300_000); // 5 minutes safety net
+  }, STOP_TIMEOUT_MS);
 
   // Send stop message to recorder/offscreen
   try {
@@ -182,7 +186,7 @@ async function stopRecording() {
       await chrome.runtime.sendMessage({ type: 'OFFSCREEN_STOP' });
     }
   } catch (e) {
-    console.error('BACKGROUND: Failed to send stop message:', e);
+    logger.error('Failed to send stop message:', e);
     // If we can't send stop message, we might be stuck.
     // But we stay in SAVING state until the timeout or user manual intervention (if we added that).
     // For now, let the timeout handle the worst case.
@@ -224,7 +228,7 @@ async function resetRecordingState() {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // Validate message sender for security
   if (sender.id !== chrome.runtime.id) {
-    console.warn('BACKGROUND: Ignoring message from unauthorized sender:', sender.id);
+    logger.warn('Ignoring message from unauthorized sender:', sender.id);
     sendResponse({ ok: false, error: 'Unauthorized sender' });
     return;
   }
@@ -250,7 +254,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case 'OFFSCREEN_DATA': {
         // Receive notification that data is saved in DB
         const { recordingId } = message;
-        console.log('Background received OFFSCREEN_DATA:', { recordingId });
+        logger.log('Received OFFSCREEN_DATA:', { recordingId });
 
         // Reset state
         await resetRecordingState();
@@ -265,7 +269,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case 'RECORDER_DATA': {
         // Receive notification that data is saved in DB
         const { recordingId } = message;
-        console.log('Background received RECORDER_DATA:', { recordingId });
+        logger.log('Received RECORDER_DATA:', { recordingId });
 
         await resetRecordingState();
 
@@ -287,7 +291,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
       }
       case 'OFFSCREEN_ERROR': {
-        console.error('Background received OFFSCREEN_ERROR:', message.error);
+        logger.error('Received OFFSCREEN_ERROR:', message.error);
         await resetRecordingState();
         sendResponse({ ok: false, error: message.error });
         break;
@@ -302,18 +306,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
       }
       case 'OFFSCREEN_TEST': {
-        console.log('Background: Received OFFSCREEN_TEST message');
+        logger.log('Received OFFSCREEN_TEST message');
         sendResponse({ ok: true, message: 'Test successful' });
         break;
       }
       default: {
         // Unknown message
-        console.log('Background: Unknown message type:', message.type);
+        logger.log('Unknown message type:', message.type);
         sendResponse({ ok: false, error: 'Unknown message' });
       }
     }
     } catch (e) {
-      console.error('Background: Error handling message', message.type, e);
+      logger.error('Error handling message', message.type, e);
       try {
         sendResponse({ ok: false, error: String(e) });
       } catch (e2) {}
@@ -325,19 +329,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 // Clean badge on install/update and run cleanup
 chrome.runtime.onInstalled.addListener(async () => {
   await updateBadge();
-  // Cleanup recordings older than 24 hours
+  // Cleanup recordings older than configured age
   try {
-    await cleanupOldRecordings(24 * 60 * 60 * 1000);
+    await cleanupOldRecordings(AUTO_DELETE_AGE_MS);
   } catch (e) {
-    console.error('BACKGROUND: Cleanup failed:', e);
+    logger.error('Cleanup failed:', e);
   }
 });
 
 // Also run cleanup on startup
 chrome.runtime.onStartup.addListener(async () => {
   try {
-    await cleanupOldRecordings(24 * 60 * 60 * 1000);
+    await cleanupOldRecordings(AUTO_DELETE_AGE_MS);
   } catch (e) {
-    console.error('BACKGROUND: Cleanup failed:', e);
+    logger.error('Cleanup failed:', e);
   }
 });

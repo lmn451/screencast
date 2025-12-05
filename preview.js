@@ -1,4 +1,8 @@
 import { getRecording } from './db.js';
+import { createLogger } from './logger.js';
+import { DURATION_FIX_TIMEOUT_MS, SEEK_POSITION_LARGE } from './constants.js';
+
+const logger = createLogger('Preview');
 
 function getQueryParam(name) {
   const url = new URL(location.href);
@@ -20,7 +24,7 @@ function saveFile(blob, filename) {
 
 // Exported function to normalize duration and avoid jumpy preview
 export function fixDurationAndReset(video, opts = {}) {
-  const { timeoutMs = 2000 } = opts;
+  const { timeoutMs = DURATION_FIX_TIMEOUT_MS } = opts;
   if (!video) return;
 
   // If metadata not loaded yet, wait and retry
@@ -114,7 +118,9 @@ export function fixDurationAndReset(video, opts = {}) {
   }, timeoutMs);
 
   // Large seek with fallback to seekable end
-  const BIG = Number.MAX_SAFE_INTEGER / 2;
+  // Seeking to a very large time forces the browser to parse the entire WebM file
+  // and calculate the actual duration. We use MAX_SAFE_INTEGER/2 to avoid overflow.
+  const BIG = SEEK_POSITION_LARGE;
   let sought = false;
   try {
     record('seek-large');
@@ -154,7 +160,7 @@ if (typeof window !== 'undefined' && window.location.search.includes('test')) {
   let mimeType;
 
   if (window.__TEST_BLOB__) {
-    console.log('Preview: Using injected __TEST_BLOB__ for video source');
+    logger.log('Using injected __TEST_BLOB__ for video source');
     blob = window.__TEST_BLOB__;
     mimeType = blob.type || 'video/webm';
   } else {
@@ -171,9 +177,9 @@ if (typeof window !== 'undefined' && window.location.search.includes('test')) {
       }
       blob = record.blob;
       mimeType = record.mimeType;
-      console.log('Preview: Loaded from DB:', blob.size, 'bytes');
+      logger.log('Loaded from DB:', blob.size, 'bytes');
     } catch (e) {
-      console.error('Preview: Failed to load from DB:', e);
+      logger.error('Failed to load from DB:', e);
       document.body.textContent = 'Failed to load recording: ' + e.message;
       return;
     }
@@ -193,14 +199,18 @@ if (typeof window !== 'undefined' && window.location.search.includes('test')) {
   };
 
   video.onloadedmetadata = () => {
-    console.log('Preview: Video metadata loaded:', { duration: video.duration, mimeType });
+    logger.log('Video metadata loaded:', { duration: video.duration, mimeType });
     startNormalization();
   };
   // Reset to start if browser fires ended immediately after load
   const onEndedReset = () => {
-    try { video.currentTime = 0; } catch {}
-    try { video.pause(); } catch {}
-    console.log('Preview: Ended event caught, reset to start');
+    try { video.currentTime = 0; } catch (e) {
+      logger.log('Error resetting video (non-fatal):', e);
+    }
+    try { video.pause(); } catch (e) {
+      logger.log('Error pausing video (non-fatal):', e);
+    }
+    logger.log('Ended event caught, reset to start');
   };
   video.addEventListener('ended', onEndedReset);
 
@@ -209,7 +219,7 @@ if (typeof window !== 'undefined' && window.location.search.includes('test')) {
 
   window.addEventListener('beforeunload', () => URL.revokeObjectURL(url));
   video.onerror = (e) => {
-    console.error('Preview: Video failed to load:', e);
+    logger.error('Video failed to load:', e);
   };
 
   const downloadBtn = document.getElementById('btn-download');
@@ -220,7 +230,7 @@ if (typeof window !== 'undefined' && window.location.search.includes('test')) {
     if (mt.includes('mp4')) ext = 'mp4';
     else if (mt.includes('webm')) ext = 'webm';
     const filename = `CaptureCast-${ts}.${ext}`;
-    console.log('Preview: Downloading file:', filename, 'Size:', blob.size, 'bytes');
+    logger.log('Downloading file:', filename, 'Size:', blob.size, 'bytes');
     saveFile(blob, filename);
   });
 

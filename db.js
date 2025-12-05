@@ -1,5 +1,5 @@
 const DB_NAME = 'CaptureCastDB';
-const DB_VERSION = 2; // Bump version for schema change
+const DB_VERSION = 3; // Bump version for proper migration
 const STORE_RECORDINGS = 'recordings';
 const STORE_CHUNKS = 'chunks';
 
@@ -10,20 +10,34 @@ function openDB() {
     request.onsuccess = () => resolve(request.result);
     request.onupgradeneeded = (event) => {
       const db = event.target.result;
-      // Clear old stores if they exist to avoid migration complexity for this fix
-      if (db.objectStoreNames.contains('recordings')) {
-        db.deleteObjectStore('recordings');
-      }
-      if (db.objectStoreNames.contains(STORE_CHUNKS)) {
-        db.deleteObjectStore(STORE_CHUNKS);
+      const oldVersion = event.oldVersion;
+      const transaction = event.target.transaction;
+
+      // Migration path from v0/v1 to v3 (chunked storage)
+      if (oldVersion < 2) {
+        // Migrating from v0 or v1 (non-chunked) to v2+ (chunked)
+        // Unfortunately, we need to drop old data as the schema is fundamentally different
+        // Future note: When making schema changes, always try to preserve user data
+        if (db.objectStoreNames.contains('recordings')) {
+          db.deleteObjectStore('recordings');
+        }
       }
 
-      // Store for metadata
-      db.createObjectStore(STORE_RECORDINGS, { keyPath: 'id' });
+      // Migration from v2 to v3 (preserve chunked data, just ensure indexes exist)
+      if (oldVersion === 2) {
+        // No changes needed, schema is compatible
+        // This version bump is just to mark the "proper migration" version
+      }
 
-      // Store for binary chunks: [recordingId, chunkIndex]
-      const chunkStore = db.createObjectStore(STORE_CHUNKS, { keyPath: ['recordingId', 'index'] });
-      chunkStore.createIndex('recordingId', 'recordingId', { unique: false });
+      // Create stores if they don't exist
+      if (!db.objectStoreNames.contains(STORE_RECORDINGS)) {
+        db.createObjectStore(STORE_RECORDINGS, { keyPath: 'id' });
+      }
+
+      if (!db.objectStoreNames.contains(STORE_CHUNKS)) {
+        const chunkStore = db.createObjectStore(STORE_CHUNKS, { keyPath: ['recordingId', 'index'] });
+        chunkStore.createIndex('recordingId', 'recordingId', { unique: false });
+      }
     };
   });
 }
@@ -197,7 +211,9 @@ export async function cleanupOldRecordings(maxAgeMs = 24 * 60 * 60 * 1000) {
 
     tx.oncomplete = () => {
       db.close();
-      console.log(`Cleanup: Deleted ${idsToDelete.length} old recordings`);
+      if (idsToDelete.length > 0) {
+        console.log(`[CaptureCast DB] Cleanup: Deleted ${idsToDelete.length} old recordings`);
+      }
       resolve();
     };
     tx.onerror = () => {

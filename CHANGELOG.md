@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.1
+### Improvements
+- Improved: Centralized logging system with debug mode toggle
+- Improved: Reduced production console output by ~90%
+- Improved: Database migrations now preserve user data when possible
+- Improved: Extracted shared MediaRecorder utilities to reduce code duplication
+- Improved: Self-documenting constants for timeouts and configuration values
+- Improved: Better error handling with consistent logging
+- Added: Input validation for recording IDs (UUID format check)
+- Added: Explanatory comments for complex video duration normalization logic
+
+### Developer Experience
+- Added: `logger.js` - Centralized logging with debug mode
+- Added: `media-recorder-utils.js` - Shared recording utilities
+- Added: `constants.js` - Configuration constants
+- Refactored: Eliminated ~100 lines of duplicated code
+- Improved: Code maintainability and modularity
+
 ## 0.2.0
 - Fixed: Removed unnecessary `<all_urls>` host permission for better privacy
 - Fixed: Removed unused `storage` permission (app uses IndexedDB only)

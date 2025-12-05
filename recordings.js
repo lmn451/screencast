@@ -1,5 +1,7 @@
 import { getAllRecordings, deleteRecording } from './db.js';
+import { createLogger } from './logger.js';
 
+const logger = createLogger('Recordings');
 const listEl = document.getElementById('list');
 
 function formatDate(ts) {
@@ -84,7 +86,7 @@ async function render() {
     });
   } catch (e) {
     listEl.innerHTML = `<div class="empty">Error loading recordings: ${e.message}</div>`;
-    console.error(e);
+    logger.error('Failed to load recordings:', e);
   }
 }
 

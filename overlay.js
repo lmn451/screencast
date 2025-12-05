@@ -1,4 +1,9 @@
 // Injected overlay with a Stop button. Minimal footprint, avoids interfering with page.
+// Note: Cannot import modules in content script, so inline logging is minimal
+
+// Constants (duplicated from constants.js since content scripts can't import modules easily)
+const ERROR_DISPLAY_DURATION_MS = 2000;
+
 (function () {
   if (document.getElementById('cc-overlay')) return;
   const root = document.createElement('div');
@@ -33,25 +38,26 @@
     try {
       const response = await chrome.runtime.sendMessage({ type: 'STOP' });
       if (!response || !response.ok) {
-         console.error('Stop failed:', response?.error);
+         // Only log errors in overlay
+         console.error('[CaptureCast Overlay] Stop failed:', response?.error);
          btn.textContent = 'Error!';
          setTimeout(() => {
            btn.disabled = false;
-           btn.textContent = 'Stop'; // Changed from 'Stop Sharing' to 'Stop' to match initial state
+           btn.textContent = 'Stop';
            btn.style.cursor = 'pointer';
            btn.style.opacity = '1';
-         }, 2000);
+         }, ERROR_DISPLAY_DURATION_MS);
       }
       // On success, overlay will be removed anyway
     } catch (e) {
-      console.error('Failed to send stop message:', e);
+      console.error('[CaptureCast Overlay] Failed to send stop message:', e);
       btn.textContent = 'Error!';
       setTimeout(() => {
         btn.disabled = false;
-        btn.textContent = 'Stop'; // Changed from 'Stop Sharing' to 'Stop' to match initial state
+        btn.textContent = 'Stop';
         btn.style.cursor = 'pointer';
         btn.style.opacity = '1';
-      }, 2000);
+      }, ERROR_DISPLAY_DURATION_MS);
     }
   });
 

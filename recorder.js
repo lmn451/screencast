@@ -1,33 +1,34 @@
-import { saveChunk, finishRecording } from './db.js';
+import { finishRecording } from './db.js';
+import { createLogger } from './logger.js';
+import {
+  createMediaRecorder,
+  applyContentHints,
+  combineStreams,
+  setupAutoStop,
+  CHUNK_INTERVAL_MS
+} from './media-recorder-utils.js';
+
+const logger = createLogger('Recorder');
 
 function getQueryParam(name) {
   const url = new URL(location.href);
   return url.searchParams.get(name);
 }
 
+// Validate UUID format for security
+function isValidUUID(str) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str);
+}
+
 let mediaStream = null;
 let mediaRecorder = null;
 let recordingId = null;
-let chunkIndex = 0;
-let totalSize = 0;
-let recordingStartTime = 0;
-
-function combineStreams({ displayStream, micStream }) {
-  const tracks = [
-    ...displayStream.getVideoTracks(),
-    ...displayStream.getAudioTracks(),
-    ...(micStream ? micStream.getAudioTracks() : []),
-  ];
-  return new MediaStream(tracks);
-}
 
 async function start() {
   const mode = getQueryParam('mode') || 'tab';
   recordingId = getQueryParam('id');
   const wantMic = getQueryParam('mic') === '1';
   const wantSys = getQueryParam('sys') === '1';
-  chunkIndex = 0;
-  totalSize = 0;
 
   const status = document.getElementById('status');
   const preview = document.getElementById('preview');
@@ -35,6 +36,11 @@ async function start() {
   const stopBtn = document.getElementById('stop');
 
   try {
+    // Validate recording ID
+    if (!recordingId || !isValidUUID(recordingId)) {
+      throw new Error('Invalid recording ID');
+    }
+
     status.textContent = 'Requesting screen capture…';
     startBtn.classList.add('hidden');
     const displayStream = await navigator.mediaDevices.getDisplayMedia({
@@ -42,16 +48,8 @@ async function start() {
       audio: wantSys ? { echoCancellation: false, noiseSuppression: false, autoGainControl: false } : false,
     });
 
-    // Hint encoders: screen/text detail and system audio type
-    try {
-      const vtrack = displayStream.getVideoTracks?.()[0];
-      if (vtrack && 'contentHint' in vtrack) vtrack.contentHint = 'detail';
-      if (wantSys) {
-        for (const atrack of displayStream.getAudioTracks?.() || []) {
-          if ('contentHint' in atrack) atrack.contentHint = 'music';
-        }
-      }
-    } catch {}
+    // Apply content hints for encoder optimization
+    applyContentHints(displayStream, { hasSystemAudio: wantSys });
 
     let micStream = null;
     if (wantMic) {
@@ -61,13 +59,10 @@ async function start() {
           audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
           video: false,
         });
-        // Hint encoder: speech for microphone
-        try {
-          const micTrack = micStream?.getAudioTracks?.()[0];
-          if (micTrack && 'contentHint' in micTrack) micTrack.contentHint = 'speech';
-        } catch {}
+        // Apply content hints for encoder optimization
+        applyContentHints(micStream, { hasMicrophone: true });
       } catch (e) {
-        console.warn('RECORDER: Mic request failed, proceeding without mic', e);
+        logger.warn('Mic request failed, proceeding without mic:', e);
       }
     }
 
@@ -76,79 +71,57 @@ async function start() {
     preview.classList.remove('hidden');
     stopBtn.classList.remove('hidden');
 
-    // Setup MediaRecorder
-    let options = { mimeType: 'video/webm;codecs=av01,opus' };
-    if (!MediaRecorder.isTypeSupported(options.mimeType)) options.mimeType = 'video/webm;codecs=av1,opus';
-    if (!MediaRecorder.isTypeSupported(options.mimeType)) options.mimeType = 'video/webm;codecs=vp9,opus';
-    if (!MediaRecorder.isTypeSupported(options.mimeType)) options.mimeType = 'video/webm;codecs=vp8,opus';
-    if (!MediaRecorder.isTypeSupported(options.mimeType)) options.mimeType = 'video/webm';
-
-    if (!MediaRecorder.isTypeSupported(options.mimeType)) {
-      throw new Error('No supported video codec found. Your browser may not support video recording.');
-    }
-
-    mediaRecorder = new MediaRecorder(mediaStream, options);
-    mediaRecorder.ondataavailable = async (e) => {
-      if (e.data && e.data.size > 0) {
+    // Create recorder with standard handlers
+    const { recorder } = createMediaRecorder(mediaStream, recordingId, {
+      onStart: () => {
+        logger.log('Recording started');
+      },
+      onStop: async (mimeType, duration, totalSize) => {
         try {
-          totalSize += e.data.size;
-          await saveChunk(recordingId, e.data, chunkIndex++);
-        } catch (err) {
-          console.error('RECORDER: Failed to save chunk', err);
-        }
-      }
-    };
-    mediaRecorder.onstop = async () => {
-      try {
-        const mimeType = mediaRecorder.mimeType || 'video/webm';
-        const duration = Date.now() - recordingStartTime;
-
-        // Finish recording in DB
-        try {
+          // Finish recording in DB
           await finishRecording(recordingId, mimeType, duration, totalSize);
-          console.log('RECORDER: Finished recording in DB');
+          logger.log('Finished recording in DB');
+
+          await chrome.runtime.sendMessage({
+            type: 'RECORDER_DATA',
+            recordingId,
+            mimeType,
+          });
         } catch (dbError) {
-          console.error('RECORDER: Failed to finish recording in DB:', dbError);
+          logger.error('Failed to finish recording in DB:', dbError);
           alert('Failed to save recording: ' + dbError.message);
           return;
+        } finally {
+          try {
+            mediaStream?.getTracks().forEach((t) => t.stop());
+          } catch (e) {
+            logger.log('Error stopping tracks (non-fatal):', e);
+          }
+          window.close();
         }
-
-        await chrome.runtime.sendMessage({
-          type: 'RECORDER_DATA',
-          recordingId,
-          mimeType,
-        });
-      } finally {
-        try {
-          mediaStream?.getTracks().forEach((t) => t.stop());
-        } catch (e) {}
-        window.close();
+      },
+      onError: (e) => {
+        logger.error('MediaRecorder error:', e);
       }
-    };
+    });
 
-    mediaRecorder.start(1000);
-    recordingStartTime = Date.now();
+    mediaRecorder = recorder;
+
+    // Auto-stop when screen sharing ends
+    setupAutoStop(mediaStream, mediaRecorder);
+
+    mediaRecorder.start(CHUNK_INTERVAL_MS);
     try {
       await chrome.runtime.sendMessage({ type: 'RECORDER_STARTED' });
     } catch (e) {
-      console.warn('RECORDER: Failed to send RECORDER_STARTED message, continuing anyway', e);
+      logger.warn('Failed to send RECORDER_STARTED message, continuing anyway:', e);
     }
     status.textContent = 'Recording…';
     stopBtn.focus();
-
-    // Auto-stop when screen sharing ends
-    mediaStream.getVideoTracks().forEach((t) => {
-      t.addEventListener('ended', () => {
-        if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-          if (mediaRecorder.state === 'recording') mediaRecorder.requestData();
-          mediaRecorder.stop();
-        }
-      });
-    });
   } catch (e) {
     const details = e && typeof e === 'object' ? `${e.name || 'DOMException'}: ${e.message || e}` : String(e);
     status.textContent = 'Failed to start: ' + details + '. Ensure this tab is focused and click Start again.';
-    console.error('RECORDER: start failed', { name: e?.name, message: e?.message, toString: e?.toString?.() });
+    logger.error('start failed:', { name: e?.name, message: e?.message, toString: e?.toString?.() });
     startBtn.classList.remove('hidden');
   }
 }
