@@ -1,4 +1,4 @@
-import { saveRecording } from './db.js';
+import { saveChunk, finishRecording } from './db.js';
 
 function getQueryParam(name) {
   const url = new URL(location.href);
@@ -7,8 +7,8 @@ function getQueryParam(name) {
 
 let mediaStream = null;
 let mediaRecorder = null;
-let chunks = [];
 let recordingId = null;
+let chunkIndex = 0;
 
 function combineStreams({ displayStream, micStream }) {
   const tracks = [
@@ -20,11 +20,11 @@ function combineStreams({ displayStream, micStream }) {
 }
 
 async function start() {
-  const modeParam = getQueryParam('mode');
-  const mode = ['tab', 'window', 'screen'].includes(modeParam) ? modeParam : 'tab';
+  const mode = getQueryParam('mode') || 'tab';
   recordingId = getQueryParam('id');
   const wantMic = getQueryParam('mic') === '1';
   const wantSys = getQueryParam('sys') === '1';
+  chunkIndex = 0;
 
   const status = document.getElementById('status');
   const preview = document.getElementById('preview');
@@ -79,23 +79,31 @@ async function start() {
     if (!MediaRecorder.isTypeSupported(options.mimeType)) options.mimeType = 'video/webm;codecs=vp9,opus';
     if (!MediaRecorder.isTypeSupported(options.mimeType)) options.mimeType = 'video/webm;codecs=vp8,opus';
     if (!MediaRecorder.isTypeSupported(options.mimeType)) options.mimeType = 'video/webm';
-    
+
     if (!MediaRecorder.isTypeSupported(options.mimeType)) {
       throw new Error('No supported video codec found. Your browser may not support video recording.');
     }
 
     mediaRecorder = new MediaRecorder(mediaStream, options);
-    mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
+    mediaRecorder.ondataavailable = async (e) => {
+      if (e.data && e.data.size > 0) {
+        try {
+          await saveChunk(recordingId, e.data, chunkIndex++);
+        } catch (err) {
+          console.error('RECORDER: Failed to save chunk', err);
+        }
+      }
+    };
     mediaRecorder.onstop = async () => {
       try {
-        const blob = new Blob(chunks, { type: mediaRecorder.mimeType || 'video/webm' });
+        const mimeType = mediaRecorder.mimeType || 'video/webm';
 
-        // Save to IndexedDB
+        // Finish recording in DB
         try {
-          await saveRecording(recordingId, blob, blob.type);
-          console.log('RECORDER: Saved recording to DB');
+          await finishRecording(recordingId, mimeType);
+          console.log('RECORDER: Finished recording in DB');
         } catch (dbError) {
-          console.error('RECORDER: Failed to save to DB:', dbError);
+          console.error('RECORDER: Failed to finish recording in DB:', dbError);
           alert('Failed to save recording: ' + dbError.message);
           return;
         }
@@ -103,7 +111,7 @@ async function start() {
         await chrome.runtime.sendMessage({
           type: 'RECORDER_DATA',
           recordingId,
-          mimeType: blob.type,
+          mimeType,
         });
       } finally {
         try {
@@ -113,7 +121,7 @@ async function start() {
       }
     };
 
-    mediaRecorder.start(100);
+    mediaRecorder.start(1000);
     try {
       await chrome.runtime.sendMessage({ type: 'RECORDER_STARTED' });
     } catch (e) {

@@ -52,7 +52,7 @@ test.beforeEach(async ({ context }) => {
   if (!serviceWorker) {
     serviceWorker = await context.waitForEvent('serviceworker');
   }
-  await serviceWorker.evaluate(() => new Promise((resolve) => chrome.storage.local.clear(() => resolve(null))));
+  // chrome.storage.local.clear removed as permission is revoked
 });
 
 test.describe('Stop feature (offscreen strategy) without code changes', () => {
@@ -77,10 +77,20 @@ test.describe('Stop feature (offscreen strategy) without code changes', () => {
     // Save to IDB using the exposed helper in preview.js (controlPage is preview.html?test=1)
     await controlPage.evaluate(async ({ recordingId, generated }) => {
       // Wait for dynamic import of db.js to finish
-      while (!window.__TEST__?.saveRecording) await new Promise(r => setTimeout(r, 50));
+      while (!window.__TEST__?.saveChunk) await new Promise(r => setTimeout(r, 50));
 
       const blob = new Blob([new Uint8Array(generated.bytes)], { type: generated.type });
-      await window.__TEST__.saveRecording(recordingId, blob, generated.type);
+      // Chunk it
+      const chunkSize = 1024 * 1024; // 1MB chunks
+      const totalChunks = Math.ceil(blob.size / chunkSize);
+
+      for (let i = 0; i < totalChunks; i++) {
+        const start = i * chunkSize;
+        const end = Math.min(start + chunkSize, blob.size);
+        const chunk = blob.slice(start, end);
+        await window.__TEST__.saveChunk(recordingId, chunk, i);
+      }
+      await window.__TEST__.finishRecording(recordingId, generated.type);
     }, { recordingId, generated });
 
     const sendDataRes = await controlPage.evaluate(({ recordingId }) => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'OFFSCREEN_DATA', recordingId, mimeType: 'video/webm' }, resolve)), { recordingId });
@@ -123,9 +133,20 @@ test.describe('Stop feature (offscreen strategy) without code changes', () => {
 
     // Save to IDB
     await controlPage.evaluate(async ({ recordingId, generated }) => {
-      while (!window.__TEST__?.saveRecording) await new Promise(r => setTimeout(r, 50));
+      while (!window.__TEST__?.saveChunk) await new Promise(r => setTimeout(r, 50));
+
       const blob = new Blob([new Uint8Array(generated.bytes)], { type: generated.type });
-      await window.__TEST__.saveRecording(recordingId, blob, generated.type);
+      // Chunk it
+      const chunkSize = 1024 * 1024; // 1MB chunks
+      const totalChunks = Math.ceil(blob.size / chunkSize);
+
+      for (let i = 0; i < totalChunks; i++) {
+        const start = i * chunkSize;
+        const end = Math.min(start + chunkSize, blob.size);
+        const chunk = blob.slice(start, end);
+        await window.__TEST__.saveChunk(recordingId, chunk, i);
+      }
+      await window.__TEST__.finishRecording(recordingId, generated.type);
     }, { recordingId, generated });
 
     const sendDataRes = await controlPage.evaluate(({ recordingId }) => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'OFFSCREEN_DATA', recordingId, mimeType: 'video/webm' }, resolve)), { recordingId });

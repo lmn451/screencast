@@ -23,23 +23,36 @@
     boxShadow: '0 2px 6px rgba(0,0,0,0.25)',
     cursor: 'pointer',
   });
-  btn.addEventListener('click', () => {
+  btn.addEventListener('click', async () => {
     // Prevent multiple clicks and provide visual feedback
     btn.disabled = true;
     btn.textContent = 'Saving...';
     btn.style.opacity = '0.7';
-    btn.style.cursor = 'not-allowed';
-    
-    chrome.runtime.sendMessage({ type: 'STOP' }, (response) => {
-      if (!response?.ok) {
-        // Re-enable on error
-        btn.disabled = false;
-        btn.textContent = 'Stop (Retry)';
-        btn.style.opacity = '1';
-        btn.style.cursor = 'pointer';
+    btn.style.cursor = 'wait';
+
+    try {
+      const response = await chrome.runtime.sendMessage({ type: 'STOP' });
+      if (!response || !response.ok) {
+         console.error('Stop failed:', response?.error);
+         btn.textContent = 'Error!';
+         setTimeout(() => {
+           btn.disabled = false;
+           btn.textContent = 'Stop'; // Changed from 'Stop Sharing' to 'Stop' to match initial state
+           btn.style.cursor = 'pointer';
+           btn.style.opacity = '1';
+         }, 2000);
       }
       // On success, overlay will be removed anyway
-    });
+    } catch (e) {
+      console.error('Failed to send stop message:', e);
+      btn.textContent = 'Error!';
+      setTimeout(() => {
+        btn.disabled = false;
+        btn.textContent = 'Stop'; // Changed from 'Stop Sharing' to 'Stop' to match initial state
+        btn.style.cursor = 'pointer';
+        btn.style.opacity = '1';
+      }, 2000);
+    }
   });
 
   // Allow background to request removal explicitly (extra safety)

@@ -1,8 +1,10 @@
+import { cleanupOldRecordings } from './db.js';
+
 // CaptureCast background service worker (MV3)
 // Manages offscreen document, recording state, overlay injection, and preview handoff
 
 const STATE = {
-  recording: false,
+  status: 'IDLE', // 'IDLE' | 'RECORDING' | 'SAVING'
   mode: null, // 'tab' | 'screen' | 'window'
   recordingId: null,
   overlayTabId: null,
@@ -13,15 +15,22 @@ const STATE = {
   stopTimeoutId: null,
 };
 
-// Temporary in-memory store removed in favor of IndexedDB
-
-
-async function setBadgeRecording(isRecording) {
+// Helper to update badge based on status
+async function updateBadge() {
   try {
-    await chrome.action.setBadgeBackgroundColor({ color: isRecording ? '#d93025' : '#00000000' });
-  } catch (e) {}
-  try {
-    await chrome.action.setBadgeText({ text: isRecording ? 'REC' : '' });
+    let color = '#00000000';
+    let text = '';
+
+    if (STATE.status === 'RECORDING') {
+      color = '#d93025';
+      text = 'REC';
+    } else if (STATE.status === 'SAVING') {
+      color = '#f9ab00';
+      text = 'SAVE';
+    }
+
+    await chrome.action.setBadgeBackgroundColor({ color });
+    await chrome.action.setBadgeText({ text });
   } catch (e) {}
 }
 
@@ -50,7 +59,7 @@ async function closeOffscreenDocumentIfIdle() {
   try {
     if (!canUseOffscreen()) return;
     const existing = await chrome.offscreen.hasDocument?.();
-    if (existing && !STATE.recording) {
+    if (existing && STATE.status === 'IDLE') {
       console.log('BACKGROUND: Closing idle offscreen document to free resources');
       await chrome.offscreen.closeDocument?.();
     }
@@ -100,7 +109,8 @@ async function focusTab(tabId) {
 }
 
 async function startRecording(mode, includeMic, includeSystemAudio) {
-  if (STATE.recording) return { ok: false, error: 'Already recording' };
+  if (STATE.status !== 'IDLE') return { ok: false, error: 'Already recording or saving' };
+
   STATE.mode = mode;
   STATE.recordingId = crypto.randomUUID();
   STATE.overlayTabId = await getActiveTabId();
@@ -135,15 +145,19 @@ async function startRecording(mode, includeMic, includeSystemAudio) {
     overlayInjected = await injectOverlay(STATE.overlayTabId);
   }
 
-  STATE.recording = true;
-  await setBadgeRecording(true);
+  STATE.status = 'RECORDING';
+  await updateBadge();
   return { ok: true, overlayInjected };
 }
 
 async function stopRecording() {
-  if (!STATE.recording) return { ok: false, error: 'Not recording' };
+  if (STATE.status !== 'RECORDING') return { ok: false, error: 'Not recording' };
 
-  // Best-effort immediate overlay removal to avoid it lingering if final data is delayed
+  // Transition to SAVING state immediately
+  STATE.status = 'SAVING';
+  await updateBadge();
+
+  // Best-effort immediate overlay removal to avoid it lingering
   try {
     if (STATE.overlayTabId) {
       // Ask the overlay to remove itself (works if the script is still alive)
@@ -153,23 +167,12 @@ async function stopRecording() {
     }
   } catch (e) {}
 
-  // Cancel any existing timeout
-  if (STATE.stopTimeoutId) {
-    clearTimeout(STATE.stopTimeoutId);
-    STATE.stopTimeoutId = null;
-  }
-
-  // Set a safety timeout to reset state if data never arrives
-  // Use longer timeout (60s) to account for large recordings being saved to IndexedDB
+  // Set a safety timeout (very long) just in case the offscreen/recorder crashes completely
+  if (STATE.stopTimeoutId) clearTimeout(STATE.stopTimeoutId);
   STATE.stopTimeoutId = setTimeout(async () => {
-    console.warn('BACKGROUND: Stop timeout reached (60s) - recording may have failed to save properly');
-    // Don't reset if we're still in the middle of the same recording
-    // This prevents race condition where timeout fires during legitimate save
-    if (STATE.recording && STATE.recordingId) {
-      console.error('BACKGROUND: Forcing state reset after timeout - recording may be lost');
-    }
+    console.error('BACKGROUND: Save timeout reached (300s) - forcing reset');
     await resetRecordingState();
-  }, 60_000);
+  }, 300_000); // 5 minutes safety net
 
   // Send stop message to recorder/offscreen
   try {
@@ -180,19 +183,23 @@ async function stopRecording() {
     }
   } catch (e) {
     console.error('BACKGROUND: Failed to send stop message:', e);
-    // If we can't send stop message, still clean up state
-    clearTimeout(STATE.stopTimeoutId);
-    STATE.stopTimeoutId = null;
-    await resetRecordingState();
-    return { ok: false, error: 'Failed to stop recording: ' + e.message };
+    // If we can't send stop message, we might be stuck.
+    // But we stay in SAVING state until the timeout or user manual intervention (if we added that).
+    // For now, let the timeout handle the worst case.
+    return { ok: false, error: 'Failed to send stop signal: ' + e.message };
   }
   return { ok: true };
 }
 
 async function resetRecordingState() {
-  try {
-    await setBadgeRecording(false);
-  } catch (e) {}
+  if (STATE.stopTimeoutId) {
+    clearTimeout(STATE.stopTimeoutId);
+    STATE.stopTimeoutId = null;
+  }
+
+  STATE.status = 'IDLE';
+  await updateBadge();
+
   try {
     if (STATE.overlayTabId) {
       await removeOverlay(STATE.overlayTabId);
@@ -203,8 +210,7 @@ async function resetRecordingState() {
       await chrome.tabs.remove(STATE.recorderTabId);
     }
   } catch (e) {}
-  
-  STATE.recording = false;
+
   STATE.mode = null;
   STATE.overlayTabId = null;
   STATE.includeMic = false;
@@ -212,7 +218,6 @@ async function resetRecordingState() {
   STATE.recorderTabId = null;
   STATE.strategy = null;
   STATE.recordingId = null;
-  STATE.stopTimeoutId = null;
 }
 
 // Handle messages from popup, overlay, offscreen, and preview
@@ -223,7 +228,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({ ok: false, error: 'Unauthorized sender' });
     return;
   }
-  
+
   (async () => {
     try {
       switch (message.type) {
@@ -247,11 +252,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const { recordingId } = message;
         console.log('Background received OFFSCREEN_DATA:', { recordingId });
 
-        if (STATE.stopTimeoutId) {
-          clearTimeout(STATE.stopTimeoutId);
-          STATE.stopTimeoutId = null;
-        }
-
         // Reset state
         await resetRecordingState();
 
@@ -266,11 +266,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         // Receive notification that data is saved in DB
         const { recordingId } = message;
         console.log('Background received RECORDER_DATA:', { recordingId });
-
-        if (STATE.stopTimeoutId) {
-          clearTimeout(STATE.stopTimeoutId);
-          STATE.stopTimeoutId = null;
-        }
 
         await resetRecordingState();
 
@@ -293,17 +288,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       case 'OFFSCREEN_ERROR': {
         console.error('Background received OFFSCREEN_ERROR:', message.error);
-        // We can't easily alert from background, but we can ensure we don't hang
-        if (STATE.stopTimeoutId) {
-          clearTimeout(STATE.stopTimeoutId);
-          STATE.stopTimeoutId = null;
-        }
         await resetRecordingState();
         sendResponse({ ok: false, error: message.error });
         break;
       }
       case 'GET_STATE': {
-        sendResponse({ ...STATE });
+        // Map internal status to boolean for backward compatibility with popup
+        const publicState = {
+          ...STATE,
+          recording: STATE.status === 'RECORDING' || STATE.status === 'SAVING'
+        };
+        sendResponse(publicState);
         break;
       }
       case 'OFFSCREEN_TEST': {
@@ -327,7 +322,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true; // Keep message channel open for async response
 });
 
-// Clean badge on install/update
+// Clean badge on install/update and run cleanup
 chrome.runtime.onInstalled.addListener(async () => {
-  await setBadgeRecording(false);
+  await updateBadge();
+  // Cleanup recordings older than 24 hours
+  try {
+    await cleanupOldRecordings(24 * 60 * 60 * 1000);
+  } catch (e) {
+    console.error('BACKGROUND: Cleanup failed:', e);
+  }
+});
+
+// Also run cleanup on startup
+chrome.runtime.onStartup.addListener(async () => {
+  try {
+    await cleanupOldRecordings(24 * 60 * 60 * 1000);
+  } catch (e) {
+    console.error('BACKGROUND: Cleanup failed:', e);
+  }
 });

@@ -1,4 +1,4 @@
-import { saveRecording } from './db.js';
+import { saveChunk, finishRecording } from './db.js';
 
 // Offscreen document script to handle getDisplayMedia + MediaRecorder
 
@@ -17,7 +17,7 @@ console.log('OFFSCREEN: Document loaded and script executing');
   // Test DB access
   try {
     console.log('OFFSCREEN: Testing IndexedDB access...');
-    const request = indexedDB.open('TestDB', 1);
+    const request = indexedDB.open('CaptureCastDB', 2); // Use correct DB name and version
     request.onerror = () => console.error('OFFSCREEN: IndexedDB open failed:', request.error);
     request.onsuccess = () => console.log('OFFSCREEN: IndexedDB open success');
   } catch (e) {
@@ -27,9 +27,9 @@ console.log('OFFSCREEN: Document loaded and script executing');
 
 let mediaStream = null;
 let mediaRecorder = null;
-let chunks = [];
 let currentId = null;
 let recordingStartTime = null;
+let chunkIndex = 0;
 
 function getConstraintsFromMode(mode, includeAudio) {
   // For now, mode is informative only; actual selection (tab/window/screen)
@@ -47,7 +47,7 @@ function getConstraintsFromMode(mode, includeAudio) {
 async function startCapture(mode, recordingId, includeAudio) {
   if (mediaRecorder) throw new Error('Already recording');
   currentId = recordingId;
-  chunks = [];
+  chunkIndex = 0;
 
   console.log('OFFSCREEN: Starting capture with mode:', mode, 'includeAudio:', includeAudio);
 
@@ -103,7 +103,7 @@ async function startCapture(mode, recordingId, includeAudio) {
   if (!MediaRecorder.isTypeSupported(options.mimeType)) {
     options.mimeType = 'video/webm';
   }
-  
+
   if (!MediaRecorder.isTypeSupported(options.mimeType)) {
     throw new Error('No supported video codec found. Your browser may not support video recording.');
   }
@@ -115,12 +115,16 @@ async function startCapture(mode, recordingId, includeAudio) {
     console.log('MediaRecorder onstart event fired');
   };
 
-  mediaRecorder.ondataavailable = (e) => {
+  mediaRecorder.ondataavailable = async (e) => {
     const elapsed = Date.now() - recordingStartTime;
-    console.log(`MediaRecorder data available at ${elapsed}ms:`, e.data?.size, 'bytes');
+    // console.log(`MediaRecorder data available at ${elapsed}ms:`, e.data?.size, 'bytes');
     if (e.data && e.data.size > 0) {
-      chunks.push(e.data);
-      console.log(`Added chunk ${chunks.length}, total chunks: ${chunks.length}`);
+      try {
+        await saveChunk(currentId, e.data, chunkIndex++);
+      } catch (err) {
+        console.error('OFFSCREEN: Failed to save chunk', err);
+        // We could stop recording here, but let's try to continue
+      }
     }
   };
 
@@ -129,27 +133,26 @@ async function startCapture(mode, recordingId, includeAudio) {
   };
   mediaRecorder.onstop = async () => {
     const elapsed = Date.now() - recordingStartTime;
-    console.log(`MediaRecorder stopped after ${elapsed}ms. Total chunks:`, chunks.length, 'Total size:', chunks.reduce((sum, chunk) => sum + chunk.size, 0), 'bytes');
+    console.log(`MediaRecorder stopped after ${elapsed}ms. Total chunks:`, chunkIndex);
     try {
       // Request a final chunk before creating blob
-      if (mediaRecorder.state === 'inactive' && chunks.length === 0) {
+      if (mediaRecorder.state === 'inactive' && chunkIndex === 0) {
         console.warn('No chunks recorded! This might indicate the recording was too short.');
       }
-      const blob = new Blob(chunks, { type: mediaRecorder.mimeType || 'video/webm' });
-      console.log('Created blob:', blob.size, 'bytes, type:', blob.type);
 
-      // Save to IndexedDB
+      const mimeType = mediaRecorder.mimeType || 'video/webm';
+
+      // Finish recording in DB
       try {
-        await saveRecording(currentId, blob, blob.type);
-        console.log('OFFSCREEN: Saved recording to DB');
+        await finishRecording(currentId, mimeType);
+        console.log('OFFSCREEN: Finished recording in DB');
       } catch (dbError) {
-        console.error('OFFSCREEN: Failed to save to DB:', dbError);
-        // Try to send error to background so it can alert the user
+        console.error('OFFSCREEN: Failed to finish recording in DB:', dbError);
         chrome.runtime.sendMessage({
           type: 'OFFSCREEN_ERROR',
           error: 'Failed to save recording: ' + dbError.message
         });
-        throw dbError; // Re-throw to stop execution
+        throw dbError;
       }
 
       // Send data to background script
@@ -157,7 +160,7 @@ async function startCapture(mode, recordingId, includeAudio) {
         const response = await chrome.runtime.sendMessage({
           type: 'OFFSCREEN_DATA',
           recordingId: currentId,
-          mimeType: blob.type
+          mimeType: mimeType
         });
         console.log('OFFSCREEN_DATA response:', response);
       } catch (error) {
@@ -167,13 +170,9 @@ async function startCapture(mode, recordingId, includeAudio) {
       cleanup();
     }
   };
-  mediaRecorder.start(100); // gather in smaller chunks more frequently
+  mediaRecorder.start(1000); // gather in 1s chunks (larger chunks are better for DB perf than 100ms)
   console.log('MediaRecorder started with state:', mediaRecorder.state, 'mimeType:', mediaRecorder.mimeType);
-  try {
-    await chrome.runtime.sendMessage({ type: 'OFFSCREEN_STARTED' });
-  } catch (e) {
-    console.warn('OFFSCREEN: Failed to send OFFSCREEN_STARTED message, continuing anyway', e);
-  }
+  await chrome.runtime.sendMessage({ type: 'OFFSCREEN_STARTED' });
 }
 
 function cleanup() {
@@ -185,8 +184,8 @@ function cleanup() {
   } catch {}
   mediaStream = null;
   mediaRecorder = null;
-  chunks = [];
   currentId = null;
+  chunkIndex = 0;
 }
 
 async function stopCapture() {

@@ -142,7 +142,8 @@ if (typeof window !== 'undefined' && window.location.search.includes('test')) {
   window.__TEST__.fixDurationAndReset = fixDurationAndReset;
   // Expose DB helpers for tests
   import('./db.js').then(db => {
-    window.__TEST__.saveRecording = db.saveRecording;
+    window.__TEST__.saveChunk = db.saveChunk;
+    window.__TEST__.finishRecording = db.finishRecording;
     window.__TEST__.getRecording = db.getRecording;
   });
 }
