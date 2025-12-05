@@ -4,9 +4,7 @@ These instructions show how to load this project as an unpacked browser extensio
 
 The folder you will select is the one that contains `manifest.json`.
 
-For this repository, that folder is:
-
-- /Users/applesucks/dev/sceencast
+For this repository, that folder is the root directory containing `manifest.json`
 
 If your build process outputs a different folder (e.g., `dist/` or `build/`), select that output folder instead.
 
