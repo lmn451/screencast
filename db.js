@@ -41,12 +41,12 @@ export async function saveChunk(recordingId, chunk, index) {
   });
 }
 
-export async function finishRecording(id, mimeType) {
+export async function finishRecording(id, mimeType, duration, size) {
   const db = await openDB();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_RECORDINGS, 'readwrite');
     const store = tx.objectStore(STORE_RECORDINGS);
-    const request = store.put({ id, mimeType, createdAt: Date.now() });
+    const request = store.put({ id, mimeType, duration, size, createdAt: Date.now() });
     request.onsuccess = () => resolve();
     request.onerror = () => reject(request.error);
     tx.oncomplete = () => db.close();
@@ -90,7 +90,25 @@ export async function getRecording(id) {
 
   // 3. Reassemble
   const blob = new Blob(chunks, { type: meta.mimeType });
-  return { id, blob, mimeType: meta.mimeType, createdAt: meta.createdAt };
+  return { id, blob, mimeType: meta.mimeType, createdAt: meta.createdAt, duration: meta.duration, size: meta.size };
+}
+
+export async function getAllRecordings() {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_RECORDINGS, 'readonly');
+    const store = tx.objectStore(STORE_RECORDINGS);
+    const request = store.getAll();
+    request.onsuccess = () => {
+      // Sort by createdAt desc
+      const results = request.result;
+      results.sort((a, b) => b.createdAt - a.createdAt);
+      resolve(results);
+    };
+    request.onerror = () => reject(request.error);
+    tx.oncomplete = () => db.close();
+    tx.onerror = () => db.close();
+  });
 }
 
 export async function deleteRecording(id) {

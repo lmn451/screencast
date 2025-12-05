@@ -30,6 +30,7 @@ let mediaRecorder = null;
 let currentId = null;
 let recordingStartTime = null;
 let chunkIndex = 0;
+let totalSize = 0;
 
 function getConstraintsFromMode(mode, includeAudio) {
   // For now, mode is informative only; actual selection (tab/window/screen)
@@ -48,6 +49,7 @@ async function startCapture(mode, recordingId, includeAudio) {
   if (mediaRecorder) throw new Error('Already recording');
   currentId = recordingId;
   chunkIndex = 0;
+  totalSize = 0;
 
   console.log('OFFSCREEN: Starting capture with mode:', mode, 'includeAudio:', includeAudio);
 
@@ -120,6 +122,7 @@ async function startCapture(mode, recordingId, includeAudio) {
     // console.log(`MediaRecorder data available at ${elapsed}ms:`, e.data?.size, 'bytes');
     if (e.data && e.data.size > 0) {
       try {
+        totalSize += e.data.size;
         await saveChunk(currentId, e.data, chunkIndex++);
       } catch (err) {
         console.error('OFFSCREEN: Failed to save chunk', err);
@@ -141,10 +144,11 @@ async function startCapture(mode, recordingId, includeAudio) {
       }
 
       const mimeType = mediaRecorder.mimeType || 'video/webm';
+      const duration = Date.now() - recordingStartTime;
 
       // Finish recording in DB
       try {
-        await finishRecording(currentId, mimeType);
+        await finishRecording(currentId, mimeType, duration, totalSize);
         console.log('OFFSCREEN: Finished recording in DB');
       } catch (dbError) {
         console.error('OFFSCREEN: Failed to finish recording in DB:', dbError);
@@ -186,6 +190,7 @@ function cleanup() {
   mediaRecorder = null;
   currentId = null;
   chunkIndex = 0;
+  totalSize = 0;
 }
 
 async function stopCapture() {

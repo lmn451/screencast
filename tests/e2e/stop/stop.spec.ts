@@ -90,7 +90,7 @@ test.describe('Stop feature (offscreen strategy) without code changes', () => {
         const chunk = blob.slice(start, end);
         await window.__TEST__.saveChunk(recordingId, chunk, i);
       }
-      await window.__TEST__.finishRecording(recordingId, generated.type);
+      await window.__TEST__.finishRecording(recordingId, generated.type, 1000, blob.size);
     }, { recordingId, generated });
 
     const sendDataRes = await controlPage.evaluate(({ recordingId }) => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'OFFSCREEN_DATA', recordingId, mimeType: 'video/webm' }, resolve)), { recordingId });

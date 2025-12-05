@@ -9,6 +9,8 @@ let mediaStream = null;
 let mediaRecorder = null;
 let recordingId = null;
 let chunkIndex = 0;
+let totalSize = 0;
+let recordingStartTime = 0;
 
 function combineStreams({ displayStream, micStream }) {
   const tracks = [
@@ -25,6 +27,7 @@ async function start() {
   const wantMic = getQueryParam('mic') === '1';
   const wantSys = getQueryParam('sys') === '1';
   chunkIndex = 0;
+  totalSize = 0;
 
   const status = document.getElementById('status');
   const preview = document.getElementById('preview');
@@ -88,6 +91,7 @@ async function start() {
     mediaRecorder.ondataavailable = async (e) => {
       if (e.data && e.data.size > 0) {
         try {
+          totalSize += e.data.size;
           await saveChunk(recordingId, e.data, chunkIndex++);
         } catch (err) {
           console.error('RECORDER: Failed to save chunk', err);
@@ -97,10 +101,11 @@ async function start() {
     mediaRecorder.onstop = async () => {
       try {
         const mimeType = mediaRecorder.mimeType || 'video/webm';
+        const duration = Date.now() - recordingStartTime;
 
         // Finish recording in DB
         try {
-          await finishRecording(recordingId, mimeType);
+          await finishRecording(recordingId, mimeType, duration, totalSize);
           console.log('RECORDER: Finished recording in DB');
         } catch (dbError) {
           console.error('RECORDER: Failed to finish recording in DB:', dbError);
@@ -122,6 +127,7 @@ async function start() {
     };
 
     mediaRecorder.start(1000);
+    recordingStartTime = Date.now();
     try {
       await chrome.runtime.sendMessage({ type: 'RECORDER_STARTED' });
     } catch (e) {

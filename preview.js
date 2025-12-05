@@ -241,4 +241,12 @@ if (typeof window !== 'undefined' && window.location.search.includes('test')) {
     }
   });
   document.querySelector('.actions').appendChild(deleteBtn);
+
+  const viewAllBtn = document.createElement('button');
+  viewAllBtn.textContent = 'View All Recordings';
+  viewAllBtn.style.marginLeft = '10px';
+  viewAllBtn.addEventListener('click', () => {
+    chrome.tabs.create({ url: 'recordings.html' });
+  });
+  document.querySelector('.actions').appendChild(viewAllBtn);
 })();

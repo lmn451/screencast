@@ -30,4 +30,7 @@ async function stop() {
   setUi(state.recording);
   document.getElementById('btn-tab').addEventListener('click', () => start('tab'));
   document.getElementById('btn-stop').addEventListener('click', stop);
+  document.getElementById('btn-view-recordings').addEventListener('click', () => {
+    chrome.tabs.create({ url: 'recordings.html' });
+  });
 })();
