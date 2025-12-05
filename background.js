@@ -160,10 +160,16 @@ async function stopRecording() {
   }
 
   // Set a safety timeout to reset state if data never arrives
+  // Use longer timeout (60s) to account for large recordings being saved to IndexedDB
   STATE.stopTimeoutId = setTimeout(async () => {
-    console.warn('BACKGROUND: Stop timeout reached - recording may have failed to save properly');
+    console.warn('BACKGROUND: Stop timeout reached (60s) - recording may have failed to save properly');
+    // Don't reset if we're still in the middle of the same recording
+    // This prevents race condition where timeout fires during legitimate save
+    if (STATE.recording && STATE.recordingId) {
+      console.error('BACKGROUND: Forcing state reset after timeout - recording may be lost');
+    }
     await resetRecordingState();
-  }, 10_000);
+  }, 60_000);
 
   // Send stop message to recorder/offscreen
   try {
