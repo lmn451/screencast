@@ -30,9 +30,9 @@
     "service_worker": "background.js",
     "type": "module"
   },
-  "host_permissions": [
-    "<all_urls>"
-  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  },
   "web_accessible_resources": [
     {
       "resources": [
