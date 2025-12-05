@@ -24,6 +24,8 @@ export async function saveRecording(id, blob, mimeType) {
     const request = store.put({ id, blob, mimeType, createdAt: Date.now() });
     request.onsuccess = () => resolve();
     request.onerror = () => reject(request.error);
+    tx.oncomplete = () => db.close();
+    tx.onerror = () => db.close();
   });
 }
 
@@ -35,6 +37,8 @@ export async function getRecording(id) {
     const request = store.get(id);
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
+    tx.oncomplete = () => db.close();
+    tx.onerror = () => db.close();
   });
 }
 
@@ -46,5 +50,7 @@ export async function deleteRecording(id) {
     const request = store.delete(id);
     request.onsuccess = () => resolve();
     request.onerror = () => reject(request.error);
+    tx.oncomplete = () => db.close();
+    tx.onerror = () => db.close();
   });
 }
