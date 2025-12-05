@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.2.0
+- Fixed: Removed unnecessary `<all_urls>` host permission for better privacy
+- Fixed: Database connections now properly closed after operations
+- Fixed: Improved error handling in recorder and offscreen documents
+- Fixed: Better race condition handling in stop recording flow
+- Fixed: Added validation for query parameters
+- Fixed: Added MIME type validation for MediaRecorder
+- Added: Security validation for message senders
+- Added: Delete recording button in preview page
+- Added: Content Security Policy for extension pages
+- Improved: Overlay injection now returns success status
+- Improved: Better cleanup of offscreen documents
+
 ## 0.1.0
 - Initial MVP release: Screen recording via offscreen document and MediaRecorder
 - Popup UI to start/stop
