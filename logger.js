@@ -1,7 +1,7 @@
 // Centralized logging utility for CaptureCast
 // In production, only warnings and errors are shown
 
-const DEBUG = false; // Set to true during development, false for production
+const DEBUG = true; // Set to true during development, false for production
 
 export const log = DEBUG ? console.log.bind(console) : () => {};
 export const warn = console.warn.bind(console);
