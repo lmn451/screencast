@@ -188,6 +188,7 @@ if (typeof window !== "undefined" && window.location.search.includes("test")) {
   const id = getQueryParam("id");
   let blob;
   let mimeType;
+  let recordName = null;
 
   if (window.__TEST_BLOB__) {
     logger.log("Using injected __TEST_BLOB__ for video source");
@@ -207,12 +208,19 @@ if (typeof window !== "undefined" && window.location.search.includes("test")) {
       }
       blob = record.blob;
       mimeType = record.mimeType;
+      recordName = record.name;
       logger.log("Loaded from DB:", blob.size, "bytes");
     } catch (e) {
       logger.error("Failed to load from DB:", e);
       document.body.textContent = "Failed to load recording: " + e.message;
       return;
     }
+  }
+
+  // Pre-populate the filename input if a name exists
+  const filenameInput = document.getElementById("filename-input");
+  if (recordName && filenameInput) {
+    filenameInput.value = recordName;
   }
 
   const url = URL.createObjectURL(blob);
@@ -260,13 +268,31 @@ if (typeof window !== "undefined" && window.location.search.includes("test")) {
   };
 
   const downloadBtn = document.getElementById("btn-download");
-  downloadBtn.addEventListener("click", () => {
+  downloadBtn.addEventListener("click", async () => {
     const ts = new Date().toISOString().replace(/[:.]/g, "-");
     const mt = mimeType || "video/webm";
     let ext = "webm";
     if (mt.includes("mp4")) ext = "mp4";
     else if (mt.includes("webm")) ext = "webm";
-    const filename = `CaptureCast-${ts}.${ext}`;
+
+    // Get custom name from input field
+    const customName = document.getElementById("filename-input").value.trim();
+
+    const filename = customName
+      ? `${customName}.${ext}`
+      : `CaptureCast-${ts}.${ext}`;
+
+    // Save custom name to database if provided
+    if (customName) {
+      try {
+        const { updateRecordingName } = await import("./db.js");
+        await updateRecordingName(id, customName);
+        logger.log("Saved custom name to database:", customName);
+      } catch (e) {
+        logger.error("Failed to save custom name:", e);
+      }
+    }
+
     logger.log("Downloading file:", filename, "Size:", blob.size, "bytes");
     saveFile(blob, filename);
   });

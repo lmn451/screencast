@@ -60,9 +60,33 @@ export async function finishRecording(id, mimeType, duration, size) {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_RECORDINGS, 'readwrite');
     const store = tx.objectStore(STORE_RECORDINGS);
-    const request = store.put({ id, mimeType, duration, size, createdAt: Date.now() });
+    const request = store.put({ id, mimeType, duration, size, createdAt: Date.now(), name: null });
     request.onsuccess = () => resolve();
     request.onerror = () => reject(request.error);
+    tx.oncomplete = () => db.close();
+    tx.onerror = () => db.close();
+  });
+}
+
+export async function updateRecordingName(id, name) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_RECORDINGS, 'readwrite');
+    const store = tx.objectStore(STORE_RECORDINGS);
+    const getRequest = store.get(id);
+    
+    getRequest.onsuccess = () => {
+      const recording = getRequest.result;
+      if (recording) {
+        recording.name = name;
+        const putRequest = store.put(recording);
+        putRequest.onsuccess = () => resolve();
+        putRequest.onerror = () => reject(putRequest.error);
+      } else {
+        reject(new Error('Recording not found'));
+      }
+    };
+    getRequest.onerror = () => reject(getRequest.error);
     tx.oncomplete = () => db.close();
     tx.onerror = () => db.close();
   });

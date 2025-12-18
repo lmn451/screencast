@@ -47,17 +47,20 @@ async function render() {
       const info = document.createElement("div");
       info.className = "info";
 
-      const date = document.createElement("div");
-      date.className = "date";
-      date.textContent = formatDate(rec.createdAt);
+      // Show custom name if available, otherwise show date
+      const title = document.createElement("div");
+      title.className = "date";
+      title.textContent = rec.name || formatDate(rec.createdAt);
 
       const meta = document.createElement("div");
       meta.className = "meta";
-      meta.textContent = `${rec.mimeType || "video/webm"} • ${formatDuration(
-        rec.duration
-      )} • ${formatSize(rec.size)}`;
+      // If custom name is used, show date in meta
+      const metaText = rec.name 
+        ? `${formatDate(rec.createdAt)} • ${rec.mimeType || "video/webm"} • ${formatDuration(rec.duration)} • ${formatSize(rec.size)}`
+        : `${rec.mimeType || "video/webm"} • ${formatDuration(rec.duration)} • ${formatSize(rec.size)}`;
+      meta.textContent = metaText;
 
-      info.appendChild(date);
+      info.appendChild(title);
       info.appendChild(meta);
 
       const actions = document.createElement("div");

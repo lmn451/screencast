@@ -17,6 +17,17 @@
   <body>
     <h1>Recording Preview</h1>
     <video id="video" controls preload="metadata"></video>
+    <div style="margin-top: 12px; max-width: 960px;">
+      <label for="filename-input" style="display: block; margin-bottom: 4px; font-size: 14px; color: #5f6368;">
+        Recording name (optional):
+      </label>
+      <input 
+        type="text" 
+        id="filename-input" 
+        placeholder="Enter a custom name..." 
+        style="width: 100%; padding: 8px; font-size: 14px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box;"
+      />
+    </div>
     <div class="actions">
       <button id="btn-download" class="primary">Download</button>
     </div>
