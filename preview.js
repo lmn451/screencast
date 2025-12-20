@@ -189,6 +189,7 @@ if (typeof window !== "undefined" && window.location.search.includes("test")) {
   let blob;
   let mimeType;
   let recordName = null;
+  let recordCreatedAt = null;
 
   if (window.__TEST_BLOB__) {
     logger.log("Using injected __TEST_BLOB__ for video source");
@@ -209,6 +210,7 @@ if (typeof window !== "undefined" && window.location.search.includes("test")) {
       blob = record.blob;
       mimeType = record.mimeType;
       recordName = record.name;
+      recordCreatedAt = record.createdAt;
       logger.log("Loaded from DB:", blob.size, "bytes");
     } catch (e) {
       logger.error("Failed to load from DB:", e);
@@ -217,10 +219,33 @@ if (typeof window !== "undefined" && window.location.search.includes("test")) {
     }
   }
 
-  // Pre-populate the filename input if a name exists
   const filenameInput = document.getElementById("filename-input");
-  if (recordName && filenameInput) {
-    filenameInput.value = recordName;
+
+  const mtForNaming = mimeType || "video/webm";
+  let extForNaming = "webm";
+  if (mtForNaming.includes("mp4")) extForNaming = "mp4";
+  else if (mtForNaming.includes("webm")) extForNaming = "webm";
+
+  // Deterministic default name so it stays stable across reloads/clicks.
+  // Prefer createdAt from DB; fall back to "now" only if missing (should be rare).
+  const tsSource = recordCreatedAt ?? Date.now();
+  const tsForName = new Date(tsSource).toISOString().replaceAll(/[:.]/g, "-");
+  const defaultBaseName = `CaptureCast-${tsForName}`;
+
+  // Show current filename base in the input: saved name if present, otherwise default.
+  // (Input holds base name only, without extension)
+  const currentBaseName = recordName || defaultBaseName;
+  if (filenameInput) {
+    filenameInput.value = currentBaseName;
+    // Select the text only when there's no saved name, to make it easy to overwrite.
+    if (!recordName) {
+      try {
+        filenameInput.focus();
+        filenameInput.select();
+      } catch {
+        // ignore
+      }
+    }
   }
 
   const url = URL.createObjectURL(blob);
@@ -269,25 +294,25 @@ if (typeof window !== "undefined" && window.location.search.includes("test")) {
 
   const downloadBtn = document.getElementById("btn-download");
   downloadBtn.addEventListener("click", async () => {
-    const ts = new Date().toISOString().replace(/[:.]/g, "-");
-    const mt = mimeType || "video/webm";
-    let ext = "webm";
-    if (mt.includes("mp4")) ext = "mp4";
-    else if (mt.includes("webm")) ext = "webm";
+    // Input holds base name only (no extension)
+    const inputBaseName = document
+      .getElementById("filename-input")
+      .value.trim();
 
-    // Get custom name from input field
-    const customName = document.getElementById("filename-input").value.trim();
+    // If user cleared the input, fall back to deterministic default.
+    const baseName = inputBaseName || defaultBaseName;
+    const filename = `${baseName}.${extForNaming}`;
 
-    const filename = customName
-      ? `${customName}.${ext}`
-      : `CaptureCast-${ts}.${ext}`;
+    // Persist to DB only if user provided a non-default custom name.
+    // (We don't want to store our generated default as a "custom" name.)
+    const shouldPersistName =
+      !!id && !!inputBaseName && inputBaseName !== defaultBaseName;
 
-    // Save custom name to database if provided
-    if (customName) {
+    if (shouldPersistName) {
       try {
         const { updateRecordingName } = await import("./db.js");
-        await updateRecordingName(id, customName);
-        logger.log("Saved custom name to database:", customName);
+        await updateRecordingName(id, inputBaseName);
+        logger.log("Saved custom name to database:", inputBaseName);
       } catch (e) {
         logger.error("Failed to save custom name:", e);
       }
