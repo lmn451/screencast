@@ -250,7 +250,12 @@ if (typeof window !== "undefined" && window.location.search.includes("test")) {
   // (Input holds base name only, without extension)
   const currentBaseName = recordName || defaultBaseName;
   if (filenameInput) {
-    filenameInput.value = currentBaseName;
+    // Set the placeholder to show what the default would be
+    filenameInput.placeholder = defaultBaseName;
+    
+    // Set value to the saved custom name if present, otherwise empty (so placeholder shows)
+    filenameInput.value = recordName || "";
+    
     // Select the text only when there's no saved name, to make it easy to overwrite.
     if (!recordName) {
       try {
@@ -317,10 +322,15 @@ if (typeof window !== "undefined" && window.location.search.includes("test")) {
     const baseName = inputBaseName || defaultBaseName;
     const filename = `${baseName}.${extForNaming}`;
 
-    // Persist to DB only if user provided a non-default custom name.
-    // (We don't want to store our generated default as a "custom" name.)
+    // Persist to DB if:
+    // 1. User provided a non-empty custom name, AND
+    // 2. It's different from the default name, AND
+    // 3. It's different from the current saved name (avoid redundant updates)
     const shouldPersistName =
-      !!id && !!inputBaseName && inputBaseName !== defaultBaseName;
+      !!id && 
+      !!inputBaseName && 
+      inputBaseName !== defaultBaseName &&
+      inputBaseName !== recordName;
 
     if (shouldPersistName) {
       try {
@@ -329,6 +339,17 @@ if (typeof window !== "undefined" && window.location.search.includes("test")) {
         logger.log("Saved custom name to database:", inputBaseName);
       } catch (e) {
         logger.error("Failed to save custom name:", e);
+      }
+    }
+
+    // If user cleared a previously saved custom name, clear it from DB
+    if (!!id && !inputBaseName && recordName) {
+      try {
+        const { updateRecordingName } = await import("./db.js");
+        await updateRecordingName(id, null);
+        logger.log("Cleared custom name from database");
+      } catch (e) {
+        logger.error("Failed to clear custom name:", e);
       }
     }
 
