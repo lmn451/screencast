@@ -128,7 +128,15 @@ export async function getRecording(id) {
 
   // 3. Reassemble
   const blob = new Blob(chunks, { type: meta.mimeType });
-  return { id, blob, mimeType: meta.mimeType, createdAt: meta.createdAt, duration: meta.duration, size: meta.size };
+  return { 
+    id, 
+    blob, 
+    mimeType: meta.mimeType, 
+    createdAt: meta.createdAt, 
+    duration: meta.duration, 
+    size: meta.size,
+    name: meta.name // Include custom name if saved
+  };
 }
 
 export async function getAllRecordings() {
