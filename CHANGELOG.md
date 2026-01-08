@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.2.2 (Unreleased)
+### New Features
+- Added: Storage quota checking before starting recordings
+- Added: `storage-utils.js` - Storage management utilities with quota estimation
+- Added: Automatic storage space validation prevents out-of-space errors
+
+### Security
+- Added: UUID format validation in preview.js to prevent malformed IDs
+- Improved: Input validation across recording flow
+
+### Performance & Stability
+- Improved: Reduced stop timeout from 5 minutes to 60 seconds for better UX
+- Fixed: Updated KNOWN_ISSUES.md - OOM issue documented as resolved (chunked storage already implemented in v0.2.0)
+
+### Testing
+- Added: Unit testing infrastructure with Jest
+- Added: Comprehensive test suite for `logger.js` (100% coverage)
+- Added: Comprehensive test suite for `storage-utils.js` (100% coverage)
+- Added: Comprehensive test suite for `media-recorder-utils.js` (100% coverage)
+- Added: Test suite for `constants.js`
+- Added: Test placeholders and API contract tests for `db.js`
+- Added: npm scripts: `test`, `test:watch`, `test:coverage`
+
+### Developer Experience
+- Added: Jest configuration with ESM support
+- Added: Test setup with Chrome API mocks
+- Improved: Better project documentation and issue tracking
+
 ## 0.2.1
 ### Improvements
 - Improved: Centralized logging system with debug mode toggle

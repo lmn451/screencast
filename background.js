@@ -1,6 +1,7 @@
 import { cleanupOldRecordings } from "./db.js";
 import { createLogger } from "./logger.js";
 import { STOP_TIMEOUT_MS, AUTO_DELETE_AGE_MS } from "./constants.js";
+import { checkStorageQuota } from "./storage-utils.js";
 
 // CaptureCast background service worker (MV3)
 // Manages offscreen document, recording state, overlay injection, and preview handoff
@@ -128,6 +129,13 @@ async function focusTab(tabId) {
 async function startRecording(mode, includeMic, includeSystemAudio) {
   if (STATE.status !== "IDLE")
     return { ok: false, error: "Already recording or saving" };
+
+  // Check storage quota before starting
+  const storageCheck = await checkStorageQuota();
+  if (!storageCheck.ok) {
+    logger.error("Storage check failed:", storageCheck.error);
+    return { ok: false, error: storageCheck.error };
+  }
 
   STATE.mode = mode;
   STATE.recordingId = crypto.randomUUID();

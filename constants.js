@@ -1,7 +1,7 @@
 // Shared constants for CaptureCast extension
 
 // Timeout durations (in milliseconds)
-export const STOP_TIMEOUT_MS = 300_000; // 5 minutes safety timeout for save operations
+export const STOP_TIMEOUT_MS = 60_000; // 60 seconds safety timeout for stop operations
 export const DURATION_FIX_TIMEOUT_MS = 2000; // Time to wait for video duration normalization
 
 // Database

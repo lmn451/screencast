@@ -24,16 +24,13 @@
 
 **Risk Level**: High for power users
 
-**Workarounds**:
-- Keep recordings under 15 minutes
-- Record at lower resolution (tab instead of full screen)
-- Disable system audio to reduce data size
-- Close other tabs to free memory
+**Status**: ✅ FIXED in v0.2.0 - Chunked storage now saves incrementally
 
-**Future Fix** (v0.3+):
-- Option 1: Stream chunks to IndexedDB incrementally
-- Option 2: Use File System Access API to write directly to disk
-- Option 3: Add recording time limit with automatic chunking
+**Solution Implemented**:
+- `media-recorder-utils.js` saves chunks directly to IndexedDB as they arrive
+- No memory accumulation regardless of recording length
+- Partial recordings preserved even if extension crashes
+- Safe for 60+ minute recordings at any resolution
 
 ### 2. Race Condition with Concurrent Recordings
 

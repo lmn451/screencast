@@ -17,6 +17,13 @@ function getQueryParam(name) {
   return url.searchParams.get(name);
 }
 
+// Validate UUID format for security
+function isValidUUID(str) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+    str
+  );
+}
+
 function saveFile(blob, filename) {
   const a = document.createElement("a");
   const url = URL.createObjectURL(blob);
@@ -198,6 +205,13 @@ if (typeof window !== "undefined" && window.location.search.includes("test")) {
   } else {
     if (!id) {
       document.body.textContent = "Missing recording id";
+      return;
+    }
+
+    // Validate recording ID format for security
+    if (!isValidUUID(id)) {
+      logger.error("Invalid recording ID format:", id);
+      document.body.textContent = "Invalid recording ID format";
       return;
     }
 
