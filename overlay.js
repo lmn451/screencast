@@ -38,15 +38,15 @@ const ERROR_DISPLAY_DURATION_MS = 2000;
     try {
       const response = await chrome.runtime.sendMessage({ type: 'STOP' });
       if (!response || !response.ok) {
-         // Only log errors in overlay
-         console.error('[CaptureCast Overlay] Stop failed:', response?.error);
-         btn.textContent = 'Error!';
-         setTimeout(() => {
-           btn.disabled = false;
-           btn.textContent = 'Stop';
-           btn.style.cursor = 'pointer';
-           btn.style.opacity = '1';
-         }, ERROR_DISPLAY_DURATION_MS);
+        // Only log errors in overlay
+        console.error('[CaptureCast Overlay] Stop failed:', response?.error);
+        btn.textContent = 'Error!';
+        setTimeout(() => {
+          btn.disabled = false;
+          btn.textContent = 'Stop';
+          btn.style.cursor = 'pointer';
+          btn.style.opacity = '1';
+        }, ERROR_DISPLAY_DURATION_MS);
       }
       // On success, overlay will be removed anyway
     } catch (e) {
@@ -65,10 +65,16 @@ const ERROR_DISPLAY_DURATION_MS = 2000;
   try {
     chrome.runtime.onMessage.addListener((msg) => {
       if (msg && msg.type === 'OVERLAY_REMOVE') {
-        try { root.remove(); } catch {}
+        try {
+          root.remove();
+        } catch (e) {
+          /* no-op */
+        }
       }
     });
-  } catch {}
+  } catch (e) {
+    /* no-op */
+  }
 
   root.appendChild(btn);
   document.documentElement.appendChild(root);

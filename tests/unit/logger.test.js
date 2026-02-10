@@ -1,6 +1,5 @@
 // Unit tests for logger.js
 
-import { jest } from '@jest/globals';
 import { createLogger, log, warn, error } from '../../logger.js';
 
 describe('logger.js', () => {
@@ -22,14 +21,14 @@ describe('logger.js', () => {
     it('should create different loggers for different components', () => {
       const logger1 = createLogger('Component1');
       const logger2 = createLogger('Component2');
-      
+
       // They should be different objects
       expect(logger1).not.toBe(logger2);
     });
 
     it('should not throw when calling logger methods', () => {
       const logger = createLogger('TestComponent');
-      
+
       // These should not throw even though console is mocked
       expect(() => logger.log('test')).not.toThrow();
       expect(() => logger.warn('test')).not.toThrow();
@@ -38,11 +37,11 @@ describe('logger.js', () => {
 
     it('should handle multiple arguments without throwing', () => {
       const logger = createLogger('Multi');
-      
+
       expect(() => {
         logger.warn('message', { foo: 'bar' }, [1, 2, 3], 123);
       }).not.toThrow();
-      
+
       expect(() => {
         logger.error('error', new Error('test'), { data: 'value' });
       }).not.toThrow();
