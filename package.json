@@ -9,6 +9,8 @@
     "test:unit": "node --experimental-vm-modules node_modules/jest/bin/jest.js tests/unit",
     "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --watch",
     "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --coverage",
+    "lint": "eslint . --ext .js --ignore-path .eslintignore",
+    "format": "prettier --write .",
     "e2e:stop": "playwright test tests/e2e/stop -c tests/e2e/playwright.config.ts",
     "e2e": "playwright test -c tests/e2e/playwright.config.ts"
   },
@@ -17,7 +19,11 @@
     "fake-indexeddb": "^6.2.5",
     "jest": "^29.7.0",
     "jest-environment-jsdom": "^29.7.0",
-    "playwright": "^1.55.0"
+    "playwright": "^1.55.0",
+    "eslint": "^8.45.0",
+    "prettier": "^2.8.8",
+    "eslint-config-prettier": "^8.8.0",
+    "eslint-plugin-prettier": "^5.1.0"
   },
   "packageManager": "pnpm@10.18.2+sha512.9fb969fa749b3ade6035e0f109f0b8a60b5d08a1a87fdf72e337da90dcc93336e2280ca4e44f2358a649b83c17959e9993e777c2080879f3801e6f0d999ad3dd"
 }
