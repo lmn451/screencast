@@ -1,31 +1,31 @@
-import { getAllRecordings, deleteRecording } from "./db.js";
-import { createLogger } from "./logger.js";
+import { getAllRecordings, deleteRecording } from './db.js';
+import { createLogger } from './logger.js';
 
-const logger = createLogger("Recordings");
+const logger = createLogger('Recordings');
 
 // Global error handlers
-globalThis.addEventListener("unhandledrejection", (event) => {
-  logger.error("Unhandled Rejection:", event.reason);
+globalThis.addEventListener('unhandledrejection', (event) => {
+  logger.error('Unhandled Rejection:', event.reason);
 });
-globalThis.addEventListener("error", (event) => {
-  logger.error("Uncaught Exception:", event.error || event.message);
+globalThis.addEventListener('error', (event) => {
+  logger.error('Uncaught Exception:', event.error || event.message);
 });
-const listEl = document.getElementById("list");
+const listEl = document.getElementById('list');
 
 function formatDate(ts) {
   return new Date(ts).toLocaleString();
 }
 
 function formatDuration(ms) {
-  if (!ms) return "Unknown duration";
+  if (!ms) return 'Unknown duration';
   const seconds = Math.floor(ms / 1000);
   const m = Math.floor(seconds / 60);
   const s = seconds % 60;
-  return `${m}:${s.toString().padStart(2, "0")}`;
+  return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
 function formatSize(bytes) {
-  if (!bytes) return "Unknown size";
+  if (!bytes) return 'Unknown size';
   const mb = bytes / (1024 * 1024);
   return `${mb.toFixed(1)} MB`;
 }
@@ -39,56 +39,59 @@ async function render() {
       return;
     }
 
-    listEl.innerHTML = "";
+    listEl.innerHTML = '';
     recordings.forEach((rec) => {
-      const item = document.createElement("div");
-      item.className = "item";
+      const item = document.createElement('div');
+      item.className = 'item';
 
-      const info = document.createElement("div");
-      info.className = "info";
+      const info = document.createElement('div');
+      info.className = 'info';
 
       // Show custom name if available, otherwise show date
-      const title = document.createElement("div");
-      title.className = "date";
+      const title = document.createElement('div');
+      title.className = 'date';
       title.textContent = rec.name || formatDate(rec.createdAt);
 
-      const meta = document.createElement("div");
-      meta.className = "meta";
+      const meta = document.createElement('div');
+      meta.className = 'meta';
       // If custom name is used, show date in meta
-      const metaText = rec.name 
-        ? `${formatDate(rec.createdAt)} • ${rec.mimeType || "video/webm"} • ${formatDuration(rec.duration)} • ${formatSize(rec.size)}`
-        : `${rec.mimeType || "video/webm"} • ${formatDuration(rec.duration)} • ${formatSize(rec.size)}`;
+      const metaText = rec.name
+        ? `${formatDate(rec.createdAt)} • ${rec.mimeType || 'video/webm'} • ${formatDuration(
+            rec.duration
+          )} • ${formatSize(rec.size)}`
+        : `${rec.mimeType || 'video/webm'} • ${formatDuration(rec.duration)} • ${formatSize(
+            rec.size
+          )}`;
       meta.textContent = metaText;
 
       info.appendChild(title);
       info.appendChild(meta);
 
-      const actions = document.createElement("div");
-      actions.className = "actions";
+      const actions = document.createElement('div');
+      actions.className = 'actions';
 
-      const playBtn = document.createElement("button");
-      playBtn.className = "btn-play";
-      playBtn.textContent = "Play / Download";
+      const playBtn = document.createElement('button');
+      playBtn.className = 'btn-play';
+      playBtn.textContent = 'Play / Download';
       playBtn.onclick = () => {
         chrome.tabs.create({
           url: `preview.html?id=${encodeURIComponent(rec.id)}`,
         });
       };
 
-      const delBtn = document.createElement("button");
-      delBtn.className = "btn-delete";
-      delBtn.textContent = "Delete";
+      const delBtn = document.createElement('button');
+      delBtn.className = 'btn-delete';
+      delBtn.textContent = 'Delete';
       delBtn.onclick = async () => {
-        if (confirm("Are you sure you want to delete this recording?")) {
+        if (confirm('Are you sure you want to delete this recording?')) {
           try {
             await deleteRecording(rec.id);
             item.remove();
             if (listEl.children.length === 0) {
-              listEl.innerHTML =
-                '<div class="empty">No recordings found.</div>';
+              listEl.innerHTML = '<div class="empty">No recordings found.</div>';
             }
           } catch (e) {
-            alert("Failed to delete: " + e.message);
+            alert('Failed to delete: ' + e.message);
           }
         }
       };
@@ -102,8 +105,8 @@ async function render() {
     });
   } catch (e) {
     listEl.innerHTML = `<div class="empty">Error loading recordings: ${e.message}</div>`;
-    logger.error("Failed to load recordings:", e);
+    logger.error('Failed to load recordings:', e);
   }
 }
 
-document.addEventListener("DOMContentLoaded", render);
+document.addEventListener('DOMContentLoaded', render);

@@ -116,7 +116,9 @@ export function createMediaRecorder(stream, recordingId, callbacks = {}) {
 
   recorder.onstop = async () => {
     const duration = Date.now() - recordingStartTime;
-    logger.log(`MediaRecorder stopped after ${duration}ms. Total chunks: ${chunkIndex}, size: ${totalSize} bytes`);
+    logger.log(
+      `MediaRecorder stopped after ${duration}ms. Total chunks: ${chunkIndex}, size: ${totalSize} bytes`
+    );
 
     if (chunkIndex === 0) {
       logger.warn('No chunks recorded! Recording may have been too short.');

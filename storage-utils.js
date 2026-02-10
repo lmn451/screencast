@@ -38,7 +38,7 @@ export async function checkStorageQuota() {
       usage: `${(usage / 1024 / 1024).toFixed(1)} MB`,
       quota: `${(quota / 1024 / 1024).toFixed(1)} MB`,
       available: `${(available / 1024 / 1024).toFixed(1)} MB`,
-      usagePercent: `${((usage / quota) * 100).toFixed(1)}%`
+      usagePercent: `${((usage / quota) * 100).toFixed(1)}%`,
     });
 
     if (available < MIN_FREE_SPACE_BYTES) {
@@ -49,7 +49,7 @@ export async function checkStorageQuota() {
         usage,
         quota,
         available,
-        error: `Insufficient storage space. Available: ${availableMB} MB, Required: ${requiredMB} MB. Please delete old recordings or free up space.`
+        error: `Insufficient storage space. Available: ${availableMB} MB, Required: ${requiredMB} MB. Please delete old recordings or free up space.`,
       };
     }
 
@@ -79,7 +79,7 @@ export async function checkSpaceForDuration(estimatedMinutes) {
     logger.log('Space check for duration:', {
       minutes: estimatedMinutes,
       estimatedNeed: `${(estimatedNeed / 1024 / 1024).toFixed(1)} MB`,
-      available: `${(available / 1024 / 1024).toFixed(1)} MB`
+      available: `${(available / 1024 / 1024).toFixed(1)} MB`,
     });
 
     if (available < estimatedNeed) {
@@ -89,7 +89,7 @@ export async function checkSpaceForDuration(estimatedMinutes) {
         ok: false,
         estimatedNeed,
         available,
-        error: `May not have enough space for ${estimatedMinutes} minute recording. Available: ${availableMB} MB, Estimated need: ${neededMB} MB.`
+        error: `May not have enough space for ${estimatedMinutes} minute recording. Available: ${availableMB} MB, Estimated need: ${neededMB} MB.`,
       };
     }
 
@@ -121,7 +121,7 @@ export async function getStorageInfo() {
       usagePercent,
       usageMB: usage / 1024 / 1024,
       quotaMB: quota / 1024 / 1024,
-      availableMB: (quota - usage) / 1024 / 1024
+      availableMB: (quota - usage) / 1024 / 1024,
     };
   } catch (e) {
     logger.error('Failed to get storage info:', e);
