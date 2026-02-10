@@ -85,16 +85,26 @@ describe('media-recorder-utils (additional)', () => {
     }));
 
     class FakeMediaRecorder2 {
-      static isTypeSupported() { return true; }
+      static isTypeSupported() {
+        return true;
+      }
       constructor() {
         this.state = 'inactive';
         this.onstart = null;
         this.ondataavailable = null;
         this.onstop = null;
       }
-      start() { this.state = 'recording'; this.onstart?.(); }
-      requestData() { this.ondataavailable?.({ data: { size: 10 } }); }
-      stop() { this.state = 'inactive'; this.onstop?.(); }
+      start() {
+        this.state = 'recording';
+        this.onstart?.();
+      }
+      requestData() {
+        this.ondataavailable?.({ data: { size: 10 } });
+      }
+      stop() {
+        this.state = 'inactive';
+        this.onstop?.();
+      }
     }
 
     global.MediaRecorder = FakeMediaRecorder2;
@@ -122,7 +132,9 @@ describe('media-recorder-utils (additional)', () => {
     await jest.unstable_mockModule('../../db.js', () => ({ saveChunk: jest.fn() }));
 
     class NoCodecRecorder {
-      static isTypeSupported() { return false; }
+      static isTypeSupported() {
+        return false;
+      }
     }
 
     global.MediaRecorder = NoCodecRecorder;

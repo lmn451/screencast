@@ -1,5 +1,5 @@
-import indexedDB from "fake-indexeddb";
-import FDBKeyRange from "fake-indexeddb/lib/FDBKeyRange";
+import indexedDB from 'fake-indexeddb';
+import FDBKeyRange from 'fake-indexeddb/lib/FDBKeyRange';
 
 export function setupIndexedDB() {
   // Provide fake IndexedDB implementations to the test environment
@@ -17,7 +17,7 @@ export function teardownIndexedDB() {
   }
 }
 
-export function clearDatabase(dbName = "CaptureCastDB") {
+export function clearDatabase(dbName = 'CaptureCastDB') {
   return new Promise((resolve) => {
     try {
       const req = indexedDB.deleteDatabase(dbName);

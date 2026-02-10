@@ -19,18 +19,30 @@ test.describe('Tab mode recording controls', () => {
     await controlPage.goto(controlPageUrl(extensionId));
 
     // Start recording
-    const startRes = await controlPage.evaluate(() => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'START', mode: 'tab', mic: false, systemAudio: false }, resolve)));
+    const startRes = await controlPage.evaluate(
+      () =>
+        new Promise((resolve) =>
+          chrome.runtime.sendMessage(
+            { type: 'START', mode: 'tab', mic: false, systemAudio: false },
+            resolve
+          )
+        )
+    );
     expect(startRes?.ok).toBeTruthy();
 
     // Wait a bit
-    await new Promise(r => setTimeout(r, 2000));
+    await new Promise((r) => setTimeout(r, 2000));
 
     // Stop via message
-    const stopRes = await controlPage.evaluate(() => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'STOP' }, resolve)));
+    const stopRes = await controlPage.evaluate(
+      () => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'STOP' }, resolve))
+    );
     expect(stopRes?.ok).toBeTruthy();
 
     // Verify state is idle
-    const state = await controlPage.evaluate(() => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'GET_STATE' }, resolve)));
+    const state = await controlPage.evaluate(
+      () => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'GET_STATE' }, resolve))
+    );
     expect(state?.recording).toBe(false);
   });
 });

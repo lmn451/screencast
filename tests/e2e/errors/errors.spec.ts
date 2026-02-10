@@ -19,16 +19,34 @@ test.describe('Tab mode error handling', () => {
     await controlPage.goto(controlPageUrl(extensionId));
 
     // Start first recording
-    const startRes1 = await controlPage.evaluate(() => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'START', mode: 'tab', mic: false, systemAudio: false }, resolve)));
+    const startRes1 = await controlPage.evaluate(
+      () =>
+        new Promise((resolve) =>
+          chrome.runtime.sendMessage(
+            { type: 'START', mode: 'tab', mic: false, systemAudio: false },
+            resolve
+          )
+        )
+    );
     expect(startRes1?.ok).toBeTruthy();
 
     // Try to start second recording
-    const startRes2 = await controlPage.evaluate(() => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'START', mode: 'tab', mic: false, systemAudio: false }, resolve)));
+    const startRes2 = await controlPage.evaluate(
+      () =>
+        new Promise((resolve) =>
+          chrome.runtime.sendMessage(
+            { type: 'START', mode: 'tab', mic: false, systemAudio: false },
+            resolve
+          )
+        )
+    );
     expect(startRes2?.ok).toBe(false);
     expect(startRes2?.error).toContain('Already recording');
 
     // Clean up
-    await controlPage.evaluate(() => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'STOP' }, resolve)));
+    await controlPage.evaluate(
+      () => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'STOP' }, resolve))
+    );
   });
 
   test('stop recording when not recording fails', async ({ context, extensionId }) => {
@@ -36,7 +54,9 @@ test.describe('Tab mode error handling', () => {
     await controlPage.goto(controlPageUrl(extensionId));
 
     // Try to stop without starting
-    const stopRes = await controlPage.evaluate(() => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'STOP' }, resolve)));
+    const stopRes = await controlPage.evaluate(
+      () => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'STOP' }, resolve))
+    );
     expect(stopRes?.ok).toBe(false);
     expect(stopRes?.error).toContain('Not recording');
   });
@@ -45,7 +65,9 @@ test.describe('Tab mode error handling', () => {
     const controlPage = await context.newPage();
     await controlPage.goto(controlPageUrl(extensionId));
 
-    const invalidRes = await controlPage.evaluate(() => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'INVALID_TYPE' }, resolve)));
+    const invalidRes = await controlPage.evaluate(
+      () => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'INVALID_TYPE' }, resolve))
+    );
     expect(invalidRes?.ok).toBe(false);
     expect(invalidRes?.error).toContain('Unknown message');
   });

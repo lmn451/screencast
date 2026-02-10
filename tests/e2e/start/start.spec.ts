@@ -18,64 +18,115 @@ test.describe('Tab mode start functionality', () => {
     const controlPage = await context.newPage();
     await controlPage.goto(controlPageUrl(extensionId));
 
-    const startRes = await controlPage.evaluate(() => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'START', mode: 'tab', mic: false, systemAudio: false }, resolve)));
+    const startRes = await controlPage.evaluate(
+      () =>
+        new Promise((resolve) =>
+          chrome.runtime.sendMessage(
+            { type: 'START', mode: 'tab', mic: false, systemAudio: false },
+            resolve
+          )
+        )
+    );
     expect(startRes?.ok).toBeTruthy();
 
-    const state = await controlPage.evaluate(() => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'GET_STATE' }, resolve)));
+    const state = await controlPage.evaluate(
+      () => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'GET_STATE' }, resolve))
+    );
     expect(state?.recordingId).toBeTruthy();
 
     // Clean up by stopping
-    await controlPage.evaluate(() => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'STOP' }, resolve)));
+    await controlPage.evaluate(
+      () => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'STOP' }, resolve))
+    );
   });
 
   test('start recording in tab mode with mic only', async ({ context, extensionId }) => {
     const controlPage = await context.newPage();
     await controlPage.goto(controlPageUrl(extensionId));
 
-    const startRes = await controlPage.evaluate(() => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'START', mode: 'tab', mic: true, systemAudio: false }, resolve)));
+    const startRes = await controlPage.evaluate(
+      () =>
+        new Promise((resolve) =>
+          chrome.runtime.sendMessage(
+            { type: 'START', mode: 'tab', mic: true, systemAudio: false },
+            resolve
+          )
+        )
+    );
     expect(startRes?.ok).toBeTruthy();
 
-    const state = await controlPage.evaluate(() => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'GET_STATE' }, resolve)));
+    const state = await controlPage.evaluate(
+      () => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'GET_STATE' }, resolve))
+    );
     expect(state?.recordingId).toBeTruthy();
     expect(state?.mode).toBe('tab');
     expect(state?.mic).toBe(true);
     expect(state?.systemAudio).toBe(false);
 
     // Clean up
-    await controlPage.evaluate(() => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'STOP' }, resolve)));
+    await controlPage.evaluate(
+      () => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'STOP' }, resolve))
+    );
   });
 
   test('start recording in tab mode with system audio only', async ({ context, extensionId }) => {
     const controlPage = await context.newPage();
     await controlPage.goto(controlPageUrl(extensionId));
 
-    const startRes = await controlPage.evaluate(() => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'START', mode: 'tab', mic: false, systemAudio: true }, resolve)));
+    const startRes = await controlPage.evaluate(
+      () =>
+        new Promise((resolve) =>
+          chrome.runtime.sendMessage(
+            { type: 'START', mode: 'tab', mic: false, systemAudio: true },
+            resolve
+          )
+        )
+    );
     expect(startRes?.ok).toBeTruthy();
 
-    const state = await controlPage.evaluate(() => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'GET_STATE' }, resolve)));
+    const state = await controlPage.evaluate(
+      () => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'GET_STATE' }, resolve))
+    );
     expect(state?.recordingId).toBeTruthy();
     expect(state?.mode).toBe('tab');
     expect(state?.mic).toBe(false);
     expect(state?.systemAudio).toBe(true);
 
     // Clean up
-    await controlPage.evaluate(() => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'STOP' }, resolve)));
+    await controlPage.evaluate(
+      () => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'STOP' }, resolve))
+    );
   });
 
-  test('start recording in tab mode with both mic and system audio', async ({ context, extensionId }) => {
+  test('start recording in tab mode with both mic and system audio', async ({
+    context,
+    extensionId,
+  }) => {
     const controlPage = await context.newPage();
     await controlPage.goto(controlPageUrl(extensionId));
 
-    const startRes = await controlPage.evaluate(() => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'START', mode: 'tab', mic: true, systemAudio: true }, resolve)));
+    const startRes = await controlPage.evaluate(
+      () =>
+        new Promise((resolve) =>
+          chrome.runtime.sendMessage(
+            { type: 'START', mode: 'tab', mic: true, systemAudio: true },
+            resolve
+          )
+        )
+    );
     expect(startRes?.ok).toBeTruthy();
 
-    const state = await controlPage.evaluate(() => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'GET_STATE' }, resolve)));
+    const state = await controlPage.evaluate(
+      () => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'GET_STATE' }, resolve))
+    );
     expect(state?.recordingId).toBeTruthy();
     expect(state?.mode).toBe('tab');
     expect(state?.mic).toBe(true);
     expect(state?.systemAudio).toBe(true);
 
     // Clean up
-    await controlPage.evaluate(() => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'STOP' }, resolve)));
+    await controlPage.evaluate(
+      () => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'STOP' }, resolve))
+    );
   });
 });

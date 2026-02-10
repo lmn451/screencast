@@ -34,11 +34,17 @@ describe('media-recorder-utils.js', () => {
 
       const codec = getOptimalCodec();
       expect(codec).toBe('video/webm;codecs=vp8,opus');
-      
+
       // Should have tried higher priority codecs first
-      expect(global.MediaRecorder.isTypeSupported).toHaveBeenCalledWith('video/webm;codecs=av01,opus');
-      expect(global.MediaRecorder.isTypeSupported).toHaveBeenCalledWith('video/webm;codecs=av1,opus');
-      expect(global.MediaRecorder.isTypeSupported).toHaveBeenCalledWith('video/webm;codecs=vp9,opus');
+      expect(global.MediaRecorder.isTypeSupported).toHaveBeenCalledWith(
+        'video/webm;codecs=av01,opus'
+      );
+      expect(global.MediaRecorder.isTypeSupported).toHaveBeenCalledWith(
+        'video/webm;codecs=av1,opus'
+      );
+      expect(global.MediaRecorder.isTypeSupported).toHaveBeenCalledWith(
+        'video/webm;codecs=vp9,opus'
+      );
     });
 
     it('should fallback to generic webm', () => {
@@ -198,10 +204,10 @@ describe('media-recorder-utils.js', () => {
       };
 
       setupAutoStop(stream, recorder);
-      
+
       // Trigger ended event
       endedCallback();
-      
+
       expect(recorder.requestData).toHaveBeenCalled();
       expect(recorder.stop).toHaveBeenCalled();
     });
@@ -224,7 +230,7 @@ describe('media-recorder-utils.js', () => {
 
       setupAutoStop(stream, recorder);
       endedCallback();
-      
+
       expect(recorder.stop).not.toHaveBeenCalled();
     });
 
@@ -237,7 +243,7 @@ describe('media-recorder-utils.js', () => {
       const recorder = { state: 'recording' };
 
       setupAutoStop(stream, recorder);
-      
+
       expect(videoTrack1.addEventListener).toHaveBeenCalled();
       expect(videoTrack2.addEventListener).toHaveBeenCalled();
     });
