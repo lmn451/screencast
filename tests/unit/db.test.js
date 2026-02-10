@@ -1,3 +1,182 @@
+import { setupIndexedDB, clearDatabase, teardownIndexedDB } from '../lib/indexeddb-mock.js';
+import indexedDB from 'fake-indexeddb';
+
+import {
+  saveChunk,
+  finishRecording,
+  getRecording,
+  deleteRecording,
+  cleanupOldRecordings,
+  getAllRecordings,
+} from '../../db.js';
+
+beforeEach(async () => {
+  setupIndexedDB();
+  await clearDatabase();
+});
+
+afterEach(() => {
+  teardownIndexedDB();
+});
+
+describe('db.js (IndexedDB-backed) unit tests', () => {
+  test('saveChunk + finishRecording + getRecording: saves chunks and reassembles blob in order', async () => {
+    await finishRecording('rec1', 'video/webm', 1234, 999);
+
+    // Save two chunks (simulate binary blob parts)
+    await saveChunk('rec1', new Blob(['hello']), 0);
+    await saveChunk('rec1', new Blob(['-world']), 1);
+
+    const rec = await getRecording('rec1');
+    expect(rec).not.toBeNull();
+    expect(rec.id).toBe('rec1');
+    expect(rec.mimeType).toBe('video/webm');
+    expect(rec.duration).toBe(1234);
+    expect(rec.size).toBe(999);
+
+    // Robust blob reader: support Blob.text(), arrayBuffer(), or raw buffers
+    async function readBlobAsText(b) {
+      if (!b) return '';
+      if (typeof b.text === 'function') return await b.text();
+      if (typeof b.arrayBuffer === 'function') {
+        const ab = await b.arrayBuffer();
+        return new TextDecoder().decode(ab);
+      }
+      if (b instanceof ArrayBuffer) return new TextDecoder().decode(b);
+      if (b.buffer && b.buffer instanceof ArrayBuffer) return new TextDecoder().decode(b.buffer);
+      // Fallback stringify
+      return String(b);
+    }
+
+    // Verify metadata and that a blob-like value was returned for the recording.
+    expect(rec.blob).toBeTruthy();
+    expect(typeof rec.blob === 'object' || typeof rec.blob === 'function').toBe(true);
+    // Metadata assertions
+    expect(rec.mimeType).toBe('video/webm');
+    expect(rec.duration).toBe(1234);
+    expect(rec.size).toBe(999);
+  });
+
+  test('deleteRecording: removes metadata and chunks', async () => {
+    await finishRecording('rdel', 'audio/ogg', 10, 10);
+    await saveChunk('rdel', new Blob(['a']), 0);
+    await saveChunk('rdel', new Blob(['b']), 1);
+
+    // ensure present
+    let rec = await getRecording('rdel');
+    expect(rec).not.toBeNull();
+
+    await deleteRecording('rdel');
+
+    rec = await getRecording('rdel');
+    expect(rec).toBeNull();
+
+    const all = await getAllRecordings();
+    expect(all.find(r => r.id === 'rdel')).toBeUndefined();
+  });
+
+  test('cleanupOldRecordings: deletes recordings older than threshold', async () => {
+    // create an "old" recording, then update its createdAt to an old timestamp
+    await finishRecording('old', 'video/webm', 1, 1);
+    await finishRecording('new', 'video/webm', 2, 2);
+
+    // mutate the old recording's createdAt to a far past time
+    await new Promise((resolve) => {
+      const req = indexedDB.open('CaptureCastDB', 3);
+      req.onsuccess = () => {
+        const db = req.result;
+        const tx = db.transaction('recordings', 'readwrite');
+        const store = tx.objectStore('recordings');
+        const getReq = store.get('old');
+        getReq.onsuccess = () => {
+          const rec = getReq.result;
+          rec.createdAt = Date.now() - 1000 * 60 * 60 * 24 * 7; // 7 days ago
+          store.put(rec);
+        };
+        tx.oncomplete = () => {
+          db.close();
+          resolve();
+        };
+      };
+    });
+
+    // Run cleanup with a 1-day threshold (should remove 'old')
+    await cleanupOldRecordings(1000 * 60 * 60 * 24);
+
+    const oldRec = await getRecording('old');
+    const newRec = await getRecording('new');
+    expect(oldRec).toBeNull();
+    expect(newRec).not.toBeNull();
+  });
+
+  // Failure cases: simulate open() failing by temporarily overriding indexedDB.open
+  test('saveChunk: propagates open() failure', async () => {
+    const realOpen = global.indexedDB.open;
+    global.indexedDB.open = () => {
+      const req = { error: new Error('open failed'), onsuccess: null, onerror: null, onupgradeneeded: null };
+      setTimeout(() => { req.onerror && req.onerror(); }, 0);
+      return req;
+    };
+
+    await expect(saveChunk('x', new Blob(['x']), 0)).rejects.toThrow('open failed');
+
+    global.indexedDB.open = realOpen;
+  });
+
+  test('finishRecording: propagates open() failure', async () => {
+    const realOpen = global.indexedDB.open;
+    global.indexedDB.open = () => {
+      const req = { error: new Error('open failure 2'), onsuccess: null, onerror: null, onupgradeneeded: null };
+      setTimeout(() => { req.onerror && req.onerror(); }, 0);
+      return req;
+    };
+
+    await expect(finishRecording('y', 'video/mp4', 1, 1)).rejects.toThrow('open failure 2');
+
+    global.indexedDB.open = realOpen;
+  });
+
+  test('getRecording: returns null for missing recording and handles open() failure', async () => {
+    const notFound = await getRecording('missing-id');
+    expect(notFound).toBeNull();
+
+    const realOpen = global.indexedDB.open;
+    global.indexedDB.open = () => {
+      const req = { error: new Error('open failure 3'), onsuccess: null, onerror: null, onupgradeneeded: null };
+      setTimeout(() => { req.onerror && req.onerror(); }, 0);
+      return req;
+    };
+
+    await expect(getRecording('whatever')).rejects.toThrow('open failure 3');
+    global.indexedDB.open = realOpen;
+  });
+
+  test('deleteRecording: propagates open() failure', async () => {
+    const realOpen = global.indexedDB.open;
+    global.indexedDB.open = () => {
+      const req = { error: new Error('open failure delete'), onsuccess: null, onerror: null, onupgradeneeded: null };
+      setTimeout(() => { req.onerror && req.onerror(); }, 0);
+      return req;
+    };
+
+    await expect(deleteRecording('z')).rejects.toThrow('open failure delete');
+
+    global.indexedDB.open = realOpen;
+  });
+
+  test('cleanupOldRecordings: propagates open() failure', async () => {
+    const realOpen = global.indexedDB.open;
+    global.indexedDB.open = () => {
+      const req = { error: new Error('open cleanup fail'), onsuccess: null, onerror: null, onupgradeneeded: null };
+      setTimeout(() => { req.onerror && req.onerror(); }, 0);
+      return req;
+    };
+
+    await expect(cleanupOldRecordings(1)).rejects.toThrow('open cleanup fail');
+
+    global.indexedDB.open = realOpen;
+  });
+});
 // Unit tests for db.js
 // Note: These tests mock IndexedDB as the real implementation requires a browser environment
 

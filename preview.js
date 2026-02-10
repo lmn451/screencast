@@ -20,7 +20,7 @@ function getQueryParam(name) {
 // Validate UUID format for security
 function isValidUUID(str) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
-    str
+    str,
   );
 }
 
@@ -250,12 +250,9 @@ if (typeof window !== "undefined" && window.location.search.includes("test")) {
   // (Input holds base name only, without extension)
   const currentBaseName = recordName || defaultBaseName;
   if (filenameInput) {
-    // Set the placeholder to show what the default would be
-    filenameInput.placeholder = defaultBaseName;
-    
     // Set value to the saved custom name if present, otherwise empty (so placeholder shows)
     filenameInput.value = recordName || "";
-    
+
     // Select the text only when there's no saved name, to make it easy to overwrite.
     if (!recordName) {
       try {
@@ -327,8 +324,8 @@ if (typeof window !== "undefined" && window.location.search.includes("test")) {
     // 2. It's different from the default name, AND
     // 3. It's different from the current saved name (avoid redundant updates)
     const shouldPersistName =
-      !!id && 
-      !!inputBaseName && 
+      !!id &&
+      !!inputBaseName &&
       inputBaseName !== defaultBaseName &&
       inputBaseName !== recordName;
 

@@ -35,12 +35,9 @@
   "web_accessible_resources": [
     {
       "resources": [
-        "offscreen.html",
-        "preview.html",
-        "overlay.js",
-        "recorder.html"
+        "overlay.js"
       ],
-      "matches": ["<all_urls>"]
+      "matches": ["http://*/*", "https://*/*"]
     }
   ]
 }
