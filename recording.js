@@ -1,4 +1,9 @@
-import { DB_NAME, DB_VERSION, STORE_RECORDINGS, STORE_CHUNKS } from './db-shared.js';
+import {
+  DB_NAME,
+  DB_VERSION,
+  STORE_RECORDINGS,
+  STORE_CHUNKS,
+} from "./db-shared.js";
 
 function openDB() {
   return new Promise((resolve, reject) => {
@@ -8,11 +13,13 @@ function openDB() {
     request.onupgradeneeded = (event) => {
       const db = event.target.result;
       if (!db.objectStoreNames.contains(STORE_RECORDINGS)) {
-        db.createObjectStore(STORE_RECORDINGS, { keyPath: 'id' });
+        db.createObjectStore(STORE_RECORDINGS, { keyPath: "id" });
       }
       if (!db.objectStoreNames.contains(STORE_CHUNKS)) {
-        const chunkStore = db.createObjectStore(STORE_CHUNKS, { keyPath: ['recordingId', 'index'] });
-        chunkStore.createIndex('recordingId', 'recordingId', { unique: false });
+        const chunkStore = db.createObjectStore(STORE_CHUNKS, {
+          keyPath: ["recordingId", "index"],
+        });
+        chunkStore.createIndex("recordingId", "recordingId", { unique: false });
       }
     };
   });
@@ -23,13 +30,23 @@ export async function finishRecording(id, mimeType, duration, size) {
   try {
     db = await openDB();
   } catch (e) {
-    throw new Error('[DB] Failed to open database for finishRecording: ' + (e && e.message ? e.message : e));
+    throw new Error(
+      "[DB] Failed to open database for finishRecording: " +
+        (e && e.message ? e.message : e),
+    );
   }
 
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_RECORDINGS, 'readwrite');
+    const tx = db.transaction(STORE_RECORDINGS, "readwrite");
     const store = tx.objectStore(STORE_RECORDINGS);
-    const request = store.put({ id, mimeType, duration, size, createdAt: Date.now(), name: null });
+    const request = store.put({
+      id,
+      mimeType,
+      duration,
+      size,
+      createdAt: Date.now(),
+      name: null,
+    });
     request.onsuccess = () => resolve();
     request.onerror = () => reject(request.error);
     tx.oncomplete = () => db.close();
@@ -42,10 +59,15 @@ export async function updateRecordingName(id, name) {
   try {
     db = await openDB();
   } catch (e) {
-    return Promise.reject(new Error('[DB] Failed to open database for updateRecordingName: ' + (e && e.message ? e.message : e)));
+    return Promise.reject(
+      new Error(
+        "[DB] Failed to open database for updateRecordingName: " +
+          (e && e.message ? e.message : e),
+      ),
+    );
   }
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_RECORDINGS, 'readwrite');
+    const tx = db.transaction(STORE_RECORDINGS, "readwrite");
     const store = tx.objectStore(STORE_RECORDINGS);
     const getRequest = store.get(id);
 
@@ -57,7 +79,7 @@ export async function updateRecordingName(id, name) {
         putRequest.onsuccess = () => resolve();
         putRequest.onerror = () => reject(putRequest.error);
       } else {
-        reject(new Error('Recording not found'));
+        reject(new Error("Recording not found"));
       }
     };
     getRequest.onerror = () => reject(getRequest.error);
@@ -71,12 +93,15 @@ export async function getRecording(id) {
   try {
     db = await openDB();
   } catch (e) {
-    throw new Error('[DB] Failed to open database for getRecording: ' + (e && e.message ? e.message : e));
+    throw new Error(
+      "[DB] Failed to open database for getRecording: " +
+        (e && e.message ? e.message : e),
+    );
   }
 
   // 1. Get metadata
   const meta = await new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_RECORDINGS, 'readonly');
+    const tx = db.transaction(STORE_RECORDINGS, "readonly");
     const store = tx.objectStore(STORE_RECORDINGS);
     const req = store.get(id);
     req.onsuccess = () => resolve(req.result);
@@ -90,14 +115,14 @@ export async function getRecording(id) {
 
   // 2. Get all chunks
   const chunks = await new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_CHUNKS, 'readonly');
+    const tx = db.transaction(STORE_CHUNKS, "readonly");
     const store = tx.objectStore(STORE_CHUNKS);
-    const index = store.index('recordingId');
+    const index = store.index("recordingId");
     const req = index.getAll(IDBKeyRange.only(id));
     req.onsuccess = () => {
       const results = req.result;
       results.sort((a, b) => a.index - b.index);
-      resolve(results.map(r => r.chunk));
+      resolve(results.map((r) => r.chunk));
     };
     req.onerror = () => reject(req.error);
   });
@@ -121,10 +146,15 @@ export async function getAllRecordings() {
   try {
     db = await openDB();
   } catch (e) {
-    return Promise.reject(new Error('[DB] Failed to open database for getAllRecordings: ' + (e && e.message ? e.message : e)));
+    return Promise.reject(
+      new Error(
+        "[DB] Failed to open database for getAllRecordings: " +
+          (e && e.message ? e.message : e),
+      ),
+    );
   }
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_RECORDINGS, 'readonly');
+    const tx = db.transaction(STORE_RECORDINGS, "readonly");
     const store = tx.objectStore(STORE_RECORDINGS);
     const request = store.getAll();
     request.onsuccess = () => {

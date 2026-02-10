@@ -1,4 +1,9 @@
-import { DB_NAME, DB_VERSION, STORE_RECORDINGS, STORE_CHUNKS } from './db-shared.js';
+import {
+  DB_NAME,
+  DB_VERSION,
+  STORE_RECORDINGS,
+  STORE_CHUNKS,
+} from "./db-shared.js";
 
 function openDB() {
   return new Promise((resolve, reject) => {
@@ -8,11 +13,13 @@ function openDB() {
     request.onupgradeneeded = (event) => {
       const db = event.target.result;
       if (!db.objectStoreNames.contains(STORE_RECORDINGS)) {
-        db.createObjectStore(STORE_RECORDINGS, { keyPath: 'id' });
+        db.createObjectStore(STORE_RECORDINGS, { keyPath: "id" });
       }
       if (!db.objectStoreNames.contains(STORE_CHUNKS)) {
-        const chunkStore = db.createObjectStore(STORE_CHUNKS, { keyPath: ['recordingId', 'index'] });
-        chunkStore.createIndex('recordingId', 'recordingId', { unique: false });
+        const chunkStore = db.createObjectStore(STORE_CHUNKS, {
+          keyPath: ["recordingId", "index"],
+        });
+        chunkStore.createIndex("recordingId", "recordingId", { unique: false });
       }
     };
   });
@@ -21,12 +28,12 @@ function openDB() {
 export async function deleteRecording(id) {
   const db = await openDB();
   return new Promise((resolve, reject) => {
-    const tx = db.transaction([STORE_RECORDINGS, STORE_CHUNKS], 'readwrite');
+    const tx = db.transaction([STORE_RECORDINGS, STORE_CHUNKS], "readwrite");
 
     tx.objectStore(STORE_RECORDINGS).delete(id);
 
     const chunkStore = tx.objectStore(STORE_CHUNKS);
-    const index = chunkStore.index('recordingId');
+    const index = chunkStore.index("recordingId");
     const req = index.openKeyCursor(IDBKeyRange.only(id));
 
     req.onsuccess = (event) => {
@@ -53,7 +60,7 @@ export async function cleanupOldRecordings(maxAgeMs = 24 * 60 * 60 * 1000) {
   const cutoff = Date.now() - maxAgeMs;
 
   return new Promise((resolve, reject) => {
-    const tx = db.transaction([STORE_RECORDINGS, STORE_CHUNKS], 'readwrite');
+    const tx = db.transaction([STORE_RECORDINGS, STORE_CHUNKS], "readwrite");
     const store = tx.objectStore(STORE_RECORDINGS);
     const req = store.openCursor();
 
@@ -71,7 +78,7 @@ export async function cleanupOldRecordings(maxAgeMs = 24 * 60 * 60 * 1000) {
         if (idsToDelete.length === 0) return;
 
         const chunkStore = tx.objectStore(STORE_CHUNKS);
-        const chunkIndex = chunkStore.index('recordingId');
+        const chunkIndex = chunkStore.index("recordingId");
 
         let completed = 0;
         const checkDone = () => {
@@ -81,17 +88,17 @@ export async function cleanupOldRecordings(maxAgeMs = 24 * 60 * 60 * 1000) {
           }
         };
 
-        idsToDelete.forEach(id => {
-           const chunkReq = chunkIndex.openKeyCursor(IDBKeyRange.only(id));
-           chunkReq.onsuccess = (e) => {
-             const c = e.target.result;
-             if (c) {
-               chunkStore.delete(c.primaryKey);
-               c.continue();
-             } else {
-               checkDone();
-             }
-           };
+        idsToDelete.forEach((id) => {
+          const chunkReq = chunkIndex.openKeyCursor(IDBKeyRange.only(id));
+          chunkReq.onsuccess = (e) => {
+            const c = e.target.result;
+            if (c) {
+              chunkStore.delete(c.primaryKey);
+              c.continue();
+            } else {
+              checkDone();
+            }
+          };
         });
       }
     };
@@ -99,7 +106,9 @@ export async function cleanupOldRecordings(maxAgeMs = 24 * 60 * 60 * 1000) {
     tx.oncomplete = () => {
       db.close();
       if (idsToDelete.length > 0) {
-        console.log(`[CaptureCast DB] Cleanup: Deleted ${idsToDelete.length} old recordings`);
+        console.log(
+          `[CaptureCast DB] Cleanup: Deleted ${idsToDelete.length} old recordings`,
+        );
       }
       resolve();
     };
@@ -109,4 +118,3 @@ export async function cleanupOldRecordings(maxAgeMs = 24 * 60 * 60 * 1000) {
     };
   });
 }
-

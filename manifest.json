@@ -19,12 +19,7 @@
       "128": "icons/icon-128.png"
     }
   },
-  "permissions": [
-    "activeTab",
-    "scripting",
-    "offscreen",
-    "tabs"
-  ],
+  "permissions": ["activeTab", "scripting", "offscreen", "tabs"],
   "background": {
     "service_worker": "background.js",
     "type": "module"
@@ -34,9 +29,7 @@
   },
   "web_accessible_resources": [
     {
-      "resources": [
-        "overlay.js"
-      ],
+      "resources": ["overlay.js"],
       "matches": ["http://*/*", "https://*/*"]
     }
   ]

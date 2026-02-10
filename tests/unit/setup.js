@@ -3,7 +3,7 @@
 // Mock chrome APIs globally for tests
 global.chrome = {
   runtime: {
-    id: 'test-extension-id',
+    id: "test-extension-id",
     getURL: (path) => `chrome-extension://test-extension-id/${path}`,
   },
   storage: {
@@ -21,12 +21,12 @@ global.indexedDB = {
 
 // Polyfill structuredClone for Node environments where it's not available.
 // Keep it minimal for tests: pass-through for Blob and JSON-clone for plain objects.
-if (typeof structuredClone === 'undefined') {
+if (typeof structuredClone === "undefined") {
   global.structuredClone = (value) => {
     // Deep-clone simple structures while preserving Blobs and ArrayBuffers
     const _clone = (v) => {
-      if (v === null || typeof v !== 'object') return v;
-      if (typeof Blob !== 'undefined' && v instanceof Blob) return v;
+      if (v === null || typeof v !== "object") return v;
+      if (typeof Blob !== "undefined" && v instanceof Blob) return v;
       if (v instanceof ArrayBuffer) return v.slice(0);
       if (Array.isArray(v)) return v.map(_clone);
       const out = {};
