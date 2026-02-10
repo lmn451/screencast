@@ -1,31 +1,66 @@
-<!doctype html>
+<!DOCTYPE html>
 <html>
   <head>
     <meta charset="utf-8" />
     <title>CaptureCast Preview</title>
     <style>
-      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 16px; }
-      video { width: 100%; max-width: 960px; background: #000; }
+      body {
+        font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+        margin: 16px;
+      }
+      video {
+        width: 100%;
+        max-width: 960px;
+        background: #000;
+      }
       /* Gate visibility to avoid visible jumps while normalizing */
-      video[data-stable="false"] { visibility: hidden; }
-      video[data-stable="true"] { visibility: visible; }
-      .actions { margin-top: 12px; display: flex; gap: 8px; }
-      button { padding: 8px 12px; font-size: 14px; border-radius: 8px; border: 1px solid #ddd; cursor: pointer; }
-      button.primary { background: #1a73e8; color: #fff; border: none; }
+      video[data-stable='false'] {
+        visibility: hidden;
+      }
+      video[data-stable='true'] {
+        visibility: visible;
+      }
+      .actions {
+        margin-top: 12px;
+        display: flex;
+        gap: 8px;
+      }
+      button {
+        padding: 8px 12px;
+        font-size: 14px;
+        border-radius: 8px;
+        border: 1px solid #ddd;
+        cursor: pointer;
+      }
+      button.primary {
+        background: #1a73e8;
+        color: #fff;
+        border: none;
+      }
     </style>
   </head>
   <body>
     <h1>Recording Preview</h1>
     <video id="video" controls preload="metadata"></video>
-    <div style="margin-top: 12px; max-width: 960px;">
-      <label for="filename-input" style="display: block; margin-bottom: 4px; font-size: 14px; color: #5f6368;">
+    <div style="margin-top: 12px; max-width: 960px">
+      <label
+        for="filename-input"
+        style="display: block; margin-bottom: 4px; font-size: 14px; color: #5f6368"
+      >
         Recording name (optional):
       </label>
-      <input 
-        type="text" 
-        id="filename-input" 
-        placeholder="Enter a custom name..." 
-        style="width: 100%; padding: 8px; font-size: 14px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box;"
+      <input
+        type="text"
+        id="filename-input"
+        placeholder="Enter a custom name..."
+        style="
+          width: 100%;
+          padding: 8px;
+          font-size: 14px;
+          border: 1px solid #ddd;
+          border-radius: 4px;
+          box-sizing: border-box;
+        "
       />
     </div>
     <div class="actions">
