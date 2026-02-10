@@ -11,6 +11,7 @@ CaptureCast is a privacy-focused browser extension for screen recording built on
 **Role**: Central coordinator for the extension lifecycle and state management.
 
 **Key Responsibilities**:
+
 - Manages recording state (recording/idle, mode, IDs)
 - Coordinates between popup, recorder/offscreen, and preview components
 - Handles overlay injection into active tabs
@@ -18,6 +19,7 @@ CaptureCast is a privacy-focused browser extension for screen recording built on
 - Routes messages between components
 
 **State Management**:
+
 ```javascript
 STATE = {
   recording: boolean,
@@ -28,11 +30,12 @@ STATE = {
   includeSystemAudio: boolean,
   recorderTabId: number,
   strategy: 'offscreen' | 'page',
-  stopTimeoutId: number
-}
+  stopTimeoutId: number,
+};
 ```
 
 **Recording Strategies**:
+
 - **Offscreen Strategy**: Used when microphone is NOT needed. Creates an offscreen document to handle recording without visible UI.
 - **Page Strategy**: Used when microphone IS needed (mic permission requires visible page). Opens a dedicated recorder tab.
 
@@ -41,6 +44,7 @@ STATE = {
 **Role**: User interface for starting/stopping recordings.
 
 **Features**:
+
 - Toggle microphone input
 - Toggle system/tab audio
 - Start recording button
@@ -52,11 +56,13 @@ STATE = {
 **Role**: Hidden document for screen recording without microphone.
 
 **Why Offscreen?**:
+
 - `getDisplayMedia()` requires a document context
 - Offscreen documents are lightweight and don't show UI
 - Ideal for screen-only recording
 
 **Process**:
+
 1. Receives START message from background
 2. Calls `getDisplayMedia()` with specified constraints
 3. Sets up `MediaRecorder` with codec fallback (AV1 → VP9 → VP8)
@@ -69,11 +75,13 @@ STATE = {
 **Role**: Visible page for screen recording WITH microphone.
 
 **Why Visible Page?**:
+
 - Microphone permission (`getUserMedia`) requires user-visible context
 - Provides visual feedback during recording
 - Shows preview of what's being recorded
 
 **Process**:
+
 1. Loads with query params (id, mode, mic, sys)
 2. Requests `getDisplayMedia()` for screen
 3. Requests `getUserMedia()` for microphone (if enabled)
@@ -86,6 +94,7 @@ STATE = {
 **Role**: Displays recorded video and provides download/delete options.
 
 **Features**:
+
 - Loads recording from IndexedDB by ID
 - Normalizes video duration (fixes WebM metadata quirks)
 - Provides download button (saves to disk)
@@ -93,6 +102,7 @@ STATE = {
 
 **Duration Normalization**:
 WebM files from MediaRecorder often have incorrect/infinite duration metadata. The `fixDurationAndReset()` function:
+
 1. Seeks to end of video to force metadata calculation
 2. Listens for `durationchange` event
 3. Resets to start when duration is known
@@ -103,6 +113,7 @@ WebM files from MediaRecorder often have incorrect/infinite duration metadata. T
 **Role**: Injected content script that shows Stop button on recorded page.
 
 **Features**:
+
 - Minimal DOM footprint (single fixed button)
 - High z-index to stay visible
 - Sends STOP message when clicked
@@ -110,6 +121,7 @@ WebM files from MediaRecorder often have incorrect/infinite duration metadata. T
 
 **Injection Limitations**:
 Cannot inject on restricted pages:
+
 - `chrome://` pages
 - `about:` pages
 - Other extension pages
@@ -122,6 +134,7 @@ In these cases, users must stop via extension icon.
 **Role**: IndexedDB wrapper for storing recordings.
 
 **Schema**:
+
 ```javascript
 {
   id: string (UUID),
@@ -132,6 +145,7 @@ In these cases, users must stop via extension icon.
 ```
 
 **Operations**:
+
 - `saveRecording(id, blob, mimeType)`: Store recording
 - `getRecording(id)`: Retrieve recording
 - `deleteRecording(id)`: Remove recording
@@ -143,29 +157,31 @@ Connections are properly closed after each transaction to prevent memory leaks.
 
 ### Message Types
 
-| Type | From | To | Purpose |
-|------|------|----|----|
-| `START` | Popup | Background | Start recording with options |
-| `STOP` | Popup/Overlay | Background | Stop active recording |
-| `GET_STATE` | Popup | Background | Query current state |
-| `OFFSCREEN_START` | Background | Offscreen | Begin offscreen recording |
-| `OFFSCREEN_STOP` | Background | Offscreen | Stop offscreen recording |
-| `OFFSCREEN_STARTED` | Offscreen | Background | Acknowledge start |
-| `OFFSCREEN_DATA` | Offscreen | Background | Recording saved, provide ID |
-| `OFFSCREEN_ERROR` | Offscreen | Background | Recording failed |
-| `RECORDER_STOP` | Background | Recorder | Stop recorder page |
-| `RECORDER_STARTED` | Recorder | Background | Acknowledge start |
-| `RECORDER_DATA` | Recorder | Background | Recording saved, provide ID |
-| `OVERLAY_REMOVE` | Background | Overlay | Remove overlay from page |
+| Type                | From          | To         | Purpose                      |
+| ------------------- | ------------- | ---------- | ---------------------------- |
+| `START`             | Popup         | Background | Start recording with options |
+| `STOP`              | Popup/Overlay | Background | Stop active recording        |
+| `GET_STATE`         | Popup         | Background | Query current state          |
+| `OFFSCREEN_START`   | Background    | Offscreen  | Begin offscreen recording    |
+| `OFFSCREEN_STOP`    | Background    | Offscreen  | Stop offscreen recording     |
+| `OFFSCREEN_STARTED` | Offscreen     | Background | Acknowledge start            |
+| `OFFSCREEN_DATA`    | Offscreen     | Background | Recording saved, provide ID  |
+| `OFFSCREEN_ERROR`   | Offscreen     | Background | Recording failed             |
+| `RECORDER_STOP`     | Background    | Recorder   | Stop recorder page           |
+| `RECORDER_STARTED`  | Recorder      | Background | Acknowledge start            |
+| `RECORDER_DATA`     | Recorder      | Background | Recording saved, provide ID  |
+| `OVERLAY_REMOVE`    | Background    | Overlay    | Remove overlay from page     |
 
 ### Message Format
 
 Success:
+
 ```javascript
 { ok: true, ...data }
 ```
 
 Failure:
+
 ```javascript
 { ok: false, error: string }
 ```
@@ -257,7 +273,9 @@ Background closes recorder tab
 ## Security Considerations
 
 ### Message Validation
+
 All messages are validated to ensure they come from the extension itself:
+
 ```javascript
 if (sender.id !== chrome.runtime.id) {
   // Reject unauthorized messages
@@ -265,7 +283,9 @@ if (sender.id !== chrome.runtime.id) {
 ```
 
 ### Content Security Policy
+
 Manifest includes CSP to prevent XSS:
+
 ```json
 "content_security_policy": {
   "extension_pages": "script-src 'self'; object-src 'self'"
@@ -273,7 +293,9 @@ Manifest includes CSP to prevent XSS:
 ```
 
 ### Permissions
+
 Minimal permissions requested:
+
 - `activeTab`: Only access current tab when recording
 - `scripting`: Inject overlay only
 - `offscreen`: Create hidden recording document
@@ -293,6 +315,7 @@ Minimal permissions requested:
 ## Error Handling
 
 ### Strategy
+
 - Try-catch around all Chrome API calls
 - Graceful degradation (e.g., overlay injection fails → badge-only stop)
 - User feedback via alerts in popup
@@ -300,29 +323,37 @@ Minimal permissions requested:
 - Return objects: `{ ok: true/false, error?: string }`
 
 ### Timeout Protection
+
 10-second timeout on stop operation prevents hung state if:
+
 - Offscreen/recorder doesn't respond
 - Message delivery fails
 - MediaRecorder hangs
 
 ### Recovery
+
 `resetRecordingState()` function ensures clean state reset on errors.
 
 ## Performance Optimizations
 
 ### Codec Selection
+
 Fallback chain prioritizes modern, efficient codecs:
+
 1. AV1 (best compression, newer browsers)
 2. VP9 (good compression, wide support)
 3. VP8 (legacy fallback)
 
 ### Content Hints
+
 Optimizes encoder settings:
+
 - Video: `contentHint = 'detail'` (for text/UI)
 - System audio: `contentHint = 'music'`
 - Microphone: `contentHint = 'speech'`
 
 ### Resource Management
+
 - Close offscreen documents when idle
 - Close database connections after transactions
 - Revoke blob URLs on page unload
@@ -331,6 +362,7 @@ Optimizes encoder settings:
 ## Future Enhancements
 
 ### Planned Features (from PRD)
+
 - Trimming/editing with ffmpeg.wasm
 - Format conversion (WebM → MP4)
 - Quality settings
@@ -338,7 +370,9 @@ Optimizes encoder settings:
 - Storage management UI
 
 ### State Persistence
+
 For MV3 service worker suspension:
+
 ```javascript
 // Save state to chrome.storage.session
 await chrome.storage.session.set({ captureCastState: STATE });
@@ -351,6 +385,7 @@ Object.assign(STATE, data.captureCastState);
 ## Testing
 
 ### E2E Tests (Playwright)
+
 - Test extension loading
 - Test offscreen recording flow
 - Test explicit stop
@@ -358,6 +393,7 @@ Object.assign(STATE, data.captureCastState);
 - Mock video generation for deterministic tests
 
 ### Test Structure
+
 ```
 tests/e2e/
   ├── lib/fixtures.ts     # Extension loading fixture
@@ -376,6 +412,7 @@ tests/e2e/
 7. Test changes
 
 ### Running Tests
+
 ```bash
 npm run e2e          # All tests
 npm run e2e:stop     # Stop tests only
@@ -392,20 +429,24 @@ npm run e2e:stop     # Stop tests only
 ## Troubleshooting
 
 ### Recording doesn't start
+
 - Check if on restricted page (chrome://, about:)
 - Verify permissions granted
 - Check console for errors
 
 ### Overlay not showing
+
 - Normal on restricted pages
 - Use extension icon to stop instead
 
 ### Video won't play in preview
+
 - Duration normalization may take 2s
 - Check browser codec support
 - Try downloading and playing externally
 
 ### State stuck "recording"
+
 - 10s timeout will auto-reset
 - Check service worker console
 - Reload extension if needed

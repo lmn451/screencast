@@ -14,6 +14,7 @@ CaptureCast is a **well-architected, privacy-focused browser extension** for scr
 ### Overall Assessment: ⭐⭐⭐⭐½ (4.5/5)
 
 **Strengths:**
+
 - ✅ Exceptional documentation (ARCHITECTURE.md, TROUBLESHOOTING.md, PRD)
 - ✅ Privacy-first design with no network requests
 - ✅ Clean message-passing architecture
@@ -23,6 +24,7 @@ CaptureCast is a **well-architected, privacy-focused browser extension** for scr
 - ✅ Security-conscious (CSP, message validation, minimal permissions)
 
 **Areas for Improvement:**
+
 - ⚠️ Console logging could be production-optimized
 - ⚠️ Some error paths could provide better user feedback
 - ⚠️ Limited unit test coverage (only E2E tests present)
@@ -45,10 +47,12 @@ Overlay                   IndexedDB
 ```
 
 **Strategy Pattern Implementation:**
+
 - **Offscreen Strategy:** Used when microphone is not needed (lighter weight)
 - **Page Strategy:** Used when microphone is needed (requires visible context)
 
 This is an excellent architectural choice that balances:
+
 - User experience (minimizes visible UI when not needed)
 - Browser API constraints (mic requires visible page)
 - Resource efficiency (offscreen documents are lightweight)
@@ -67,11 +71,12 @@ const STATE = {
   includeSystemAudio: boolean,
   recorderTabId: number,
   strategy: 'offscreen' | 'page',
-  stopTimeoutId: number
+  stopTimeoutId: number,
 };
 ```
 
 **Strengths:**
+
 - Clear state transitions (IDLE → RECORDING → SAVING → IDLE)
 - Single source of truth
 - Strategy selection tracked
@@ -82,15 +87,15 @@ const STATE = {
 
 Each component has a clear, single responsibility:
 
-| Component | Responsibility | Coupling |
-|-----------|---------------|----------|
-| `background.js` | State coordination | Low |
-| `popup.js` | User input | Very Low |
-| `recorder.js` | Media capture (with mic) | Low |
-| `offscreen.js` | Media capture (no mic) | Low |
-| `db.js` | Persistence | None |
-| `preview.js` | Playback & download | Low |
-| `overlay.js` | In-page controls | Very Low |
+| Component       | Responsibility           | Coupling |
+| --------------- | ------------------------ | -------- |
+| `background.js` | State coordination       | Low      |
+| `popup.js`      | User input               | Very Low |
+| `recorder.js`   | Media capture (with mic) | Low      |
+| `offscreen.js`  | Media capture (no mic)   | Low      |
+| `db.js`         | Persistence              | None     |
+| `preview.js`    | Playback & download      | Low      |
+| `overlay.js`    | In-page controls         | Very Low |
 
 This is exemplary separation of concerns.
 
@@ -103,6 +108,7 @@ This is exemplary separation of concerns.
 **Positive Observations:**
 
 1. **Async/Await Usage:** Consistent and proper
+
    ```javascript
    async function startRecording(mode, includeMic, includeSystemAudio) {
      if (STATE.status !== 'IDLE') return { ok: false, error: 'Already recording or saving' };
@@ -111,6 +117,7 @@ This is exemplary separation of concerns.
    ```
 
 2. **Error Handling:** Comprehensive try-catch blocks
+
    ```javascript
    try {
      await ensureOffscreenDocument();
@@ -140,6 +147,7 @@ This is exemplary separation of concerns.
 **Duplication Found:**
 
 1. **Chunk saving logic** appears in both `recorder.js` and `offscreen.js`:
+
    ```javascript
    // In both files:
    mediaRecorder.ondataavailable = async (e) => {
@@ -158,11 +166,13 @@ This is exemplary separation of concerns.
    ```javascript
    // Same in recorder.js and offscreen.js
    let options = { mimeType: 'video/webm;codecs=av01,opus' };
-   if (!MediaRecorder.isTypeSupported(options.mimeType)) options.mimeType = 'video/webm;codecs=av1,opus';
+   if (!MediaRecorder.isTypeSupported(options.mimeType))
+     options.mimeType = 'video/webm;codecs=av1,opus';
    // ... etc
    ```
 
 **Recommendation:** Extract to shared module `media-recorder-utils.js`:
+
 ```javascript
 export function getOptimalCodec() { ... }
 export function createRecorderWithHandlers(stream, recordingId, callbacks) { ... }
@@ -175,12 +185,18 @@ export function createRecorderWithHandlers(stream, recordingId, callbacks) { ...
 ### 3.1 IndexedDB Implementation ✅ Good
 
 **Schema (v2):**
+
 ```javascript
-recordings: { id, mimeType, duration, size, createdAt }
-chunks: { recordingId, index, chunk }
+recordings: {
+  id, mimeType, duration, size, createdAt;
+}
+chunks: {
+  recordingId, index, chunk;
+}
 ```
 
 **Strengths:**
+
 - Chunked storage prevents memory issues with large recordings
 - Proper transaction handling
 - Connection cleanup after operations
@@ -188,6 +204,7 @@ chunks: { recordingId, index, chunk }
 - Version bumping with migration strategy
 
 **Issue Found:** In `db.js` line 13-17:
+
 ```javascript
 if (db.objectStoreNames.contains('recordings')) {
   db.deleteObjectStore('recordings');
@@ -197,11 +214,12 @@ if (db.objectStoreNames.contains('recordings')) {
 This **deletes all user data** on schema upgrade. This is documented as intentional ("to avoid migration complexity"), but is a poor user experience.
 
 **Recommendation:** Implement proper migration:
+
 ```javascript
 request.onupgradeneeded = (event) => {
   const db = event.target.result;
   const oldVersion = event.oldVersion;
-  
+
   if (oldVersion < 2) {
     // Migrate data instead of deleting
     const recordings = [];
@@ -223,6 +241,7 @@ chrome.runtime.onInstalled.addListener(async () => {
 ```
 
 This is great for preventing storage bloat, but users should be warned:
+
 - Add notice in popup or first-run screen
 - Consider making retention period configurable
 
@@ -233,6 +252,7 @@ This is great for preventing storage bloat, but users should be warned:
 ### 4.1 Permissions Audit ✅ Very Good
 
 **Manifest Permissions:**
+
 ```json
 {
   "permissions": ["activeTab", "scripting", "offscreen", "tabs"]
@@ -240,6 +260,7 @@ This is great for preventing storage bloat, but users should be warned:
 ```
 
 **Analysis:**
+
 - ✅ No `<all_urls>` host permission (excellent!)
 - ✅ `activeTab` instead of broad host access
 - ✅ Minimal permission set
@@ -252,6 +273,7 @@ This is great for preventing storage bloat, but users should be warned:
 ### 4.2 Message Validation ✅ Excellent
 
 **Sender Validation:**
+
 ```javascript
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (sender.id !== chrome.runtime.id) {
@@ -280,6 +302,7 @@ Prevents XSS in extension pages. No inline scripts detected (all use external `.
 **Query Parameter Validation:**
 
 In `recorder.js`:
+
 ```javascript
 function getQueryParam(name) {
   const url = new URL(location.href);
@@ -311,6 +334,7 @@ if (!recordingId || !isValidUUID(recordingId)) {
 Nearly all async operations and Chrome API calls are wrapped in try-catch blocks.
 
 **Example from `background.js`:**
+
 ```javascript
 try {
   if (STATE.overlayTabId) {
@@ -324,6 +348,7 @@ try {
 ### 5.2 User Feedback ⚠️ Inconsistent
 
 **In Popup:** User gets alerts
+
 ```javascript
 if (!res?.ok) {
   alert(res?.error || 'Failed to start recording');
@@ -331,6 +356,7 @@ if (!res?.ok) {
 ```
 
 **In Offscreen:** User gets console error but no UI feedback
+
 ```javascript
 console.error('OFFSCREEN: Failed to finish recording in DB:', dbError);
 // No user notification
@@ -358,6 +384,7 @@ This prevents the extension from getting stuck in "SAVING" state indefinitely.
 ### 6.1 Codec Selection ✅ Excellent
 
 Fallback chain prioritizes efficiency:
+
 ```
 AV01 (best compression) → AV1 → VP9 → VP8 (best compatibility) → generic webm
 ```
@@ -365,9 +392,9 @@ AV01 (best compression) → AV1 → VP9 → VP8 (best compatibility) → generic
 ### 6.2 Content Hints ✅ Excellent
 
 ```javascript
-vtrack.contentHint = 'detail';  // Screen/text optimization
+vtrack.contentHint = 'detail'; // Screen/text optimization
 micTrack.contentHint = 'speech'; // Voice optimization
-atrack.contentHint = 'music';    // System audio optimization
+atrack.contentHint = 'music'; // System audio optimization
 ```
 
 This tells the browser to optimize encoding for the content type. Great optimization!
@@ -379,6 +406,7 @@ mediaRecorder.start(1000); // 1 second chunks
 ```
 
 Good balance between:
+
 - Disk write frequency (not too aggressive)
 - Memory usage (not accumulating huge blobs)
 - Recovery (if crash occurs, only lose last second)
@@ -386,6 +414,7 @@ Good balance between:
 ### 6.4 Resource Management ✅ Excellent
 
 **Offscreen Document Cleanup:**
+
 ```javascript
 async function closeOffscreenDocumentIfIdle() {
   if (existing && STATE.status === 'IDLE') {
@@ -395,6 +424,7 @@ async function closeOffscreenDocumentIfIdle() {
 ```
 
 **URL Revocation:**
+
 ```javascript
 window.addEventListener('beforeunload', () => URL.revokeObjectURL(url));
 ```
@@ -408,6 +438,7 @@ These prevent memory leaks and resource exhaustion.
 ### 7.1 Test Coverage ⚠️ E2E Only
 
 **Current Tests:**
+
 - ✅ E2E tests for offscreen recording flow
 - ✅ E2E tests for explicit stop
 - ✅ E2E tests for auto-stop behavior
@@ -415,6 +446,7 @@ These prevent memory leaks and resource exhaustion.
 - ❌ No integration tests for individual modules
 
 **Recommendation:** Add unit tests for:
+
 1. `db.js` operations (easy to test in isolation)
 2. Message validation logic
 3. State transitions in `background.js`
@@ -423,6 +455,7 @@ These prevent memory leaks and resource exhaustion.
 ### 7.2 Test Quality ✅ Good
 
 The E2E tests use good practices:
+
 - Synthetic video generation (deterministic)
 - Proper waiting strategies
 - Cleanup between tests
@@ -444,6 +477,7 @@ async function generateWebmBlobInPage(page) {
 ### 8.1 Architecture Documentation ✅ Excellent
 
 `ARCHITECTURE.md` is comprehensive and well-structured:
+
 - Clear component descriptions
 - Message protocol table
 - Flow diagrams (text-based)
@@ -457,6 +491,7 @@ This is **exemplary technical documentation**.
 **Observation:** Code is generally self-documenting with good names, but complex sections lack comments.
 
 **Example needing comments (preview.js):**
+
 ```javascript
 const BIG = Number.MAX_SAFE_INTEGER / 2;
 try {
@@ -468,6 +503,7 @@ try {
 ```
 
 **Recommended:**
+
 ```javascript
 // Seeking to a very large time forces the browser to parse the entire WebM file
 // and calculate the actual duration. We use MAX_SAFE_INTEGER/2 to avoid overflow.
@@ -487,6 +523,7 @@ const BIG = Number.MAX_SAFE_INTEGER / 2;
 ### 9.1 Privacy Architecture ✅ Excellent
 
 **Key Privacy Features:**
+
 1. ✅ No network requests (verified in code - no `fetch`, `XMLHttpRequest`, or external resources)
 2. ✅ All storage is local (IndexedDB)
 3. ✅ No analytics or telemetry
@@ -498,6 +535,7 @@ This is a **gold standard** for privacy-focused extensions.
 ### 9.2 Data Retention ✅ Good with Note
 
 Auto-deletion after 24 hours is privacy-friendly but should be:
+
 1. Disclosed to users
 2. Configurable (some users may want longer retention)
 
@@ -508,6 +546,7 @@ Auto-deletion after 24 hours is privacy-friendly but should be:
 ### 10.1 API Usage ✅ Chrome/Edge Compatible
 
 **APIs Used:**
+
 - `chrome.runtime.*` ✅
 - `chrome.tabs.*` ✅
 - `chrome.scripting.*` ✅
@@ -534,6 +573,7 @@ console.log('OFFSCREEN: Starting capture with mode:', mode, 'includeAudio:', inc
 ```
 
 **Problems:**
+
 1. Performance impact (console operations are expensive)
 2. Information leakage (could expose internal state)
 3. Clutters user console
@@ -557,6 +597,7 @@ error('Failed to save chunk', err); // Always shown
 ### 11.2 Magic Numbers ⚠️ Medium Priority
 
 **Found in multiple files:**
+
 ```javascript
 setTimeout(() => { ... }, 2000);  // What is 2000?
 const BIG = Number.MAX_SAFE_INTEGER / 2; // Why /2?
@@ -564,6 +605,7 @@ mediaRecorder.start(1000); // Why 1000?
 ```
 
 **Recommendation:** Extract to named constants:
+
 ```javascript
 const DURATION_FIX_TIMEOUT_MS = 2000;
 const SEEK_POSITION_LARGE = Number.MAX_SAFE_INTEGER / 2; // Avoid overflow
@@ -573,6 +615,7 @@ const CHUNK_INTERVAL_MS = 1000; // 1 second for balance of memory/recovery
 ### 11.3 Error Swallowing ⚠️ Medium Priority
 
 **Multiple instances of empty catch blocks:**
+
 ```javascript
 try {
   video.pause?.();
@@ -580,6 +623,7 @@ try {
 ```
 
 While sometimes appropriate, this should at least log in debug mode:
+
 ```javascript
 try {
   video.pause?.();
@@ -591,6 +635,7 @@ try {
 ### 11.4 Potential Race Condition ⚠️ Low Priority
 
 **In background.js:**
+
 ```javascript
 STATE.stopTimeoutId = setTimeout(async () => {
   console.error('BACKGROUND: Save timeout reached (300s) - forcing reset');
@@ -607,6 +652,7 @@ if (STATE.stopTimeoutId) {
 If `resetRecordingState()` is called while the timeout function is running, there could be a race condition.
 
 **Recommendation:** Add a flag to prevent concurrent resets:
+
 ```javascript
 let resetting = false;
 
@@ -628,10 +674,12 @@ async function resetRecordingState() {
 ### 12.1 High Priority
 
 1. **Remove/Minimize Console Logging** 🔴
+
    - Implement debug mode
    - Remove or gate non-essential logs
 
 2. **Fix Storage Permission** ⚠️
+
    - Remove from manifest if not used
    - Or implement settings persistence
 
@@ -642,15 +690,18 @@ async function resetRecordingState() {
 ### 12.2 Medium Priority
 
 4. **Add Unit Tests** 📝
+
    - Test `db.js` operations
    - Test state machine logic
    - Test message validation
 
 5. **Reduce Code Duplication** 🔄
+
    - Extract shared MediaRecorder setup
    - Share codec selection logic
 
 6. **Add Build Process** 🛠️
+
    - Minification for production
    - Debug/production modes
    - Version injection
@@ -662,11 +713,13 @@ async function resetRecordingState() {
 ### 12.3 Low Priority
 
 8. **Add Configuration UI** ⚙️
+
    - Recording quality settings
    - Auto-delete retention period
    - Keyboard shortcuts
 
 9. **Internationalization** 🌍
+
    - Extract strings to i18n files
    - Support multiple languages
 
@@ -704,14 +757,14 @@ async function resetRecordingState() {
 
 ## 15. Maintainability Score
 
-| Criterion | Score | Notes |
-|-----------|-------|-------|
-| Code Clarity | 9/10 | Excellent naming, structure |
-| Documentation | 10/10 | Exceptional ARCHITECTURE.md |
-| Test Coverage | 6/10 | E2E only, no unit tests |
-| Error Handling | 8/10 | Comprehensive, some feedback gaps |
-| Modularity | 9/10 | Clean separation, minimal duplication |
-| **Overall** | **8.4/10** | **Very Maintainable** |
+| Criterion      | Score      | Notes                                 |
+| -------------- | ---------- | ------------------------------------- |
+| Code Clarity   | 9/10       | Excellent naming, structure           |
+| Documentation  | 10/10      | Exceptional ARCHITECTURE.md           |
+| Test Coverage  | 6/10       | E2E only, no unit tests               |
+| Error Handling | 8/10       | Comprehensive, some feedback gaps     |
+| Modularity     | 9/10       | Clean separation, minimal duplication |
+| **Overall**    | **8.4/10** | **Very Maintainable**                 |
 
 ---
 
@@ -745,6 +798,7 @@ async function resetRecordingState() {
 CaptureCast is a **well-engineered, production-ready extension** with excellent architecture and documentation. The codebase demonstrates strong understanding of browser extension best practices, privacy considerations, and user experience design.
 
 ### Key Strengths
+
 - Privacy-first architecture
 - Clean, maintainable code
 - Excellent documentation
@@ -752,6 +806,7 @@ CaptureCast is a **well-engineered, production-ready extension** with excellent 
 - Smart resource management
 
 ### Key Weaknesses
+
 - Over-reliance on console logging
 - Limited test coverage (E2E only)
 - Minor code duplication
@@ -760,6 +815,7 @@ CaptureCast is a **well-engineered, production-ready extension** with excellent 
 ### Overall Grade: **A- (90/100)**
 
 The extension is ready for production use with minor refinements. The main improvements needed are:
+
 1. Production-ready logging
 2. Enhanced test coverage
 3. Better user error feedback
@@ -772,34 +828,34 @@ With these addressed, this would be an **A+ (95+) codebase**.
 
 ### Core Files
 
-| File | LOC | Quality | Issues | Notes |
-|------|-----|---------|--------|-------|
-| `background.js` | 342 | A | Logging | Excellent state management |
-| `popup.js` | 36 | A | None | Clean and simple |
-| `recorder.js` | 180 | B+ | Duplication | Could extract shared logic |
-| `offscreen.js` | 227 | B+ | Duplication | Mirror of recorder logic |
-| `db.js` | 208 | A- | Migration | Schema upgrade deletes data |
-| `preview.js` | 252 | A | Comments | Clever duration fix logic |
-| `overlay.js` | 69 | A | None | Minimal and effective |
-| `recordings.js` | 91 | A | None | Simple gallery UI |
+| File            | LOC | Quality | Issues      | Notes                       |
+| --------------- | --- | ------- | ----------- | --------------------------- |
+| `background.js` | 342 | A       | Logging     | Excellent state management  |
+| `popup.js`      | 36  | A       | None        | Clean and simple            |
+| `recorder.js`   | 180 | B+      | Duplication | Could extract shared logic  |
+| `offscreen.js`  | 227 | B+      | Duplication | Mirror of recorder logic    |
+| `db.js`         | 208 | A-      | Migration   | Schema upgrade deletes data |
+| `preview.js`    | 252 | A       | Comments    | Clever duration fix logic   |
+| `overlay.js`    | 69  | A       | None        | Minimal and effective       |
+| `recordings.js` | 91  | A       | None        | Simple gallery UI           |
 
 ### Documentation Files
 
-| File | Quality | Notes |
-|------|---------|-------|
-| `ARCHITECTURE.md` | A+ | Exemplary technical doc |
-| `README.md` | A | Clear installation guide |
-| `TROUBLESHOOTING.md` | A | Comprehensive |
-| `CHANGELOG.md` | A | Well-maintained |
-| `prd.md` | A | Clear product vision |
-| `docs/KNOWN_ISSUES.md` | A | Honest limitations |
+| File                   | Quality | Notes                    |
+| ---------------------- | ------- | ------------------------ |
+| `ARCHITECTURE.md`      | A+      | Exemplary technical doc  |
+| `README.md`            | A       | Clear installation guide |
+| `TROUBLESHOOTING.md`   | A       | Comprehensive            |
+| `CHANGELOG.md`         | A       | Well-maintained          |
+| `prd.md`               | A       | Clear product vision     |
+| `docs/KNOWN_ISSUES.md` | A       | Honest limitations       |
 
 ### Test Files
 
-| File | Coverage | Quality | Notes |
-|------|----------|---------|-------|
-| `tests/e2e/stop/stop.spec.ts` | Good | A | Well-structured E2E |
-| Unit tests | None | N/A | Missing |
+| File                          | Coverage | Quality | Notes               |
+| ----------------------------- | -------- | ------- | ------------------- |
+| `tests/e2e/stop/stop.spec.ts` | Good     | A       | Well-structured E2E |
+| Unit tests                    | None     | N/A     | Missing             |
 
 ---
 

@@ -10,35 +10,40 @@ If your build process outputs a different folder (e.g., `dist/` or `build/`), se
 
 ## Quick Start (All Chromium Browsers)
 
-1) Open your browser’s extensions page:
+1. Open your browser’s extensions page:
+
    - Google Chrome: `chrome://extensions`
    - Microsoft Edge: `edge://extensions`
    - Brave: `brave://extensions`
    - Opera: `opera://extensions`
    - Vivaldi: `vivaldi://extensions`
 
-2) Enable Developer Mode.
+2. Enable Developer Mode.
+
    - There will be a toggle or switch labeled "Developer mode" on the extensions page.
 
-3) Click "Load unpacked".
+3. Click "Load unpacked".
 
-4) In the folder picker, select the folder that contains `manifest.json`
+4. In the folder picker, select the folder that contains `manifest.json`
 
-5) Verify the extension appears in the list and is enabled.
+5. Verify the extension appears in the list and is enabled.
 
-6) Optional: Pin the extension to the toolbar via the puzzle/extension icon so it’s easy to access.
+6. Optional: Pin the extension to the toolbar via the puzzle/extension icon so it’s easy to access.
 
 ## Browser-specific Notes
 
 - Chrome & Brave
+
   - Use `chrome://extensions` or `brave://extensions`.
   - With Developer Mode on, you’ll also see an "Update" button that reloads all unpacked extensions at once.
 
 - Microsoft Edge
+
   - Use `edge://extensions`.
   - Toggle "Developer Mode" at the bottom-left of the page to reveal "Load unpacked".
 
 - Opera
+
   - Use `opera://extensions`.
   - Enable Developer Mode at the top-right, then click "Load unpacked".
 
@@ -49,9 +54,11 @@ If your build process outputs a different folder (e.g., `dist/` or `build/`), se
 ## During Development
 
 - Reload after changes
+
   - After editing files, click the reload icon next to the extension, or use the "Update" button on the extensions page (visible in Developer Mode) to reload all unpacked extensions.
 
 - Viewing logs
+
   - Popup/options pages: right-click the page and choose "Inspect" to open DevTools and see console logs.
   - Content scripts: open the target page’s DevTools (Right-click → Inspect) and check the Console; content script logs appear there.
   - Background (Manifest V3) service worker: on the extensions page, click "Details" → "Service worker" → "Inspect" to view logs.
@@ -64,19 +71,24 @@ If your build process outputs a different folder (e.g., `dist/` or `build/`), se
 ## Troubleshooting
 
 - "Manifest is not valid JSON"
+
   - Ensure your `manifest.json` is valid JSON (no trailing commas, correct quoting, etc.).
 
 - "Could not load icon" or missing icons
+
   - Check that icon paths in `manifest.json` point to files that exist, using paths relative to the extension root.
 
 - Background script/service worker not running
+
   - Manifest V3: ensure `background.service_worker` points to a valid path and that the file exists.
   - Manifest V2: ensure the background page/script paths are correct (if you are using MV2).
 
 - Changes aren’t taking effect
+
   - Make sure you reload the extension after edits. For MV3 background code, also check the Service Worker DevTools and reload if needed.
 
 - Wrong folder selected
+
   - You must select the folder that contains `manifest.json` (or your build output folder that includes `manifest.json`).
 
 - Host permissions

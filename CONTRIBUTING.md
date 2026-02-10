@@ -20,12 +20,14 @@ Thank you for your interest in contributing to CaptureCast! This document provid
 ### Setup
 
 1. Fork and clone the repository:
+
 ```bash
 git clone https://github.com/yourusername/capturecast.git
 cd capturecast
 ```
 
 2. Install dependencies:
+
 ```bash
 npm install
 ```
@@ -39,6 +41,7 @@ npm install
 ### Development Workflow
 
 1. Create a feature branch:
+
 ```bash
 git checkout -b feature/your-feature-name
 ```
@@ -46,15 +49,18 @@ git checkout -b feature/your-feature-name
 2. Make your changes following the style guide (see CRUSH.md)
 
 3. Test your changes:
+
    - Manual testing: Reload extension, test recording flow
    - Automated tests: `npm run e2e`
 
 4. Commit with clear messages:
+
 ```bash
 git commit -m "feat: add keyboard shortcuts for stop"
 ```
 
 5. Push and create Pull Request:
+
 ```bash
 git push origin feature/your-feature-name
 ```
@@ -64,6 +70,7 @@ git push origin feature/your-feature-name
 ### Bug Reports
 
 Found a bug? Please open an issue with:
+
 - **Description**: Clear description of the problem
 - **Steps to Reproduce**: Numbered steps to reproduce
 - **Expected Behavior**: What should happen
@@ -72,10 +79,12 @@ Found a bug? Please open an issue with:
 - **Screenshots/Logs**: If applicable
 
 Example:
+
 ```markdown
 ## Bug: Recording fails on YouTube
 
 **Steps to Reproduce:**
+
 1. Open youtube.com
 2. Click extension icon
 3. Click "Record"
@@ -90,6 +99,7 @@ Example:
 ### Feature Requests
 
 Have an idea? Open an issue with:
+
 - **Problem Statement**: What problem does this solve?
 - **Proposed Solution**: How would you solve it?
 - **Alternatives Considered**: Other ways to solve it
@@ -98,6 +108,7 @@ Have an idea? Open an issue with:
 ### Code Contributions
 
 We welcome:
+
 - Bug fixes
 - Performance improvements
 - Documentation improvements
@@ -108,6 +119,7 @@ We welcome:
 ### Style Guide
 
 Follow CRUSH.md for:
+
 - 2-space indentation
 - Semicolons omitted (ASI)
 - camelCase for variables/functions
@@ -117,6 +129,7 @@ Follow CRUSH.md for:
 ### Code Patterns
 
 #### Error Handling
+
 ```javascript
 // Always wrap Chrome API calls
 async function doSomething() {
@@ -131,6 +144,7 @@ async function doSomething() {
 ```
 
 #### Message Handling
+
 ```javascript
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // Validate sender
@@ -138,7 +152,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({ ok: false, error: 'Unauthorized' });
     return;
   }
-  
+
   (async () => {
     try {
       // Handle message
@@ -152,6 +166,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 ```
 
 #### Database Operations
+
 ```javascript
 // Always close connections
 export async function saveData(key, value) {
@@ -172,6 +187,7 @@ export async function saveData(key, value) {
 #### Manual Testing Checklist
 
 Before submitting:
+
 - [ ] Extension loads without errors
 - [ ] Can start recording (tab mode)
 - [ ] Overlay appears on page
@@ -188,6 +204,7 @@ Before submitting:
 #### E2E Tests
 
 Add tests for new features:
+
 ```typescript
 test('my new feature works', async ({ context, extensionId }) => {
   // Test implementation
@@ -195,6 +212,7 @@ test('my new feature works', async ({ context, extensionId }) => {
 ```
 
 Run tests:
+
 ```bash
 npm run e2e              # All tests
 npm run e2e:stop         # Specific suite
@@ -203,12 +221,14 @@ npm run e2e:stop         # Specific suite
 ### Documentation
 
 Update documentation when:
+
 - Adding new features
 - Changing architecture
 - Modifying APIs/messages
 - Fixing bugs (if not obvious)
 
 Files to update:
+
 - `README.md`: User-facing changes
 - `ARCHITECTURE.md`: Technical changes
 - `CHANGELOG.md`: All changes
@@ -220,6 +240,7 @@ Files to update:
 ### PR Title
 
 Use conventional commits format:
+
 - `feat: add keyboard shortcuts`
 - `fix: resolve race condition in stop flow`
 - `docs: update installation instructions`
@@ -230,24 +251,31 @@ Use conventional commits format:
 ### PR Description
 
 Include:
+
 ```markdown
 ## Description
+
 Brief description of changes
 
 ## Motivation
+
 Why is this change needed?
 
 ## Changes
+
 - Change 1
 - Change 2
 
 ## Testing
+
 How was this tested?
 
 ## Screenshots
+
 If UI changes
 
 ## Checklist
+
 - [ ] Code follows style guide
 - [ ] Tests pass
 - [ ] Documentation updated
@@ -280,6 +308,7 @@ If UI changes
 ### Modifying State
 
 State changes should:
+
 - Go through background.js
 - Be properly reset in `resetRecordingState()`
 - Consider MV3 service worker suspension
@@ -288,6 +317,7 @@ State changes should:
 ### Adding Permissions
 
 New permissions require:
+
 - Justification in docs/permissions.md
 - Privacy policy update
 - Security review

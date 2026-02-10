@@ -26,6 +26,7 @@ npm run test:coverage
 ## Coverage
 
 Current test coverage focuses on pure utility functions that don't require browser APIs:
+
 - ✅ `logger.js` - 100% coverage
 - ✅ `storage-utils.js` - 100% coverage
 - ✅ `media-recorder-utils.js` - 100% coverage
@@ -35,6 +36,7 @@ Current test coverage focuses on pure utility functions that don't require brows
 ## Adding Tests
 
 When adding new utility functions:
+
 1. Create a corresponding `.test.js` file
 2. Mock browser APIs as needed (see `setup.js`)
 3. Aim for >80% coverage
@@ -43,6 +45,7 @@ When adding new utility functions:
 ## Browser API Testing
 
 Files that heavily use Chrome extension APIs are tested via E2E tests:
+
 - `background.js`
 - `popup.js`
 - `recorder.js`
