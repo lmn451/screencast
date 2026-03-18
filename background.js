@@ -26,6 +26,8 @@ const STATE = {
   recorderTabId: null,
   strategy: null, // 'offscreen' | 'page'
   stopTimeoutId: null,
+  isAutomation: false, // true when controlled by external client
+  silentMode: false, // true when using tabCapture instead of getDisplayMedia
 };
 
 // Helper to update badge based on status
@@ -48,6 +50,52 @@ async function updateBadge() {
     /* no-op */
   }
 }
+
+async function attachDebugger() {
+  try {
+    const targets = await chrome.debugger.getTargets();
+    const attached = targets.some((t) => t.attached && t.url.startsWith(chrome.runtime.getURL('')));
+    if (!attached) {
+      await chrome.debugger.attach({ tabId: undefined }, '1.3');
+    }
+  } catch (e) {
+    logger.warn('Debugger attach failed (may already be attached):', e.message);
+  }
+}
+
+function handleCDPCommand(method, params) {
+  switch (method) {
+    case 'CaptureCast.start':
+      return startRecording(
+        params?.mode ?? 'tab',
+        params?.mic ?? false,
+        params?.systemAudio ?? false,
+        { automation: true, silent: params?.silent ?? false }
+      );
+    case 'CaptureCast.stop':
+      return stopRecording();
+    case 'CaptureCast.getState':
+      return Promise.resolve({
+        ...STATE,
+        recording: STATE.status === 'RECORDING' || STATE.status === 'SAVING',
+      });
+    case 'CaptureCast.getLastRecordingId':
+      return Promise.resolve({ ok: true, recordingId: STATE.recordingId });
+    default:
+      return Promise.resolve({ ok: false, error: `Unknown method: ${method}` });
+  }
+}
+
+chrome.debugger.onEvent.addListener((source, method, params) => {
+  if (!source.url?.startsWith(chrome.runtime.getURL(''))) return;
+  handleCDPCommand(method, params).then((result) => {
+    logger.log('CDP command handled:', method, result);
+  });
+});
+
+chrome.debugger.onDetach.addListener((source, reason) => {
+  logger.log('Debugger detached:', source.url, reason);
+});
 
 function canUseOffscreen() {
   return !!(chrome.offscreen && chrome.offscreen.createDocument);
@@ -131,10 +179,9 @@ async function focusTab(tabId) {
   }
 }
 
-async function startRecording(mode, includeMic, includeSystemAudio) {
+async function startRecording(mode, includeMic, includeSystemAudio, options = {}) {
   if (STATE.status !== 'IDLE') return { ok: false, error: 'Already recording or saving' };
 
-  // Check storage quota before starting
   const storageCheck = await checkStorageQuota();
   if (!storageCheck.ok) {
     logger.error('Storage check failed:', storageCheck.error);
@@ -146,6 +193,8 @@ async function startRecording(mode, includeMic, includeSystemAudio) {
   STATE.overlayTabId = await getActiveTabId();
   STATE.includeMic = !!includeMic;
   STATE.includeSystemAudio = !!includeSystemAudio;
+  STATE.isAutomation = !!options.automation;
+  STATE.silentMode = mode === 'tab' || !!options.silent;
 
   const useOffscreen = !STATE.includeMic && canUseOffscreen();
 
@@ -157,6 +206,7 @@ async function startRecording(mode, includeMic, includeSystemAudio) {
       includeAudio: STATE.includeSystemAudio,
       recordingId: STATE.recordingId,
       targetTabId: STATE.overlayTabId,
+      silent: STATE.silentMode,
     });
     STATE.strategy = 'offscreen';
   } else {
@@ -164,7 +214,9 @@ async function startRecording(mode, includeMic, includeSystemAudio) {
     const url = chrome.runtime.getURL(
       `recorder.html?id=${encodeURIComponent(STATE.recordingId)}&mode=${encodeURIComponent(
         mode
-      )}&mic=${STATE.includeMic ? 1 : 0}&sys=${STATE.includeSystemAudio ? 1 : 0}`
+      )}&mic=${STATE.includeMic ? 1 : 0}&sys=${STATE.includeSystemAudio ? 1 : 0}&silent=${
+        STATE.silentMode ? 1 : 0
+      }`
     );
     const tab = await chrome.tabs.create({ url, active: true });
     STATE.recorderTabId = tab.id ?? null;
@@ -262,6 +314,8 @@ async function resetRecordingState() {
   STATE.recorderTabId = null;
   STATE.strategy = null;
   STATE.recordingId = null;
+  STATE.isAutomation = false;
+  STATE.silentMode = false;
 }
 
 // Handle messages from popup, overlay, offscreen, and preview
@@ -294,14 +348,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         case 'OFFSCREEN_DATA': {
           // Receive notification that data is saved in DB
           const { recordingId } = message;
-          logger.log('Received OFFSCREEN_DATA:', { recordingId });
+          logger.log('Received OFFSCREEN_DATA:', { recordingId, isAutomation: STATE.isAutomation });
 
           // Reset state
           await resetRecordingState();
 
-          // Open preview page and pass the id in URL
-          const url = chrome.runtime.getURL(`preview.html?id=${encodeURIComponent(recordingId)}`);
-          await chrome.tabs.create({ url });
+          // Skip preview tab for automation mode
+          if (!STATE.isAutomation) {
+            const url = chrome.runtime.getURL(`preview.html?id=${encodeURIComponent(recordingId)}`);
+            await chrome.tabs.create({ url });
+          }
           await closeOffscreenDocumentIfIdle();
           sendResponse({ ok: true });
           break;
@@ -309,12 +365,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         case 'RECORDER_DATA': {
           // Receive notification that data is saved in DB
           const { recordingId } = message;
-          logger.log('Received RECORDER_DATA:', { recordingId });
+          logger.log('Received RECORDER_DATA:', { recordingId, isAutomation: STATE.isAutomation });
 
           await resetRecordingState();
 
-          const url = chrome.runtime.getURL(`preview.html?id=${encodeURIComponent(recordingId)}`);
-          await chrome.tabs.create({ url });
+          // Skip preview tab for automation mode
+          if (!STATE.isAutomation) {
+            const url = chrome.runtime.getURL(`preview.html?id=${encodeURIComponent(recordingId)}`);
+            await chrome.tabs.create({ url });
+          }
           sendResponse({ ok: true });
           break;
         }
@@ -350,6 +409,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse({ ok: true, message: 'Test successful' });
           break;
         }
+        case 'GET_LAST_RECORDING_ID': {
+          // Return the ID of the most recently completed recording (for automation clients)
+          sendResponse({ ok: true, recordingId: STATE.recordingId });
+          break;
+        }
         default: {
           // Unknown message
           logger.log('Unknown message type:', message.type);
@@ -368,10 +432,57 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true; // Keep message channel open for async response
 });
 
+// External message listener for automation clients
+// Handles START/STOP from external sources (external extensions, apps, etc.)
+chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => {
+  logger.log('External message received:', message.type, 'from:', sender.id);
+
+  (async () => {
+    try {
+      switch (message.type) {
+        case 'START': {
+          // External START - mark as automation mode
+          const res = await startRecording(message.mode, message.mic, message.systemAudio, {
+            automation: true,
+            silent: message.silent,
+          });
+          sendResponse(res);
+          break;
+        }
+        case 'STOP': {
+          const res = await stopRecording();
+          sendResponse(res);
+          break;
+        }
+        case 'GET_LAST_RECORDING_ID': {
+          sendResponse({ ok: true, recordingId: STATE.recordingId });
+          break;
+        }
+        case 'GET_STATE': {
+          const publicState = {
+            ...STATE,
+            recording: STATE.status === 'RECORDING' || STATE.status === 'SAVING',
+          };
+          sendResponse(publicState);
+          break;
+        }
+        default: {
+          logger.log('Unknown external message type:', message.type);
+          sendResponse({ ok: false, error: 'Unknown message type' });
+        }
+      }
+    } catch (e) {
+      logger.error('Error handling external message', message.type, e);
+      sendResponse({ ok: false, error: String(e) });
+    }
+  })();
+  return true;
+});
+
 // Clean badge on install/update and run cleanup
 chrome.runtime.onInstalled.addListener(async () => {
   await updateBadge();
-  // Cleanup recordings older than configured age
+  await attachDebugger();
   try {
     await cleanupOldRecordings(AUTO_DELETE_AGE_MS);
   } catch (e) {
@@ -379,8 +490,8 @@ chrome.runtime.onInstalled.addListener(async () => {
   }
 });
 
-// Also run cleanup on startup
 chrome.runtime.onStartup.addListener(async () => {
+  await attachDebugger();
   try {
     await cleanupOldRecordings(AUTO_DELETE_AGE_MS);
   } catch (e) {

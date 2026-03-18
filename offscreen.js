@@ -63,31 +63,69 @@ function getConstraintsFromMode(mode, includeAudio) {
   };
 }
 
-async function startCapture(mode, recordingId, includeAudio) {
+async function startCapture(mode, recordingId, includeAudio, silent = false) {
   if (mediaRecorder) throw new Error('Already recording');
   currentId = recordingId;
 
-  logger.log('Starting capture with mode:', mode, 'includeAudio:', includeAudio);
+  logger.log('Starting capture with mode:', mode, 'includeAudio:', includeAudio, 'silent:', silent);
 
+  let stream;
   try {
-    logger.log('Requesting display media with audio:', includeAudio);
-    const displayStream = await navigator.mediaDevices.getDisplayMedia(
-      getConstraintsFromMode(mode, includeAudio)
-    );
+    if (silent) {
+      logger.log('Using tabCapture for silent recording');
+      try {
+        const [videoTrack, audioTrack] = await new Promise((resolve, reject) => {
+          chrome.tabCapture.capture({ video: true, audio: includeAudio || false }, (stream) => {
+            if (chrome.runtime.lastError) {
+              reject(new Error(chrome.runtime.lastError.message));
+            } else {
+              resolve(
+                stream ? [stream.getVideoTracks()[0], stream.getAudioTracks()[0]] : [null, null]
+              );
+            }
+          });
+        });
+
+        if (!videoTrack) {
+          throw new Error('Tab capture failed: no video track available');
+        }
+
+        const tracks = [videoTrack];
+        if (audioTrack) tracks.push(audioTrack);
+        stream = new MediaStream(tracks);
+
+        logger.log('Tab capture succeeded:', {
+          videoTrack: !!videoTrack,
+          audioTrack: !!audioTrack,
+        });
+      } catch (tabCaptureError) {
+        logger.warn(
+          'Tab capture failed, falling back to getDisplayMedia:',
+          tabCaptureError.message
+        );
+        stream = await navigator.mediaDevices.getDisplayMedia(
+          getConstraintsFromMode(mode, includeAudio)
+        );
+      }
+    } else {
+      logger.log('Requesting display media with audio:', includeAudio);
+      stream = await navigator.mediaDevices.getDisplayMedia(
+        getConstraintsFromMode(mode, includeAudio)
+      );
+    }
 
     // Apply content hints for encoder optimization
-    applyContentHints(displayStream, { hasSystemAudio: includeAudio });
+    applyContentHints(stream, { hasSystemAudio: includeAudio, hasMicrophone: false });
 
-    logger.log('Got display stream:', {
-      id: displayStream.id,
-      active: displayStream.active,
-      videoTracks: displayStream.getVideoTracks().length,
-      audioTracks: displayStream.getAudioTracks().length,
+    logger.log('Got capture stream:', {
+      active: stream.active,
+      videoTracks: stream.getVideoTracks().length,
+      audioTracks: stream.getAudioTracks().length,
     });
 
-    mediaStream = displayStream;
+    mediaStream = stream;
   } catch (error) {
-    logger.error('getDisplayMedia failed:', error);
+    logger.error('Capture failed:', error);
     throw error;
   }
 
@@ -170,7 +208,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type === 'OFFSCREEN_START') {
       try {
         logger.log('Received START message:', message);
-        await startCapture(message.mode, message.recordingId, message.includeAudio);
+        await startCapture(message.mode, message.recordingId, message.includeAudio, message.silent);
         logger.log('startCapture completed successfully');
         sendResponse({ ok: true });
       } catch (e) {

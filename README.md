@@ -83,7 +83,7 @@ If your build process outputs a different folder (e.g., `dist/` or `build/`), se
   - Manifest V3: ensure `background.service_worker` points to a valid path and that the file exists.
   - Manifest V2: ensure the background page/script paths are correct (if you are using MV2).
 
-- Changes aren’t taking effect
+- Changes aren't taking effect
 
   - Make sure you reload the extension after edits. For MV3 background code, also check the Service Worker DevTools and reload if needed.
 
@@ -92,7 +92,11 @@ If your build process outputs a different folder (e.g., `dist/` or `build/`), se
   - You must select the folder that contains `manifest.json` (or your build output folder that includes `manifest.json`).
 
 - Host permissions
-  - If network requests are blocked or content scripts don’t run, verify that required host permissions are declared in `manifest.json` and that you’ve granted site access in the browser.
+  - If network requests are blocked or content scripts don't run, verify that required host permissions are declared in `manifest.json` and that you've granted site access in the browser.
+
+## Programmatic Control (CDP API)
+
+For automation and external integrations, CaptureCast exposes a control surface via Chrome DevTools Protocol. See [CDP.md](CDP.md) for documentation.
 
 ## Uninstall / Reinstall
 
