@@ -38,6 +38,7 @@ async function start() {
   recordingId = getQueryParam('id');
   const wantMic = getQueryParam('mic') === '1';
   const wantSys = getQueryParam('sys') === '1';
+  const silent = getQueryParam('silent') === '1';
 
   const status = document.getElementById('status');
   const preview = document.getElementById('preview');
@@ -50,21 +51,70 @@ async function start() {
       throw new Error('Invalid recording ID');
     }
 
-    status.textContent = 'Requesting screen capture…';
+    status.textContent = silent ? 'Starting silent capture…' : 'Requesting screen capture…';
     startBtn.classList.add('hidden');
-    const displayStream = await navigator.mediaDevices.getDisplayMedia({
-      video: true,
-      audio: wantSys
-        ? {
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false,
-          }
-        : false,
-    });
+
+    let captureStream;
+    if (silent) {
+      logger.log('Using tabCapture for silent recording');
+      try {
+        const tracks = [];
+        const videoTrack = await new Promise((resolve, reject) => {
+          chrome.tabCapture.capture({ video: true, audio: wantSys || wantMic }, (stream) => {
+            if (chrome.runtime.lastError) {
+              reject(new Error(chrome.runtime.lastError.message));
+            } else {
+              resolve(stream?.getVideoTracks()[0] ?? null);
+            }
+          });
+        });
+
+        if (!videoTrack) {
+          throw new Error('Tab capture failed: no video track available');
+        }
+        tracks.push(videoTrack);
+
+        const audioTrack = tracks[0].clone();
+        const audioStream = new MediaStream([audioTrack]);
+        captureStream = audioStream;
+        if (captureStream.getAudioTracks().length > 0) {
+          captureStream = new MediaStream([videoTrack, ...captureStream.getAudioTracks()]);
+        } else {
+          captureStream = new MediaStream([videoTrack]);
+        }
+
+        logger.log('Tab capture succeeded in recorder');
+      } catch (tabCaptureError) {
+        logger.warn(
+          'Tab capture failed, falling back to getDisplayMedia:',
+          tabCaptureError.message
+        );
+        captureStream = await navigator.mediaDevices.getDisplayMedia({
+          video: true,
+          audio: wantSys
+            ? {
+                echoCancellation: false,
+                noiseSuppression: false,
+                autoGainControl: false,
+              }
+            : false,
+        });
+      }
+    } else {
+      captureStream = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        audio: wantSys
+          ? {
+              echoCancellation: false,
+              noiseSuppression: false,
+              autoGainControl: false,
+            }
+          : false,
+      });
+    }
 
     // Apply content hints for encoder optimization
-    applyContentHints(displayStream, { hasSystemAudio: wantSys });
+    applyContentHints(captureStream, { hasSystemAudio: wantSys, hasMicrophone: false });
 
     let micStream = null;
     if (wantMic) {
@@ -79,13 +129,13 @@ async function start() {
           video: false,
         });
         // Apply content hints for encoder optimization
-        applyContentHints(micStream, { hasMicrophone: true });
+        applyContentHints(micStream, { hasSystemAudio: wantSys, hasMicrophone: true });
       } catch (e) {
         logger.warn('Mic request failed, proceeding without mic:', e);
       }
     }
 
-    mediaStream = combineStreams({ displayStream, micStream });
+    mediaStream = combineStreams({ displayStream: captureStream, micStream });
     preview.srcObject = mediaStream;
     preview.classList.remove('hidden');
     stopBtn.classList.remove('hidden');
