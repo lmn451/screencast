@@ -49,6 +49,49 @@ async function updateBadge() {
   }
 }
 
+async function attachDebugger() {
+  try {
+    const targets = await chrome.debugger.getTargets();
+    const attached = targets.some((t) => t.attached && t.url.startsWith(chrome.runtime.getURL('')));
+    if (!attached) {
+      await chrome.debugger.attach({ tabId: undefined }, '1.3');
+    }
+  } catch (e) {
+    logger.warn('Debugger attach failed (may already be attached):', e.message);
+  }
+}
+
+function handleCDPCommand(method, params) {
+  switch (method) {
+    case 'CaptureCast.start':
+      return startRecording(
+        params?.mode ?? 'tab',
+        params?.mic ?? false,
+        params?.systemAudio ?? false
+      );
+    case 'CaptureCast.stop':
+      return stopRecording();
+    case 'CaptureCast.getState':
+      return Promise.resolve({
+        ...STATE,
+        recording: STATE.status === 'RECORDING' || STATE.status === 'SAVING',
+      });
+    default:
+      return Promise.resolve({ ok: false, error: `Unknown method: ${method}` });
+  }
+}
+
+chrome.debugger.onEvent.addListener((source, method, params) => {
+  if (!source.url?.startsWith(chrome.runtime.getURL(''))) return;
+  handleCDPCommand(method, params).then((result) => {
+    logger.log('CDP command handled:', method, result);
+  });
+});
+
+chrome.debugger.onDetach.addListener((source, reason) => {
+  logger.log('Debugger detached:', source.url, reason);
+});
+
 function canUseOffscreen() {
   return !!(chrome.offscreen && chrome.offscreen.createDocument);
 }
@@ -371,7 +414,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 // Clean badge on install/update and run cleanup
 chrome.runtime.onInstalled.addListener(async () => {
   await updateBadge();
-  // Cleanup recordings older than configured age
+  await attachDebugger();
   try {
     await cleanupOldRecordings(AUTO_DELETE_AGE_MS);
   } catch (e) {
@@ -379,8 +422,8 @@ chrome.runtime.onInstalled.addListener(async () => {
   }
 });
 
-// Also run cleanup on startup
 chrome.runtime.onStartup.addListener(async () => {
+  await attachDebugger();
   try {
     await cleanupOldRecordings(AUTO_DELETE_AGE_MS);
   } catch (e) {
