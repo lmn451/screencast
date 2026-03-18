@@ -11,8 +11,9 @@
     "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --coverage",
     "lint": "eslint . --ext .js --ignore-path .eslintignore",
     "format": "prettier --write .",
-    "e2e:stop": "playwright test tests/e2e/stop -c tests/e2e/playwright.config.ts",
-    "e2e": "playwright test -c tests/e2e/playwright.config.ts"
+    "e2e:stop": "playwright test tests/e2e/stop -c tests/e2e/playwright.config.ts --grep-invert @manual-picker",
+    "e2e": "playwright test -c tests/e2e/playwright.config.ts --grep-invert @manual-picker",
+    "e2e:manual": "playwright test -c tests/e2e/playwright.config.ts --grep @manual-picker"
   },
   "devDependencies": {
     "@playwright/test": "^1.55.0",

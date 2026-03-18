@@ -98,6 +98,18 @@ If your build process outputs a different folder (e.g., `dist/` or `build/`), se
 
 For automation and external integrations, CaptureCast exposes a control surface via Chrome DevTools Protocol. See [CDP.md](CDP.md) for documentation.
 
+## End-to-End Tests
+
+Playwright E2E coverage is split into two groups:
+
+- Default CI-safe tests that stay on the non-interactive tab-capture path
+- Manual picker tests for real `screen` and `window` capture flows that trigger Chromium's native `getDisplayMedia()` chooser
+
+Run the default suite with `npm run e2e`.
+Run picker-dependent tests locally with `npm run e2e:manual`.
+
+See `tests/e2e/README.md` for the tagging convention and CI guidance.
+
 ## Uninstall / Reinstall
 
 - To remove: go to the extensions page and click "Remove" on the extension.

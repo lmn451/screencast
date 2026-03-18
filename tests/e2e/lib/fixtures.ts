@@ -5,6 +5,8 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+const isCI = !!process.env.CI;
+
 export const test = base.extend<{
   context: BrowserContext;
   extensionId: string;
@@ -12,10 +14,30 @@ export const test = base.extend<{
   context: async ({}, use) => {
     const pathToExtension = path.resolve(__dirname, '../../..');
     const context = await chromium.launchPersistentContext('', {
-      headless: false,
+      headless: isCI ? true : false,
       args: [
         `--disable-extensions-except=${pathToExtension}`,
         `--load-extension=${pathToExtension}`,
+        '--no-first-run',
+        '--no-default-browser-check',
+        '--noerrdialogs',
+        '--disable-prompt-on-repost',
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
+        '--disable-renderer-backgrounding',
+        // Stabilize mic/camera permission prompts in automation. These flags do
+        // not bypass the native getDisplayMedia picker for screen/window capture.
+        '--use-fake-ui-for-media-stream',
+        '--use-fake-device-for-media-stream',
+        ...(isCI
+          ? [
+              '--disable-gpu',
+              '--no-sandbox',
+              '--disable-dev-shm-usage',
+              '--disable-setuid-sandbox',
+              '--disable-accelerated-2d-canvas',
+            ]
+          : []),
       ],
     });
     await use(context);
