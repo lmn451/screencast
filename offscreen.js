@@ -36,7 +36,7 @@ logger.log('Document loaded and script executing');
   // Test DB access
   try {
     logger.log('Testing IndexedDB access...');
-    const request = indexedDB.open('CaptureCastDB', 2); // Use correct DB name and version
+    const request = indexedDB.open('CaptureCastDB', 3); // Use correct DB name and version
     request.onerror = () => logger.error('IndexedDB open failed:', request.error);
     request.onsuccess = () => logger.log('IndexedDB open success');
   } catch (e) {
