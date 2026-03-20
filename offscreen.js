@@ -17,29 +17,60 @@ globalThis.addEventListener('error', (event) => {
 
 logger.log('Offscreen document loaded');
 
+// Long-lived connection to keep offscreen document alive and initialized
+let activePort = null;
+let pendingResolve = null;
+
+chrome.runtime.onConnect.addListener((port) => {
+  logger.log('Offscreen received connection:', port.name);
+  activePort = port;
+  
+  // Send acknowledgment
+  port.postMessage({ status: 'awake', name: port.name });
+  
+  // Handle incoming messages
+  port.onMessage.addListener((msg) => {
+    logger.log('Offscreen received port message:', msg);
+    
+    if (msg.command === 'ping') {
+      port.postMessage({ status: 'pong' });
+    } else if (msg.command === 'wakeup-complete' && pendingResolve) {
+      pendingResolve(port);
+      pendingResolve = null;
+    }
+  });
+  
+  port.onDisconnect.addListener(() => {
+    logger.log('Offscreen port disconnected');
+    activePort = null;
+  });
+});
+
+// Initialize database
+(async () => {
+  try {
+    const db = await new Promise((resolve, reject) => {
+      const request = indexedDB.open('CaptureCastDB', 3);
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => resolve(request.result);
+    });
+    logger.log('IndexedDB initialized successfully');
+    
+    // Signal that we're ready
+    if (activePort) {
+      activePort.postMessage({ status: 'initialized' });
+    }
+  } catch (e) {
+    logger.error('IndexedDB initialization failed:', e);
+  }
+})();
+
 let mediaStream = null;
 let mediaRecorder = null;
 let currentId = null;
 let canvas = null;
 let ctx = null;
 let cdpRecordingId = null;
-
-(async () => {
-  try {
-    const response = await chrome.runtime.sendMessage({ type: 'OFFSCREEN_TEST' });
-    logger.log('Test message response:', response);
-  } catch (error) {
-    logger.error('Test message failed:', error);
-  }
-
-  try {
-    const request = indexedDB.open('CaptureCastDB', 3);
-    request.onerror = () => logger.error('IndexedDB open failed:', request.error);
-    request.onsuccess = () => logger.log('IndexedDB open success');
-  } catch (e) {
-    logger.error('IndexedDB threw error:', e);
-  }
-})();
 
 async function startCapture(mode, recordingId, includeAudio, silent = false, streamId = null) {
   if (mediaRecorder) throw new Error('Already recording');

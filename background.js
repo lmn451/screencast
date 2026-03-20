@@ -192,11 +192,37 @@
     }
     const existing = await hasOffscreenDocument();
     if (existing) return;
+    
+    // Create offscreen document
     await chrome.offscreen.createDocument({
       url: chrome.runtime.getURL("offscreen.html"),
       reasons: ["USER_MEDIA", "BLOBS"],
       justification: "Record a screen capture stream using MediaRecorder in an offscreen document."
     });
+    
+    // Wait for offscreen to initialize (it has async initialization)
+    // Poll for readiness using a connection
+    const maxAttempts = 10;
+    for (let i = 0; i < maxAttempts; i++) {
+      try {
+        // Try to connect to the offscreen - if it responds, it's ready
+        const port = chrome.runtime.connect(undefined, { name: `init-${Date.now()}` });
+        port.onMessage.addListener((msg) => {
+          if (msg.status === 'initialized' || msg.status === 'awake') {
+            port.disconnect();
+          }
+        });
+        // Give it a moment to respond
+        await new Promise(r => setTimeout(r, 200));
+        port.disconnect();
+        logger3.log("Offscreen document is ready");
+        return;
+      } catch (e) {
+        // Not ready yet, wait and retry
+        await new Promise(r => setTimeout(r, 100));
+      }
+    }
+    logger3.warn("Offscreen document may not be fully initialized");
   }
   async function closeOffscreenDocumentIfIdle() {
     try {
