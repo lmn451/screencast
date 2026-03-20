@@ -19,19 +19,32 @@
       "128": "icons/icon-128.png"
     }
   },
-  "permissions": ["activeTab", "scripting", "offscreen", "tabs", "debugger", "tabCapture"],
-  "host_permissions": ["<all_urls>"],
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "offscreen",
+    "tabs",
+    "debugger",
+    "tabCapture"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
   "background": {
-    "service_worker": "background.js",
-    "type": "module"
+    "service_worker": "background.js"
   },
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'self'"
   },
   "web_accessible_resources": [
     {
-      "resources": ["overlay.js"],
-      "matches": ["http://*/*", "https://*/*"]
+      "resources": [
+        "overlay.js"
+      ],
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ]
     }
   ]
 }

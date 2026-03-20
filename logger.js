@@ -2,9 +2,14 @@
 // In production, only warnings and errors are shown
 
 // Detect debug mode from extension manifest or URL parameter
-const isDev =
-  typeof chrome !== 'undefined' &&
-  chrome.runtime?.getManifest?.()?.content_security_policy?.includes('unsafe-eval') === true;
+// Note: In MV3, content_security_policy is an object like { extension_pages: "..." }
+const manifestCSP = chrome.runtime?.getManifest?.()?.content_security_policy;
+const cspString = typeof manifestCSP === 'string' 
+  ? manifestCSP 
+  : typeof manifestCSP === 'object' && manifestCSP !== null
+    ? manifestCSP['extension_pages'] || ''
+    : '';
+const isDev = cspString.includes('unsafe-eval') === true;
 
 const DEBUG = isDev || new URLSearchParams(globalThis.location?.search).get('debug') === '1';
 
