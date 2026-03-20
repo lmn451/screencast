@@ -6,7 +6,12 @@ import {
   combineStreams,
   setupAutoStop,
   CHUNK_INTERVAL_MS,
+  // Force VP8 codec for testing (avoids green screen issues)
+  // Force VP8 codec - for testing only
 } from './media-recorder-utils.js';
+
+// Force VP8 codec for this recording (avoid AV1 green screen)
+const FORCE_VP8_CODEC = true;
 
 const logger = createLogger('Recorder');
 
@@ -165,6 +170,8 @@ async function start() {
     stopBtn.classList.remove('hidden');
 
     // Create recorder with standard handlers
+    // Use VP8 codec for testing (avoids green screen with AV1)
+    const codecOptions = FORCE_VP8_CODEC ? { forceCodec: 'vp8' } : {};
     const { recorder } = createMediaRecorder(mediaStream, recordingId, {
       onStart: () => {
         logger.log('Recording started');

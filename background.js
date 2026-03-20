@@ -348,7 +348,7 @@
       const url = chrome.runtime.getURL(
         `recorder.html?id=${encodeURIComponent(STATE.recordingId)}&mode=${encodeURIComponent(
           STATE.mode
-        )}&mic=${STATE.includeMic ? 1 : 0}&sys=${STATE.includeSystemAudio ? 1 : 0}${streamId ? "&streamId=" + encodeURIComponent(streamId) : ""}`
+        )}&mic=${STATE.includeMic ? 1 : 0}&sys=${STATE.includeSystemAudio ? 1 : 0}&codec=vp8${streamId ? "&streamId=" + encodeURIComponent(streamId) : ""}`
       );
       const tab = await chrome.tabs.create({ url, active: true });
       STATE.recorderTabId = tab.id ?? null;
@@ -393,7 +393,7 @@
       const url = chrome.runtime.getURL(
         `recorder.html?id=${encodeURIComponent(STATE.recordingId)}&mode=${encodeURIComponent(
           STATE.mode
-        )}&mic=${STATE.includeMic ? 1 : 0}&sys=${STATE.includeSystemAudio ? 1 : 0}`
+        )}&mic=${STATE.includeMic ? 1 : 0}&sys=${STATE.includeSystemAudio ? 1 : 0}&codec=vp8`
       );
       const tab = await chrome.tabs.create({ url, active: true });
       STATE.recorderTabId = tab.id ?? null;

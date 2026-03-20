@@ -12,15 +12,43 @@ export const CHUNK_INTERVAL_MS = 1000; // 1 second chunks for balance of memory/
 const isCI = typeof process !== 'undefined' && process.env?.CI === 'true';
 
 /**
+ * Check if VP8 should be forced (via URL parameter or test mode)
+ */
+function shouldForceVP8() {
+  // Check URL parameter: ?codec=vp8
+  const search = self?.location?.search || globalThis?.location?.search;
+  if (search) {
+    const params = new URLSearchParams(search);
+    if (params.get('codec') === 'vp8') return true;
+  }
+  // Check for global flag (set by extension for testing)
+  // This can be set via chrome.storage.local or a global variable
+  if (typeof globalThis !== 'undefined' && globalThis.__FORCE_VP8__ === true) {
+    console.log('[MediaRecorderUtils] Force VP8 via global flag');
+    return true;
+  }
+  // Check environment variable (Node.js context)
+  if (typeof process !== 'undefined' && process.env?.FORCE_VP8 === 'true') {
+    return true;
+  }
+  return false;
+}
+
+/**
  * Get the best supported video codec from a prioritized list
  * 
  * For normal browsers: AV1 → VP9 → VP8 (best compression)
  * For CI/testing: VP8 first (most reliable software codec, no GPU needed)
+ * For ?codec=vp8: Always use VP8
  * 
  * @returns {string} MIME type of the best supported codec
  */
 export function getOptimalCodec() {
-  // In CI environments with disabled GPU, use VP8 (pure software encoding)
+  // Always prefer VP8 for reliability (especially in CI/testing)
+  // This avoids AV1 green screen issues
+  const forceVP8 = shouldForceVP8() || isCI;
+  
+  // In CI environments or with forceVP8, use VP8 (pure software encoding)
   // AV1/VP9 may require GPU acceleration which isn't available
   const codecsForCI = [
     'video/webm;codecs=vp8,opus',  // Most reliable software codec
@@ -36,11 +64,12 @@ export function getOptimalCodec() {
     'video/webm',
   ];
 
-  const codecs = isCI ? codecsForCI : codecsForNormal;
+  const codecs = forceVP8 ? codecsForCI : codecsForNormal;
+  const mode = forceVP8 ? 'force VP8' : 'normal';
 
   for (const codec of codecs) {
     if (MediaRecorder.isTypeSupported(codec)) {
-      logger.log('Selected codec:', codec, isCI ? '(CI mode - software encoding)' : '');
+      logger.log('Selected codec:', codec, `(${mode})`);
       return codec;
     }
   }
@@ -118,12 +147,28 @@ export function applyContentHints(stream, { hasSystemAudio = false, hasMicrophon
  * @param {Function} callbacks.onStart - Called when recording starts
  * @param {Function} callbacks.onStop - Called when recording stops (receives mimeType, duration, totalSize)
  * @param {Function} callbacks.onError - Called on recorder error
+ * @param {string} [callbacks.forceCodec] - Force a specific codec (e.g., 'vp8')
  * @returns {Object} { recorder, getStats } - MediaRecorder instance and stats getter
  */
 export function createMediaRecorder(stream, recordingId, callbacks = {}) {
-  const { onStart, onStop, onError } = callbacks;
+  const { onStart, onStop, onError, forceCodec } = callbacks;
 
-  const mimeType = getOptimalCodec();
+  let mimeType;
+  if (forceCodec) {
+    mimeType = `video/webm;codecs=${forceCodec},opus`;
+    if (!MediaRecorder.isTypeSupported(mimeType)) {
+      mimeType = `video/webm;codecs=${forceCodec}`;
+    }
+    if (!MediaRecorder.isTypeSupported(mimeType)) {
+      logger.warn('Forced codec not supported, falling back to optimal');
+      mimeType = getOptimalCodec();
+    } else {
+      logger.log('Using forced codec:', mimeType);
+    }
+  } else {
+    mimeType = getOptimalCodec();
+  }
+  
   const recorder = new MediaRecorder(stream, { mimeType });
 
   let chunkIndex = 0;

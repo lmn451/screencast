@@ -1,5 +1,9 @@
 import { finishRecording } from './db.js';
 import { createLogger } from './logger.js';
+
+// Force VP8 codec for testing (avoids AV1 green screen issues)
+globalThis.__FORCE_VP8__ = true;
+
 import { createMediaRecorder, setupAutoStop, CHUNK_INTERVAL_MS } from './media-recorder-utils.js';
 
 const logger = createLogger('Offscreen');
