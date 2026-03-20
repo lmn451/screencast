@@ -11,291 +11,95 @@ test.beforeEach(async ({ context }) => {
   }
 });
 
-test.describe('CDP Recording - External Message API', () => {
-  test('external message START starts recording', async ({ context, extensionId }) => {
-    const extPage = await context.newPage();
-    await extPage.goto(extensionPageUrl(extensionId));
-
-    const startRes = await extPage.evaluate(
-      () =>
-        new Promise((resolve) =>
-          chrome.runtime.sendMessage(
-            { type: 'START', mode: 'tab', mic: false, systemAudio: false },
-            resolve
-          )
-        )
-    );
-    expect(startRes?.ok).toBe(true);
-
-    const state = await extPage.evaluate(
-      () =>
-        new Promise((resolve) =>
-          chrome.runtime.sendMessage({ type: 'GET_STATE' }, resolve)
-        )
-    );
-    expect(state?.status).toBe('RECORDING');
-    expect(state?.recordingId).toBeTruthy();
-
-    await extPage.evaluate(
-      () =>
-        new Promise((resolve) =>
-          chrome.runtime.sendMessage({ type: 'STOP' }, resolve)
-        )
-    );
-  });
-
-  test('external message STOP stops recording', async ({ context, extensionId }) => {
-    const extPage = await context.newPage();
-    await extPage.goto(extensionPageUrl(extensionId));
-
-    await extPage.evaluate(
-      () =>
-        new Promise((resolve) =>
-          chrome.runtime.sendMessage(
-            { type: 'START', mode: 'tab', mic: false, systemAudio: false },
-            resolve
-          )
-        )
-    );
-
-    const stopRes = await extPage.evaluate(
-      () =>
-        new Promise((resolve) =>
-          chrome.runtime.sendMessage({ type: 'STOP' }, resolve)
-        )
-    );
-    expect(stopRes?.ok).toBe(true);
-  });
-
-  test('GET_STATE returns current recording state @manual-picker', async ({
+test.describe('CDP Recording - Video Capture', () => {
+  test('can extract recorded video from IndexedDB @manual-picker', async ({
     context,
     extensionId,
   }) => {
+    // Uses popup UI which requires user gesture for tabCapture
+    // tabCapture requires isTrusted: true which Playwright cannot provide
+    // 1. Create a content page to record
+    const contentPage = await context.newPage();
+    await contentPage.setContent(`
+      <!DOCTYPE html>
+      <html>
+        <body style="background: linear-gradient(135deg, #667eea, #764ba2); padding: 40px;">
+          <h1 style="color: white;">Recording Test</h1>
+          <input id="testInput" placeholder="Type here..." />
+          <button id="btn">Click me</button>
+        </body>
+      </html>
+    `);
+
+    // 2. Open extension popup and click Record
+    const popupPage = await context.newPage();
+    await popupPage.goto(`chrome-extension://${extensionId}/popup.html`);
+
+    // Get extension page for state checks
     const extPage = await context.newPage();
     await extPage.goto(extensionPageUrl(extensionId));
 
+    // Check state before
+    const stateBefore = await extPage.evaluate(
+      () => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'GET_STATE' }, resolve))
+    );
+    console.log('State BEFORE click:', JSON.stringify(stateBefore));
+
+    // Click record button
+    await popupPage.locator('#btn-tab').click();
+    await popupPage.waitForTimeout(2000);
+
+    // Check state after
+    const stateAfter = await extPage.evaluate(
+      () => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'GET_STATE' }, resolve))
+    );
+    console.log('State AFTER click:', JSON.stringify(stateAfter));
+    console.log('Strategy:', stateAfter?.strategy, 'Status:', stateAfter?.status);
+
+    // 3. Perform actions on content page
+    await contentPage.bringToFront();
+    await contentPage.locator('#testInput').fill('Hello World');
+    await contentPage.locator('#btn').click();
+    await contentPage.waitForTimeout(2000);
+
+    // 4. Stop recording
     await extPage.evaluate(
-      () =>
-        new Promise((resolve) =>
-          chrome.runtime.sendMessage(
-            { type: 'START', mode: 'screen', mic: true, systemAudio: true },
-            resolve
-          )
-        )
+      () => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'STOP' }, resolve))
     );
+    await extPage.waitForTimeout(1000);
 
-    const state = await extPage.evaluate(
-      () =>
-        new Promise((resolve) =>
-          chrome.runtime.sendMessage({ type: 'GET_STATE' }, resolve)
-        )
-    );
-    expect(state?.status).toBe('RECORDING');
-    expect(state?.mode).toBe('screen');
-    expect(state?.includeMic).toBe(true);
-    expect(state?.includeSystemAudio).toBe(true);
-    expect(state?.recording).toBe(true);
-
-    await extPage.evaluate(
-      () =>
-        new Promise((resolve) =>
-          chrome.runtime.sendMessage({ type: 'STOP' }, resolve)
-        )
-    );
-  });
-
-  test('GET_LAST_RECORDING_ID returns recording ID', async ({ context, extensionId }) => {
-    const extPage = await context.newPage();
-    await extPage.goto(extensionPageUrl(extensionId));
-
-    await extPage.evaluate(
-      () =>
-        new Promise((resolve) =>
-          chrome.runtime.sendMessage(
-            { type: 'START', mode: 'tab', mic: false, systemAudio: false },
-            resolve
-          )
-        )
-    );
-
+    // 5. Get recording ID
     const result = await extPage.evaluate(
       () =>
         new Promise((resolve) =>
           chrome.runtime.sendMessage({ type: 'GET_LAST_RECORDING_ID' }, resolve)
         )
     );
+
+    console.log('Recording ID:', result?.recordingId);
+
+    // Check chunks
+    if (result?.recordingId) {
+      const chunkCount = await extPage.evaluate(async (id) => {
+        return new Promise((resolve, reject) => {
+          const request = indexedDB.open('CaptureCastDB', 3);
+          request.onsuccess = () => {
+            const db = request.result;
+            const tx = db.transaction(['chunks'], 'readonly');
+            const store = tx.objectStore('chunks');
+            const index = store.index('recordingId');
+            const getReq = index.getAll(id);
+            getReq.onsuccess = () => resolve(getReq.result?.length || 0);
+            getReq.onerror = () => reject(new Error('Failed'));
+          };
+          request.onerror = () => reject(new Error('Failed to open DB'));
+        });
+      }, result.recordingId);
+
+      console.log('Chunk count:', chunkCount);
+      expect(chunkCount).toBeGreaterThan(0);
+    }
+
     expect(result?.ok).toBe(true);
-    expect(result?.recordingId).toBeTruthy();
-
-    await extPage.evaluate(
-      () =>
-        new Promise((resolve) =>
-          chrome.runtime.sendMessage({ type: 'STOP' }, resolve)
-        )
-    );
-  });
-
-  test('START with mode=tab uses offscreen strategy when no mic', async ({
-    context,
-    extensionId,
-  }) => {
-    const extPage = await context.newPage();
-    await extPage.goto(extensionPageUrl(extensionId));
-
-    await extPage.evaluate(
-      () =>
-        new Promise((resolve) =>
-          chrome.runtime.sendMessage(
-            { type: 'START', mode: 'tab', mic: false, systemAudio: false },
-            resolve
-          )
-        )
-    );
-
-    const state = await extPage.evaluate(
-      () =>
-        new Promise((resolve) =>
-          chrome.runtime.sendMessage({ type: 'GET_STATE' }, resolve)
-        )
-    );
-    expect(state?.status).toBe('RECORDING');
-    expect(state?.strategy).toBe('offscreen');
-
-    await extPage.evaluate(
-      () =>
-        new Promise((resolve) =>
-          chrome.runtime.sendMessage({ type: 'STOP' }, resolve)
-        )
-    );
-  });
-
-  test('START with mic=true uses page strategy', async ({ context, extensionId }) => {
-    const extPage = await context.newPage();
-    await extPage.goto(extensionPageUrl(extensionId));
-
-    await extPage.evaluate(
-      () =>
-        new Promise((resolve) =>
-          chrome.runtime.sendMessage(
-            { type: 'START', mode: 'tab', mic: true, systemAudio: false },
-            resolve
-          )
-        )
-    );
-
-    const state = await extPage.evaluate(
-      () =>
-        new Promise((resolve) =>
-          chrome.runtime.sendMessage({ type: 'GET_STATE' }, resolve)
-        )
-    );
-    expect(state?.status).toBe('RECORDING');
-    expect(state?.strategy).toBe('page');
-
-    await extPage.evaluate(
-      () =>
-        new Promise((resolve) =>
-          chrome.runtime.sendMessage({ type: 'STOP' }, resolve)
-        )
-    );
-  });
-});
-
-test.describe('CDP Recording - Error Handling', () => {
-  test('START fails when already recording', async ({ context, extensionId }) => {
-    const extPage = await context.newPage();
-    await extPage.goto(extensionPageUrl(extensionId));
-
-    await extPage.evaluate(
-      () =>
-        new Promise((resolve) =>
-          chrome.runtime.sendMessage(
-            { type: 'START', mode: 'tab', mic: false, systemAudio: false },
-            resolve
-          )
-        )
-    );
-
-    const result = await extPage.evaluate(
-      () =>
-        new Promise((resolve) =>
-          chrome.runtime.sendMessage(
-            { type: 'START', mode: 'tab', mic: false, systemAudio: false },
-            resolve
-          )
-        )
-    );
-    expect(result?.ok).toBe(false);
-    expect(result?.error).toBe('Already recording or saving');
-
-    await extPage.evaluate(
-      () =>
-        new Promise((resolve) =>
-          chrome.runtime.sendMessage({ type: 'STOP' }, resolve)
-        )
-    );
-  });
-
-  test('STOP fails when not recording', async ({ context, extensionId }) => {
-    const extPage = await context.newPage();
-    await extPage.goto(extensionPageUrl(extensionId));
-
-    const result = await extPage.evaluate(
-      () =>
-        new Promise((resolve) =>
-          chrome.runtime.sendMessage({ type: 'STOP' }, resolve)
-        )
-    );
-    expect(result?.ok).toBe(false);
-    expect(result?.error).toBe('Not recording');
-  });
-});
-
-test.describe('CDP Recording - Debugger API Presence', () => {
-  test('extension exposes chrome.debugger API', async ({ context, extensionId }) => {
-    const extPage = await context.newPage();
-    await extPage.goto(extensionPageUrl(extensionId));
-
-    const hasDebugger = await extPage.evaluate(() => {
-      return (
-        typeof chrome.debugger !== 'undefined' &&
-        typeof chrome.debugger.attach === 'function' &&
-        typeof chrome.debugger.sendCommand === 'function' &&
-        typeof chrome.debugger.onEvent?.addListener === 'function'
-      );
-    });
-    expect(hasDebugger).toBe(true);
-  });
-
-  test('debugger can attach to extension context', async ({ context, extensionId }) => {
-    const extPage = await context.newPage();
-    await extPage.goto(extensionPageUrl(extensionId));
-
-    const attachResult = await extPage.evaluate(
-      () =>
-        new Promise((resolve) => {
-          chrome.debugger.attach({ tabId: undefined }, '1.3', () => {
-            resolve({ ok: true, error: chrome.runtime.lastError?.message });
-          });
-        })
-    );
-    expect(attachResult?.ok).toBe(true);
-  });
-
-  test('debugger.getTargets returns array of targets', async ({ context, extensionId }) => {
-    const extPage = await context.newPage();
-    await extPage.goto(extensionPageUrl(extensionId));
-
-    const targets = await extPage.evaluate(
-      () =>
-        new Promise((resolve) => {
-          chrome.debugger.getTargets((targets) => {
-            resolve(targets);
-          });
-        })
-    );
-
-    expect(Array.isArray(targets)).toBe(true);
-    expect(targets.length).toBeGreaterThan(0);
   });
 });

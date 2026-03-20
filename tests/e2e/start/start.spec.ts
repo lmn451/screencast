@@ -14,7 +14,11 @@ test.beforeEach(async ({ context }) => {
 });
 
 test.describe('Tab mode start functionality', () => {
-  test('start recording in tab mode without audio', async ({ context, extensionId }) => {
+  // @manual-picker - tabCapture requires isTrusted: true (genuine user gesture)
+  test('start recording in tab mode without audio @manual-picker', async ({
+    context,
+    extensionId,
+  }) => {
     const controlPage = await context.newPage();
     await controlPage.goto(controlPageUrl(extensionId));
 
@@ -40,7 +44,11 @@ test.describe('Tab mode start functionality', () => {
     );
   });
 
-  test('start recording in tab mode with mic only', async ({ context, extensionId }) => {
+  // @manual-picker - tabCapture requires isTrusted: true (genuine user gesture)
+  test('start recording in tab mode with mic only @manual-picker', async ({
+    context,
+    extensionId,
+  }) => {
     const controlPage = await context.newPage();
     await controlPage.goto(controlPageUrl(extensionId));
 
@@ -69,7 +77,11 @@ test.describe('Tab mode start functionality', () => {
     );
   });
 
-  test('start recording in tab mode with system audio only', async ({ context, extensionId }) => {
+  // @manual-picker - tabCapture requires isTrusted: true (genuine user gesture)
+  test('start recording in tab mode with system audio only @manual-picker', async ({
+    context,
+    extensionId,
+  }) => {
     const controlPage = await context.newPage();
     await controlPage.goto(controlPageUrl(extensionId));
 
@@ -98,7 +110,8 @@ test.describe('Tab mode start functionality', () => {
     );
   });
 
-  test('start recording in tab mode with both mic and system audio', async ({
+  // @manual-picker - tabCapture requires isTrusted: true (genuine user gesture)
+  test('start recording in tab mode with both mic and system audio @manual-picker', async ({
     context,
     extensionId,
   }) => {

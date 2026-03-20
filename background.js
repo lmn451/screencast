@@ -3,12 +3,8 @@ import { createLogger } from './logger.js';
 import { STOP_TIMEOUT_MS, AUTO_DELETE_AGE_MS } from './constants.js';
 import { checkStorageQuota } from './storage-utils.js';
 
-// CaptureCast background service worker (MV3)
-// Manages offscreen document, recording state, overlay injection, and preview handoff
-
 const logger = createLogger('Background');
 
-// Global error handlers
 globalThis.addEventListener('unhandledrejection', (event) => {
   logger.error('Unhandled Rejection:', event.reason);
 });
@@ -17,20 +13,21 @@ globalThis.addEventListener('error', (event) => {
 });
 
 const STATE = {
-  status: 'IDLE', // 'IDLE' | 'RECORDING' | 'SAVING'
-  mode: null, // 'tab' | 'screen' | 'window'
+  status: 'IDLE',
+  backend: null,
+  mode: null,
   recordingId: null,
   overlayTabId: null,
   includeMic: false,
   includeSystemAudio: false,
   recorderTabId: null,
-  strategy: null, // 'offscreen' | 'page'
+  strategy: null,
   stopTimeoutId: null,
-  isAutomation: false, // true when controlled by external client
-  silentMode: false, // true when using tabCapture instead of getDisplayMedia
+  isAutomation: false,
+  cdpTabId: null,
+  cdpPort: null,
 };
 
-// Helper to update badge based on status
 async function updateBadge() {
   try {
     let color = '#00000000';
@@ -51,79 +48,33 @@ async function updateBadge() {
   }
 }
 
-async function attachDebugger() {
-  try {
-    const targets = await chrome.debugger.getTargets();
-    const attached = targets.some((t) => t.attached && t.url.startsWith(chrome.runtime.getURL('')));
-    if (!attached) {
-      await chrome.debugger.attach({ tabId: undefined }, '1.3');
-    }
-  } catch (e) {
-    logger.warn('Debugger attach failed (may already be attached):', e.message);
-  }
-}
-
-function handleCDPCommand(method, params) {
-  switch (method) {
-    case 'CaptureCast.start':
-      return startRecording(
-        params?.mode ?? 'tab',
-        params?.mic ?? false,
-        params?.systemAudio ?? false,
-        { automation: true, silent: params?.silent ?? false }
-      );
-    case 'CaptureCast.stop':
-      return stopRecording();
-    case 'CaptureCast.getState':
-      return Promise.resolve({
-        ...STATE,
-        recording: STATE.status === 'RECORDING' || STATE.status === 'SAVING',
-      });
-    case 'CaptureCast.getLastRecordingId':
-      return Promise.resolve({ ok: true, recordingId: STATE.recordingId });
-    default:
-      return Promise.resolve({ ok: false, error: `Unknown method: ${method}` });
-  }
-}
-
-chrome.debugger.onEvent.addListener((source, method, params) => {
-  if (!source.url?.startsWith(chrome.runtime.getURL(''))) return;
-  handleCDPCommand(method, params).then((result) => {
-    logger.log('CDP command handled:', method, result);
-  });
-});
-
-chrome.debugger.onDetach.addListener((source, reason) => {
-  logger.log('Debugger detached:', source.url, reason);
-});
-
 function canUseOffscreen() {
   return !!(chrome.offscreen && chrome.offscreen.createDocument);
 }
 
+async function hasOffscreenDocument() {
+  return await chrome.offscreen.hasDocument?.();
+}
+
 async function ensureOffscreenDocument() {
   if (!canUseOffscreen()) {
-    throw new Error('Offscreen API is not available; cannot create offscreen document.');
+    throw new Error('Offscreen API is not available');
   }
-  const existing = await chrome.offscreen.hasDocument?.();
-  logger.log('Checking offscreen document, existing:', existing);
+  const existing = await hasOffscreenDocument();
   if (existing) return;
 
-  logger.log('Creating offscreen document');
   await chrome.offscreen.createDocument({
     url: chrome.runtime.getURL('offscreen.html'),
     reasons: ['USER_MEDIA', 'BLOBS'],
     justification: 'Record a screen capture stream using MediaRecorder in an offscreen document.',
   });
-  logger.log('Offscreen document created');
 }
 
 async function closeOffscreenDocumentIfIdle() {
   try {
     if (!canUseOffscreen()) return;
-    const existing = await chrome.offscreen.hasDocument?.();
+    const existing = await hasOffscreenDocument();
     if (existing && STATE.status === 'IDLE') {
-      logger.log('Closing idle offscreen document to free resources');
       await chrome.offscreen.closeDocument?.();
     }
   } catch (e) {
@@ -179,51 +130,52 @@ async function focusTab(tabId) {
   }
 }
 
-async function startRecording(mode, includeMic, includeSystemAudio, options = {}) {
-  if (STATE.status !== 'IDLE') return { ok: false, error: 'Already recording or saving' };
+async function startCDPScreencast(tabId, mode, includeMic, includeSystemAudio, options = {}) {
+  if (STATE.status !== 'IDLE') {
+    return { ok: false, error: 'Already recording or saving' };
+  }
 
   const storageCheck = await checkStorageQuota();
   if (!storageCheck.ok) {
-    logger.error('Storage check failed:', storageCheck.error);
     return { ok: false, error: storageCheck.error };
   }
 
-  STATE.mode = mode;
+  STATE.backend = 'cdpScreencast';
+  STATE.mode = mode || 'tab';
   STATE.recordingId = crypto.randomUUID();
-  STATE.overlayTabId = await getActiveTabId();
+  STATE.overlayTabId = options.targetTabId || tabId || (await getActiveTabId());
   STATE.includeMic = !!includeMic;
   STATE.includeSystemAudio = !!includeSystemAudio;
   STATE.isAutomation = !!options.automation;
-  STATE.silentMode = mode === 'tab' || !!options.silent;
+  STATE.cdpTabId = STATE.overlayTabId;
 
-  const useOffscreen = !STATE.includeMic && canUseOffscreen();
+  await ensureOffscreenDocument();
 
-  if (useOffscreen) {
-    await ensureOffscreenDocument();
-    await chrome.runtime.sendMessage({
-      type: 'OFFSCREEN_START',
-      mode,
-      includeAudio: STATE.includeSystemAudio,
-      recordingId: STATE.recordingId,
-      targetTabId: STATE.overlayTabId,
-      silent: STATE.silentMode,
-    });
-    STATE.strategy = 'offscreen';
-  } else {
-    // Use a dedicated recorder page (extension tab) where mic is allowed or as a fallback when offscreen is unavailable
-    const url = chrome.runtime.getURL(
-      `recorder.html?id=${encodeURIComponent(STATE.recordingId)}&mode=${encodeURIComponent(
-        mode
-      )}&mic=${STATE.includeMic ? 1 : 0}&sys=${STATE.includeSystemAudio ? 1 : 0}&silent=${
-        STATE.silentMode ? 1 : 0
-      }`
-    );
-    const tab = await chrome.tabs.create({ url, active: true });
-    STATE.recorderTabId = tab.id ?? null;
-    STATE.strategy = 'page';
-  }
+  const cdpPort = chrome.runtime.connect(undefined, { name: 'cdpScreencast' });
+  STATE.cdpPort = cdpPort;
 
-  // Best-effort overlay on the active tab
+  cdpPort.onMessage.addListener((msg) => {
+    if (msg.type === 'CDP_ERROR') {
+      logger.error('CDP backend error:', msg.error);
+    }
+  });
+
+  cdpPort.onDisconnect.addListener(() => {
+    logger.log('CDP port disconnected');
+    STATE.cdpPort = null;
+    if (STATE.status === 'RECORDING') {
+      stopRecording();
+    }
+  });
+
+  cdpPort.postMessage({
+    type: 'CDP_START',
+    tabId: STATE.cdpTabId,
+    recordingId: STATE.recordingId,
+    mode: STATE.mode,
+    includeAudio: STATE.includeSystemAudio || STATE.includeMic,
+  });
+
   let overlayInjected = false;
   if (STATE.overlayTabId) {
     overlayInjected = await injectOverlay(STATE.overlayTabId);
@@ -231,55 +183,192 @@ async function startRecording(mode, includeMic, includeSystemAudio, options = {}
 
   STATE.status = 'RECORDING';
   await updateBadge();
-  return { ok: true, overlayInjected };
+  return { ok: true, overlayInjected, backend: 'cdpScreencast' };
+}
+
+async function startTabCapture(tabId, mode, includeMic, includeSystemAudio, options = {}) {
+  if (STATE.status !== 'IDLE') {
+    return { ok: false, error: 'Already recording or saving' };
+  }
+
+  const storageCheck = await checkStorageQuota();
+  if (!storageCheck.ok) {
+    return { ok: false, error: storageCheck.error };
+  }
+
+  STATE.backend = 'tabCapture';
+  STATE.mode = mode || 'tab';
+  STATE.recordingId = crypto.randomUUID();
+  STATE.overlayTabId = options.targetTabId || tabId || (await getActiveTabId());
+  STATE.includeMic = !!includeMic;
+  STATE.includeSystemAudio = !!includeSystemAudio;
+  STATE.isAutomation = !!options.automation;
+
+  const useOffscreen = !STATE.includeMic && canUseOffscreen();
+
+  if (useOffscreen) {
+    await ensureOffscreenDocument();
+
+    let streamId = options.streamId || null;
+    if (!streamId && STATE.overlayTabId) {
+      try {
+        streamId = await chrome.tabCapture.getMediaStreamId({
+          targetTabId: STATE.overlayTabId,
+        });
+        logger.log('Got streamId for tabCapture');
+      } catch (e) {
+        logger.warn('Failed to get streamId:', e.message);
+      }
+    }
+
+    await chrome.runtime.sendMessage({
+      type: 'OFFSCREEN_START',
+      mode: STATE.mode,
+      includeAudio: STATE.includeSystemAudio,
+      recordingId: STATE.recordingId,
+      targetTabId: STATE.overlayTabId,
+      streamId: streamId,
+    });
+    STATE.strategy = 'offscreen';
+  } else {
+    let streamId = options.streamId || null;
+    if (!streamId && STATE.overlayTabId) {
+      try {
+        streamId = await chrome.tabCapture.getMediaStreamId({
+          targetTabId: STATE.overlayTabId,
+        });
+      } catch (e) {
+        logger.warn('Failed to get streamId:', e.message);
+      }
+    }
+
+    const url = chrome.runtime.getURL(
+      `recorder.html?id=${encodeURIComponent(STATE.recordingId)}&mode=${encodeURIComponent(
+        STATE.mode
+      )}&mic=${STATE.includeMic ? 1 : 0}&sys=${STATE.includeSystemAudio ? 1 : 0}${
+        streamId ? '&streamId=' + encodeURIComponent(streamId) : ''
+      }`
+    );
+    const tab = await chrome.tabs.create({ url, active: true });
+    STATE.recorderTabId = tab.id ?? null;
+    STATE.strategy = 'page';
+  }
+
+  let overlayInjected = false;
+  if (STATE.overlayTabId) {
+    overlayInjected = await injectOverlay(STATE.overlayTabId);
+  }
+
+  STATE.status = 'RECORDING';
+  await updateBadge();
+  return { ok: true, overlayInjected, backend: 'tabCapture' };
+}
+
+async function startDisplayMedia(tabId, mode, includeMic, includeSystemAudio, options = {}) {
+  if (STATE.status !== 'IDLE') {
+    return { ok: false, error: 'Already recording or saving' };
+  }
+
+  const storageCheck = await checkStorageQuota();
+  if (!storageCheck.ok) {
+    return { ok: false, error: storageCheck.error };
+  }
+
+  STATE.backend = 'displayMedia';
+  STATE.mode = mode || 'screen';
+  STATE.recordingId = crypto.randomUUID();
+  STATE.overlayTabId = options.targetTabId || tabId || (await getActiveTabId());
+  STATE.includeMic = !!includeMic;
+  STATE.includeSystemAudio = !!includeSystemAudio;
+  STATE.isAutomation = !!options.automation;
+
+  const useOffscreen = !STATE.includeMic && canUseOffscreen();
+
+  if (useOffscreen) {
+    await ensureOffscreenDocument();
+
+    await chrome.runtime.sendMessage({
+      type: 'OFFSCREEN_START',
+      mode: STATE.mode,
+      includeAudio: STATE.includeSystemAudio,
+      recordingId: STATE.recordingId,
+      targetTabId: STATE.overlayTabId,
+      streamId: null,
+    });
+    STATE.strategy = 'offscreen';
+  } else {
+    const url = chrome.runtime.getURL(
+      `recorder.html?id=${encodeURIComponent(STATE.recordingId)}&mode=${encodeURIComponent(
+        STATE.mode
+      )}&mic=${STATE.includeMic ? 1 : 0}&sys=${STATE.includeSystemAudio ? 1 : 0}`
+    );
+    const tab = await chrome.tabs.create({ url, active: true });
+    STATE.recorderTabId = tab.id ?? null;
+    STATE.strategy = 'page';
+  }
+
+  let overlayInjected = false;
+  if (STATE.overlayTabId) {
+    overlayInjected = await injectOverlay(STATE.overlayTabId);
+  }
+
+  STATE.status = 'RECORDING';
+  await updateBadge();
+  return { ok: true, overlayInjected, backend: 'displayMedia' };
+}
+
+async function startRecording(mode, includeMic, includeSystemAudio, options = {}) {
+  const backend = options.backend || 'tabCapture';
+
+  if (backend === 'cdpScreencast') {
+    return startCDPScreencast(options.targetTabId, mode, includeMic, includeSystemAudio, options);
+  } else if (backend === 'displayMedia') {
+    return startDisplayMedia(options.targetTabId, mode, includeMic, includeSystemAudio, options);
+  } else {
+    return startTabCapture(options.targetTabId, mode, includeMic, includeSystemAudio, options);
+  }
 }
 
 async function stopRecording() {
   if (STATE.status !== 'RECORDING') return { ok: false, error: 'Not recording' };
 
-  // Transition to SAVING state immediately
   STATE.status = 'SAVING';
   await updateBadge();
 
-  // Best-effort immediate overlay removal to avoid it lingering
   try {
     if (STATE.overlayTabId) {
-      // Ask the overlay to remove itself (works if the script is still alive)
       try {
-        await chrome.tabs.sendMessage(STATE.overlayTabId, {
-          type: 'OVERLAY_REMOVE',
-        });
+        await chrome.tabs.sendMessage(STATE.overlayTabId, { type: 'OVERLAY_REMOVE' });
       } catch (e) {
         /* no-op */
       }
-      // Also attempt DOM removal via scripting (in case listener isn't present)
       await removeOverlay(STATE.overlayTabId);
     }
   } catch (e) {
     /* no-op */
   }
 
-  // Set a safety timeout (very long) just in case the offscreen/recorder crashes completely
   if (STATE.stopTimeoutId) clearTimeout(STATE.stopTimeoutId);
   STATE.stopTimeoutId = setTimeout(async () => {
     logger.error(`Save timeout reached (${STOP_TIMEOUT_MS / 1000}s) - forcing reset`);
     await resetRecordingState();
   }, STOP_TIMEOUT_MS);
 
-  // Send stop message to recorder/offscreen
   try {
-    if (STATE.strategy === 'page') {
+    if (STATE.backend === 'cdpScreencast' && STATE.cdpPort) {
+      STATE.cdpPort.postMessage({ type: 'CDP_STOP' });
+      STATE.cdpPort.disconnect();
+      STATE.cdpPort = null;
+    } else if (STATE.strategy === 'page') {
       await chrome.runtime.sendMessage({ type: 'RECORDER_STOP' });
     } else {
       await chrome.runtime.sendMessage({ type: 'OFFSCREEN_STOP' });
     }
   } catch (e) {
     logger.error('Failed to send stop message:', e);
-    // If we can't send stop message, we might be stuck.
-    // But we stay in SAVING state until the timeout or user manual intervention (if we added that).
-    // For now, let the timeout handle the worst case.
     return { ok: false, error: 'Failed to send stop signal: ' + e.message };
   }
+
   return { ok: true };
 }
 
@@ -299,6 +388,7 @@ async function resetRecordingState() {
   } catch (e) {
     /* no-op */
   }
+
   try {
     if (STATE.recorderTabId) {
       await chrome.tabs.remove(STATE.recorderTabId);
@@ -307,20 +397,27 @@ async function resetRecordingState() {
     /* no-op */
   }
 
+  if (STATE.cdpPort) {
+    try {
+      STATE.cdpPort.disconnect();
+    } catch (e) {
+      /* no-op */
+    }
+    STATE.cdpPort = null;
+  }
+
+  STATE.backend = null;
   STATE.mode = null;
   STATE.overlayTabId = null;
   STATE.includeMic = false;
   STATE.includeSystemAudio = false;
   STATE.recorderTabId = null;
   STATE.strategy = null;
-  STATE.recordingId = null;
   STATE.isAutomation = false;
-  STATE.silentMode = false;
+  STATE.cdpTabId = null;
 }
 
-// Handle messages from popup, overlay, offscreen, and preview
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  // Validate message sender for security
   if (sender.id !== chrome.runtime.id) {
     logger.warn('Ignoring message from unauthorized sender:', sender.id);
     sendResponse({ ok: false, error: 'Unauthorized sender' });
@@ -331,7 +428,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     try {
       switch (message.type) {
         case 'START': {
-          const res = await startRecording(message.mode, message.mic, message.systemAudio);
+          const res = await startRecording(message.mode, message.mic, message.systemAudio, {
+            streamId: message.streamId || null,
+            targetTabId: message.targetTabId || null,
+            backend: message.backend || 'tabCapture',
+          });
           sendResponse(res);
           break;
         }
@@ -340,20 +441,37 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse(res);
           break;
         }
+        case 'CONTROLLER_START': {
+          const res = await startRecording(message.mode, false, false, {
+            targetTabId: message.targetTabId || null,
+            backend: message.backend || 'tabCapture',
+            automation: true,
+          });
+          sendResponse(res);
+          break;
+        }
+        case 'CONTROLLER_STOP': {
+          const res = await stopRecording();
+          sendResponse(res);
+          break;
+        }
+        case 'CONTROLLER_STATE': {
+          sendResponse({
+            ...STATE,
+            recording: STATE.status === 'RECORDING' || STATE.status === 'SAVING',
+            mic: STATE.includeMic,
+            systemAudio: STATE.includeSystemAudio,
+          });
+          break;
+        }
         case 'OFFSCREEN_STARTED': {
-          // Acknowledge start to avoid async-channel warnings
           sendResponse({ ok: true });
           break;
         }
         case 'OFFSCREEN_DATA': {
-          // Receive notification that data is saved in DB
           const { recordingId } = message;
           logger.log('Received OFFSCREEN_DATA:', { recordingId, isAutomation: STATE.isAutomation });
-
-          // Reset state
           await resetRecordingState();
-
-          // Skip preview tab for automation mode
           if (!STATE.isAutomation) {
             const url = chrome.runtime.getURL(`preview.html?id=${encodeURIComponent(recordingId)}`);
             await chrome.tabs.create({ url });
@@ -363,13 +481,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           break;
         }
         case 'RECORDER_DATA': {
-          // Receive notification that data is saved in DB
           const { recordingId } = message;
           logger.log('Received RECORDER_DATA:', { recordingId, isAutomation: STATE.isAutomation });
-
           await resetRecordingState();
-
-          // Skip preview tab for automation mode
           if (!STATE.isAutomation) {
             const url = chrome.runtime.getURL(`preview.html?id=${encodeURIComponent(recordingId)}`);
             await chrome.tabs.create({ url });
@@ -385,7 +499,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           break;
         }
         case 'PREVIEW_READY': {
-          // No-op or simple ack, as preview now loads from DB directly
           sendResponse({ ok: true });
           break;
         }
@@ -396,29 +509,35 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           break;
         }
         case 'GET_STATE': {
-          // Map internal status to boolean for backward compatibility with popup
-          const publicState = {
+          sendResponse({
             ...STATE,
             recording: STATE.status === 'RECORDING' || STATE.status === 'SAVING',
-          };
-          sendResponse(publicState);
+            mic: STATE.includeMic,
+            systemAudio: STATE.includeSystemAudio,
+          });
           break;
         }
         case 'OFFSCREEN_TEST': {
-          logger.log('Received OFFSCREEN_TEST message');
           sendResponse({ ok: true, message: 'Test successful' });
           break;
         }
         case 'GET_LAST_RECORDING_ID': {
-          // Return the ID of the most recently completed recording (for automation clients)
           sendResponse({ ok: true, recordingId: STATE.recordingId });
           break;
         }
-        default: {
-          // Unknown message
-          logger.log('Unknown message type:', message.type);
-          sendResponse({ ok: false, error: 'Unknown message' });
+        case 'CDP_FINISHED': {
+          const { recordingId } = message;
+          logger.log('CDP recording finished:', recordingId);
+          await resetRecordingState();
+          if (!STATE.isAutomation) {
+            const url = chrome.runtime.getURL(`preview.html?id=${encodeURIComponent(recordingId)}`);
+            await chrome.tabs.create({ url });
+          }
+          sendResponse({ ok: true });
+          break;
         }
+        default:
+          sendResponse({ ok: false, error: 'Unknown message' });
       }
     } catch (e) {
       logger.error('Error handling message', message.type, e);
@@ -429,22 +548,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
     }
   })();
-  return true; // Keep message channel open for async response
+  return true;
 });
 
-// External message listener for automation clients
-// Handles START/STOP from external sources (external extensions, apps, etc.)
 chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => {
   logger.log('External message received:', message.type, 'from:', sender.id);
+
+  const allowedIds = [];
+  if (allowedIds.length > 0 && !allowedIds.includes(sender.id)) {
+    logger.warn('Ignoring external message from unauthorized sender:', sender.id);
+    return;
+  }
 
   (async () => {
     try {
       switch (message.type) {
         case 'START': {
-          // External START - mark as automation mode
           const res = await startRecording(message.mode, message.mic, message.systemAudio, {
+            backend: message.backend || 'tabCapture',
             automation: true,
-            silent: message.silent,
           });
           sendResponse(res);
           break;
@@ -459,17 +581,16 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
           break;
         }
         case 'GET_STATE': {
-          const publicState = {
+          sendResponse({
             ...STATE,
             recording: STATE.status === 'RECORDING' || STATE.status === 'SAVING',
-          };
-          sendResponse(publicState);
+            mic: STATE.includeMic,
+            systemAudio: STATE.includeSystemAudio,
+          });
           break;
         }
-        default: {
-          logger.log('Unknown external message type:', message.type);
+        default:
           sendResponse({ ok: false, error: 'Unknown message type' });
-        }
       }
     } catch (e) {
       logger.error('Error handling external message', message.type, e);
@@ -479,10 +600,8 @@ chrome.runtime.onMessageExternal.addListener((message, sender, sendResponse) => 
   return true;
 });
 
-// Clean badge on install/update and run cleanup
 chrome.runtime.onInstalled.addListener(async () => {
   await updateBadge();
-  await attachDebugger();
   try {
     await cleanupOldRecordings(AUTO_DELETE_AGE_MS);
   } catch (e) {
@@ -491,10 +610,55 @@ chrome.runtime.onInstalled.addListener(async () => {
 });
 
 chrome.runtime.onStartup.addListener(async () => {
-  await attachDebugger();
   try {
     await cleanupOldRecordings(AUTO_DELETE_AGE_MS);
   } catch (e) {
     logger.error('Cleanup failed:', e);
+  }
+});
+
+chrome.action.onClicked.addListener(async (tab) => {
+  logger.log('Extension icon clicked on tab:', tab.id);
+
+  if (STATE.status === 'RECORDING') {
+    await stopRecording();
+  } else if (STATE.status === 'IDLE') {
+    STATE.backend = 'tabCapture';
+    STATE.mode = 'tab';
+    STATE.recordingId = crypto.randomUUID();
+    STATE.overlayTabId = tab.id;
+    STATE.includeMic = false;
+    STATE.includeSystemAudio = false;
+    STATE.isAutomation = false;
+
+    const useOffscreen = canUseOffscreen();
+
+    if (useOffscreen) {
+      await ensureOffscreenDocument();
+
+      let streamId = null;
+      try {
+        streamId = await chrome.tabCapture.getMediaStreamId({
+          targetTabId: tab.id,
+        });
+        logger.log('Got streamId via action.onClicked');
+      } catch (e) {
+        logger.warn('Failed to get streamId:', e.message);
+      }
+
+      await chrome.runtime.sendMessage({
+        type: 'OFFSCREEN_START',
+        mode: 'tab',
+        includeAudio: false,
+        recordingId: STATE.recordingId,
+        targetTabId: tab.id,
+        streamId: streamId,
+      });
+      STATE.strategy = 'offscreen';
+    }
+
+    STATE.status = 'RECORDING';
+    await updateBadge();
+    logger.log('Recording started via action click');
   }
 });

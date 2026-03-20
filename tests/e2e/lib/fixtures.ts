@@ -14,7 +14,7 @@ export const test = base.extend<{
   context: async ({}, use) => {
     const pathToExtension = path.resolve(__dirname, '../../..');
     const context = await chromium.launchPersistentContext('', {
-      headless: isCI ? true : false,
+      headless: false,
       args: [
         `--disable-extensions-except=${pathToExtension}`,
         `--load-extension=${pathToExtension}`,
@@ -28,7 +28,7 @@ export const test = base.extend<{
         // Stabilize mic/camera permission prompts in automation. These flags do
         // not bypass the native getDisplayMedia picker for screen/window capture.
         '--use-fake-ui-for-media-stream',
-        '--use-fake-device-for-media-stream',
+        '--use-fake-device-for-media-stream', '--auto-select-desktop-capture-source=Entire screen', // Required for tabCapture in tests (may cause green screen in some scenarios)
         ...(isCI
           ? [
               '--disable-gpu',

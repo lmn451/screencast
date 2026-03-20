@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CaptureCast Controller</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        padding: 20px;
+        background: #1a1a1a;
+        color: #fff;
+      }
+      .status {
+        padding: 10px;
+        border-radius: 4px;
+        margin-bottom: 20px;
+      }
+      .status.idle {
+        background: #333;
+      }
+      .status.recording {
+        background: #d93025;
+      }
+      .status.saving {
+        background: #f9ab00;
+        color: #000;
+      }
+      button {
+        padding: 10px 20px;
+        margin: 5px;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 14px;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      .btn-start {
+        background: #d93025;
+        color: #fff;
+      }
+      .btn-stop {
+        background: #5f6368;
+        color: #fff;
+      }
+      .btn-state {
+        background: #1a73e8;
+        color: #fff;
+      }
+      pre {
+        background: #2a2a2a;
+        padding: 10px;
+        border-radius: 4px;
+        overflow-x: auto;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>CaptureCast Controller</h1>
+    <div id="status" class="status idle">Status: IDLE</div>
+
+    <div>
+      <button id="btnStart" class="btn-start">Start Recording</button>
+      <button id="btnStop" class="btn-stop" disabled>Stop Recording</button>
+      <button id="btnState" class="btn-state">Get State</button>
+    </div>
+
+    <h3>State Output:</h3>
+    <pre id="output">Click "Get State" to see current state</pre>
+
+    <script src="controller.js"></script>
+  </body>
+</html>

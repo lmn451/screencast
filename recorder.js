@@ -39,6 +39,7 @@ async function start() {
   const wantMic = getQueryParam('mic') === '1';
   const wantSys = getQueryParam('sys') === '1';
   const silent = getQueryParam('silent') === '1';
+  const streamId = getQueryParam('streamId') || null;
 
   const status = document.getElementById('status');
   const preview = document.getElementById('preview');
@@ -58,32 +59,55 @@ async function start() {
     if (silent) {
       logger.log('Using tabCapture for silent recording');
       try {
-        const tracks = [];
-        const videoTrack = await new Promise((resolve, reject) => {
-          chrome.tabCapture.capture({ video: true, audio: wantSys || wantMic }, (stream) => {
-            if (chrome.runtime.lastError) {
-              reject(new Error(chrome.runtime.lastError.message));
-            } else {
-              resolve(stream?.getVideoTracks()[0] ?? null);
-            }
+        if (streamId) {
+          logger.log('Using streamId from URL params for tab capture');
+          captureStream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              mandatory: {
+                chromeMediaSource: 'tab',
+                chromeMediaSourceId: streamId,
+              },
+            },
+            audio:
+              wantSys || wantMic
+                ? {
+                    mandatory: {
+                      chromeMediaSource: 'tab',
+                      chromeMediaSourceId: streamId,
+                    },
+                  }
+                : false,
           });
-        });
-
-        if (!videoTrack) {
-          throw new Error('Tab capture failed: no video track available');
-        }
-        tracks.push(videoTrack);
-
-        const audioTrack = tracks[0].clone();
-        const audioStream = new MediaStream([audioTrack]);
-        captureStream = audioStream;
-        if (captureStream.getAudioTracks().length > 0) {
-          captureStream = new MediaStream([videoTrack, ...captureStream.getAudioTracks()]);
+          logger.log('Tab capture via streamId succeeded in recorder');
         } else {
-          captureStream = new MediaStream([videoTrack]);
-        }
+          logger.log('No streamId available, using chrome.tabCapture.capture()');
+          const tracks = [];
+          const videoTrack = await new Promise((resolve, reject) => {
+            chrome.tabCapture.capture({ video: true, audio: wantSys || wantMic }, (stream) => {
+              if (chrome.runtime.lastError) {
+                reject(new Error(chrome.runtime.lastError.message));
+              } else {
+                resolve(stream?.getVideoTracks()[0] ?? null);
+              }
+            });
+          });
 
-        logger.log('Tab capture succeeded in recorder');
+          if (!videoTrack) {
+            throw new Error('Tab capture failed: no video track available');
+          }
+          tracks.push(videoTrack);
+
+          const audioTrack = tracks[0].clone();
+          const audioStream = new MediaStream([audioTrack]);
+          captureStream = audioStream;
+          if (captureStream.getAudioTracks().length > 0) {
+            captureStream = new MediaStream([videoTrack, ...captureStream.getAudioTracks()]);
+          } else {
+            captureStream = new MediaStream([videoTrack]);
+          }
+
+          logger.log('Tab capture succeeded in recorder');
+        }
       } catch (tabCaptureError) {
         logger.warn(
           'Tab capture failed, falling back to getDisplayMedia:',

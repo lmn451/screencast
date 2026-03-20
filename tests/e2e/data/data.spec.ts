@@ -14,7 +14,9 @@ test.beforeEach(async ({ context }) => {
 });
 
 test.describe('Tab mode data management', () => {
-  test('full recording lifecycle: start, record, stop, preview', async ({
+  // @manual-picker - tabCapture requires isTrusted: true (genuine user gesture)
+  // Playwright cannot provide this, so these tests are skipped in automation
+  test('full recording lifecycle: start, record, stop, preview @manual-picker', async ({
     context,
     extensionId,
   }) => {
@@ -103,7 +105,8 @@ test.describe('Tab mode data management', () => {
     expect(duration).toBeGreaterThan(0);
   });
 
-  test('multiple recordings in sequence', async ({ context, extensionId }) => {
+  // @manual-picker - tabCapture requires isTrusted: true (genuine user gesture)
+  test('multiple recordings in sequence @manual-picker', async ({ context, extensionId }) => {
     const controlPage = await context.newPage();
     await controlPage.goto(controlPageUrl(extensionId));
 

@@ -14,7 +14,8 @@ test.beforeEach(async ({ context }) => {
 });
 
 test.describe('Tab mode UI components', () => {
-  test('preview page loads and displays video', async ({ context, extensionId }) => {
+  // @manual-picker - tabCapture requires isTrusted: true (genuine user gesture)
+  test('preview page loads and displays video @manual-picker', async ({ context, extensionId }) => {
     const controlPage = await context.newPage();
     await controlPage.goto(controlPageUrl(extensionId));
 
@@ -98,7 +99,11 @@ test.describe('Tab mode UI components', () => {
     expect(await downloadBtn.textContent()).toBe('Download');
   });
 
-  test('preview page video plays and can be controlled', async ({ context, extensionId }) => {
+  // @manual-picker - tabCapture requires isTrusted: true (genuine user gesture)
+  test('preview page video plays and can be controlled @manual-picker', async ({
+    context,
+    extensionId,
+  }) => {
     const controlPage = await context.newPage();
     await controlPage.goto(controlPageUrl(extensionId));
 
