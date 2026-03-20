@@ -5,14 +5,20 @@ import { checkStorageQuota } from './storage-utils.js';
 
 const logger = createLogger('Background');
 
-globalThis.addEventListener('unhandledrejection', (event) => {
-  logger.error('Unhandled Rejection:', event.reason);
-});
-globalThis.addEventListener('error', (event) => {
-  logger.error('Uncaught Exception:', event.error || event.message);
-});
+/**
+ * Инициализация Service Worker
+ * Вызывается из sw-entry.js после сборки esbuild
+ */
+export function initBackground() {
+  // Глобальные обработчики ошибок
+  globalThis.addEventListener('unhandledrejection', (event) => {
+    logger.error('Unhandled Rejection:', event.reason);
+  });
+  globalThis.addEventListener('error', (event) => {
+    logger.error('Uncaught Exception:', event.error || event.message);
+  });
 
-const STATE = {
+  const STATE = {
   status: 'IDLE',
   backend: null,
   mode: null,
@@ -662,3 +668,4 @@ chrome.action.onClicked.addListener(async (tab) => {
     logger.log('Recording started via action click');
   }
 });
+} // конец initBackground()

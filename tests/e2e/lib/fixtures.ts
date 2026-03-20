@@ -1,6 +1,7 @@
 import { test as base, chromium, type BrowserContext } from '@playwright/test';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { execSync } from 'child_process';
 import fs from 'fs';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -10,28 +11,33 @@ const rootDir = path.resolve(__dirname, '../../..');
 const isCI = !!process.env.CI;
 
 /**
- * Prepare extension for testing by ensuring bundled version is ready.
- * The test bundle inlines all ES module imports for Service Worker compatibility.
+ * Build the extension bundle using esbuild with Clean Entry Point pattern.
+ * 
+ * Why this works:
+ * 1. sw-entry.js has NO exports - esbuild won't generate `var self = ...` 
+ * 2. No globalName means global `self` (Service Worker's context) stays intact
+ * 3. Single IIFE bundle bypasses ESM CORS/MIME issues in --load-extension mode
+ * 
+ * @see https://esbuild.github.io/api/#bundle
  */
-function prepareTestExtension() {
-  const bgOriginal = path.join(rootDir, 'background.js');
-  const bgBundled = path.join(rootDir, 'build', 'background-test.js');
+function buildExtensionBundle() {
+  const distDir = path.join(rootDir, 'dist');
+  const bundlePath = path.join(distDir, 'background.bundle.js');
   
-  // Check if bundled version exists and is newer
-  let needsBuild = true;
-  if (fs.existsSync(bgBundled)) {
-    const origStat = fs.statSync(bgOriginal);
-    const bundledStat = fs.statSync(bgBundled);
-    if (bundledStat.mtime > origStat) {
-      needsBuild = false;
-    }
+  // Ensure dist directory exists
+  if (!fs.existsSync(distDir)) {
+    fs.mkdirSync(distDir, { recursive: true });
   }
   
-  if (needsBuild) {
-    console.log('Test bundle not found or outdated. Run: pnpm build:test');
-  }
+  // Run esbuild with clean entry point (no exports = no self override)
+  console.log('[Build] Creating extension bundle via esbuild...');
+  execSync(
+    `cd "${rootDir}" && npx esbuild sw-entry.js --bundle --outfile=dist/background.bundle.js`,
+    { stdio: 'inherit' }
+  );
   
-  return { needsBuild, bgBundled };
+  console.log(`[Build] Bundle created: ${bundlePath}`);
+  return bundlePath;
 }
 
 export const test = base.extend<{
@@ -39,10 +45,10 @@ export const test = base.extend<{
   extensionId: string;
 }>({
   context: async ({}, use) => {
-    prepareTestExtension();
+    // CRITICAL: Build BEFORE chromium.launchPersistentContext
+    // Playwright caches the extension at launch time - too late to modify files
+    buildExtensionBundle();
     
-    // For testing, we'll use the original background.js
-    // The build step should be run separately: pnpm build:test
     const pathToExtension = rootDir;
     
     const context = await chromium.launchPersistentContext('', {
