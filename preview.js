@@ -277,13 +277,13 @@ if (typeof window !== 'undefined' && window.location.search.includes('test')) {
     fixDurationAndReset(video, { timeoutMs: 2000 });
   };
 
-  video.onloadedmetadata = () => {
+  video.addEventListener('loadedmetadata', () => {
     logger.log('Video metadata loaded:', {
       duration: video.duration,
       mimeType,
     });
     startNormalization();
-  };
+  });
   // Reset to start if browser fires ended immediately after load
   const onEndedReset = () => {
     try {

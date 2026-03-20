@@ -33,8 +33,8 @@ let mediaRecorder = null;
 let recordingId = null;
 
 async function start() {
-  const _mode = getQueryParam('mode') || 'tab';
-  void _mode;
+  // Mode is determined by silent parameter, not URL mode param
+  // const _mode = getQueryParam('mode') || 'tab'; // Reserved for future use
   recordingId = getQueryParam('id');
   const wantMic = getQueryParam('mic') === '1';
   const wantSys = getQueryParam('sys') === '1';

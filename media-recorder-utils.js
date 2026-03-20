@@ -8,28 +8,67 @@ const logger = createLogger('MediaRecorderUtils');
 // Constants for recorder configuration
 export const CHUNK_INTERVAL_MS = 1000; // 1 second chunks for balance of memory/recovery
 
+// Detect if we're in a CI/testing environment (GPU acceleration may be disabled)
+const isCI = typeof process !== 'undefined' && process.env?.CI === 'true';
+
 /**
  * Get the best supported video codec from a prioritized list
- * Priority: AV1 (best compression) → VP9 → VP8 (best compatibility) → generic webm
+ * 
+ * For normal browsers: AV1 → VP9 → VP8 (best compression)
+ * For CI/testing: VP8 first (most reliable software codec, no GPU needed)
+ * 
  * @returns {string} MIME type of the best supported codec
  */
 export function getOptimalCodec() {
-  const codecs = [
-    'video/webm;codecs=av01,opus',
+  // In CI environments with disabled GPU, use VP8 (pure software encoding)
+  // AV1/VP9 may require GPU acceleration which isn't available
+  const codecsForCI = [
+    'video/webm;codecs=vp8,opus',  // Most reliable software codec
+    'video/webm;codecs=vp8',        // VP8 without audio
+    'video/webm',                   // Generic fallback
+  ];
+
+  const codecsForNormal = [
+    'video/webm;codecs=av01,opus', // AV1 (best compression, GPU preferred)
     'video/webm;codecs=av1,opus',
-    'video/webm;codecs=vp9,opus',
-    'video/webm;codecs=vp8,opus',
+    'video/webm;codecs=vp9,opus',   // VP9 (good compression)
+    'video/webm;codecs=vp8,opus',   // VP8 (reliable fallback)
     'video/webm',
   ];
 
+  const codecs = isCI ? codecsForCI : codecsForNormal;
+
   for (const codec of codecs) {
     if (MediaRecorder.isTypeSupported(codec)) {
-      logger.log('Selected codec:', codec);
+      logger.log('Selected codec:', codec, isCI ? '(CI mode - software encoding)' : '');
       return codec;
     }
   }
 
   throw new Error('No supported video codec found. Your browser may not support video recording.');
+}
+
+/**
+ * Force software encoding codec (for CI/headless environments)
+ * Use this when GPU is disabled to avoid green screen issues
+ * @returns {string} MIME type for VP8 software encoding
+ */
+export function getSoftwareCodec() {
+  const softwareCodecs = [
+    'video/webm;codecs=vp8,opus',
+    'video/webm;codecs=vp8',
+    'video/webm',
+  ];
+
+  for (const codec of softwareCodecs) {
+    if (MediaRecorder.isTypeSupported(codec)) {
+      logger.log('Software codec selected:', codec);
+      return codec;
+    }
+  }
+
+  logger.warn('No software codec found, using default');
+  return 'video/webm';
 }
 
 /**

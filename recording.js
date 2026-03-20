@@ -1,5 +1,19 @@
 import { DB_NAME, DB_VERSION, STORE_RECORDINGS, STORE_CHUNKS } from './db-shared.js';
 
+// Validate UUID format for security
+function isValidUUID(str) {
+  return (
+    typeof str === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str)
+  );
+}
+
+function validateId(id) {
+  if (!isValidUUID(id)) {
+    throw new Error('Invalid recording ID format');
+  }
+}
+
 function openDB() {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
@@ -21,6 +35,7 @@ function openDB() {
 }
 
 export async function finishRecording(id, mimeType, duration, size) {
+  validateId(id);
   let db;
   try {
     db = await openDB();
@@ -49,6 +64,7 @@ export async function finishRecording(id, mimeType, duration, size) {
 }
 
 export async function updateRecordingName(id, name) {
+  validateId(id);
   let db;
   try {
     db = await openDB();
@@ -82,6 +98,7 @@ export async function updateRecordingName(id, name) {
 }
 
 export async function getRecording(id) {
+  validateId(id);
   let db;
   try {
     db = await openDB();

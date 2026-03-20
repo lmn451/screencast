@@ -34,9 +34,27 @@ export async function saveChunk(recordingId, chunk, index) {
     const tx = db.transaction(STORE_CHUNKS, 'readwrite');
     const store = tx.objectStore(STORE_CHUNKS);
     const request = store.put({ recordingId, index, chunk });
-    request.onsuccess = () => resolve();
-    request.onerror = () => reject(request.error);
-    tx.oncomplete = () => db.close();
-    tx.onerror = () => db.close();
+
+    const cleanup = () => {
+      try {
+        db.close();
+      } catch {
+        // Ignore close errors
+      }
+    };
+
+    request.onsuccess = () => {
+      try {
+        resolve();
+      } finally {
+        cleanup();
+      }
+    };
+    request.onerror = () => {
+      cleanup();
+      reject(request.error);
+    };
+    tx.oncomplete = cleanup;
+    tx.onerror = cleanup;
   });
 }

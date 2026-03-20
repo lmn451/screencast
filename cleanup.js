@@ -75,15 +75,11 @@ export async function cleanupOldRecordings(maxAgeMs = 24 * 60 * 60 * 1000) {
         const chunkStore = tx.objectStore(STORE_CHUNKS);
         const chunkIndex = chunkStore.index('recordingId');
 
-        let completed = 0;
-        const checkDone = () => {
-          completed++;
-          if (completed === idsToDelete.length) {
-            // done
-          }
-        };
-
-        idsToDelete.forEach((id) => {
+        // Process deletions sequentially to avoid overwhelming the transaction
+        // Each recording's chunks are deleted, transaction completes when all done
+        const deleteNext = (index) => {
+          if (index >= idsToDelete.length) return;
+          const id = idsToDelete[index];
           const chunkReq = chunkIndex.openKeyCursor(IDBKeyRange.only(id));
           chunkReq.onsuccess = (e) => {
             const c = e.target.result;
@@ -91,10 +87,16 @@ export async function cleanupOldRecordings(maxAgeMs = 24 * 60 * 60 * 1000) {
               chunkStore.delete(c.primaryKey);
               c.continue();
             } else {
-              checkDone();
+              // All chunks for this recording deleted, move to next
+              deleteNext(index + 1);
             }
           };
-        });
+          chunkReq.onerror = () => {
+            logger.warn('Failed to delete chunks for recording:', id);
+            deleteNext(index + 1);
+          };
+        };
+        deleteNext(0);
       }
     };
 

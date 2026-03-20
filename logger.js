@@ -1,7 +1,12 @@
 // Centralized logging utility for CaptureCast
 // In production, only warnings and errors are shown
 
-const DEBUG = true; // Set to true during development, false for production
+// Detect debug mode from extension manifest or URL parameter
+const isDev =
+  typeof chrome !== 'undefined' &&
+  chrome.runtime?.getManifest?.()?.content_security_policy?.includes('unsafe-eval') === true;
+
+const DEBUG = isDev || new URLSearchParams(globalThis.location?.search).get('debug') === '1';
 
 export const log = DEBUG ? console.log.bind(console) : () => {};
 export const warn = console.warn.bind(console);
