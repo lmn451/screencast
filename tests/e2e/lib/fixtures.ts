@@ -97,31 +97,21 @@ export const test = base.extend<{
     await context.close();
   },
   extensionId: async ({ context }, use) => {
-    // MV2 uses background page, MV3 uses service worker
-    let extensionId = 'unknown';
+    // Wait for extension to initialize
+    await new Promise(r => setTimeout(r, 3000));
     
-    // Try background page first (MV2)
-    const bgPages = context.backgroundPages();
-    if (bgPages.length > 0) {
-      extensionId = bgPages[0].url().split('/')[2];
-    } else {
-      // Try service worker (MV3)
-      const sws = context.serviceWorkers();
-      if (sws.length > 0) {
-        extensionId = sws[0].url().split('/')[2];
-      } else {
-        // Wait for service worker (MV3 fallback)
-        try {
-          const sw = await context.waitForEvent('serviceworker', { timeout: 10000 });
-          extensionId = sw.url().split('/')[2];
-        } catch (e) {
-          // Try background page (MV2 fallback)
-          const bgPage = await context.waitForEvent('backgroundpage', { timeout: 5000 });
-          extensionId = bgPage.url().split('/')[2];
-        }
+    // Get extension ID from service worker URL
+    let extensionId = 'unknown';
+    const sws = context.serviceWorkers();
+    if (sws.length > 0) {
+      const url = sws[0].url();
+      const match = url.match(/chrome-extension:\/\/([^\/]+)/);
+      if (match) {
+        extensionId = match[1];
       }
     }
     
+    console.log('[Fixture] Extension ID:', extensionId);
     await use(extensionId);
   },
 });
