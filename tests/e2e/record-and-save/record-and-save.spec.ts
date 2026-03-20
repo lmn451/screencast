@@ -1,8 +1,5 @@
 /**
- * E2E Test: Record canvas animation and save as WebM
- * 
- * This test works regardless of service worker issues.
- * It generates real WebM content with animated graphics.
+ * E2E Test: Native getDisplayMedia from file:// page
  */
 import { test, expect } from '../lib/fixtures';
 import path from 'path';
@@ -17,97 +14,133 @@ if (!fs.existsSync(OUTPUT_DIR)) {
   fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 }
 
-test('generate canvas animation and save as WebM', async ({ context, extensionId }) => {
+test('native screen capture from file page', async ({ context }) => {
   const timestamp = Date.now();
-  const outputPath = path.join(OUTPUT_DIR, `animation-${timestamp}.webm`);
+  const outputPath = path.join(OUTPUT_DIR, `native-capture-${timestamp}.webm`);
   
   console.log(`
 ========================================
- Canvas Animation Recording Test
+ Native getDisplayMedia (file://)
 ========================================
-Extension: ${extensionId}
 Output: ${outputPath}
 ========================================
 `);
   
-  // Create test page
   const page = await context.newPage();
   
-  console.log('[1/5] Setting up canvas animation...');
+  // Create a test HTML file
+  const testHtmlPath = path.join(OUTPUT_DIR, 'test-page.html');
+  const htmlContent = `
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    body {
+      font-family: sans-serif;
+      background: linear-gradient(135deg, #1a1a2e, #16213e);
+      color: white;
+      padding: 40px;
+    }
+    h1 { color: #e94560; }
+    .counter {
+      font-size: 3rem;
+      font-weight: bold;
+      background: white;
+      color: #0f3460;
+      padding: 20px;
+      border-radius: 10px;
+      display: inline-block;
+    }
+    .ball {
+      width: 40px;
+      height: 40px;
+      background: #e94560;
+      border-radius: 50%;
+      animation: bounce 1s infinite ease-in-out;
+    }
+    @keyframes bounce {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(-50px); }
+    }
+    .box {
+      width: 80px;
+      height: 80px;
+      background: #0f3460;
+      border-radius: 10px;
+      animation: spin 2s infinite linear;
+    }
+    @keyframes spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+  </style>
+</head>
+<body>
+  <h1>🎬 Screen Recording Test</h1>
+  <div class="counter" id="counter">0</div>
+  <div class="ball"></div>
+  <div class="box"></div>
+  <div id="log" style="margin-top:20px;font-family:monospace;"></div>
+  <script>
+    let count = 0;
+    setInterval(() => {
+      count++;
+      document.getElementById('counter').textContent = count;
+      document.getElementById('log').innerHTML = 'Tick ' + count;
+    }, 500);
+  </script>
+</body>
+</html>
+`;
+  fs.writeFileSync(testHtmlPath, htmlContent);
+  console.log('[1/6] Created test page:', testHtmlPath);
   
-  // Generate WebM with canvas animation
-  const result = await page.evaluate(async () => {
-    // Create canvas
-    const canvas = document.createElement('canvas');
-    canvas.width = 640;
-    canvas.height = 360;
-    canvas.style.backgroundColor = '#1a1a2e';
-    document.body.appendChild(canvas);
+  // Navigate to the file
+  console.log('[2/6] Navigating to file:// page...');
+  await page.goto(`file://${testHtmlPath}`);
+  
+  // Check mediaDevices
+  const checkResult = await page.evaluate(() => ({
+    hasMediaDevices: typeof navigator?.mediaDevices !== 'undefined',
+    hasGetDisplayMedia: typeof navigator?.mediaDevices?.getDisplayMedia !== 'undefined',
+    origin: location.origin,
+    protocol: location.protocol
+  }));
+  console.log('[2/6] Media check:', JSON.stringify(checkResult));
+  
+  if (!checkResult.hasGetDisplayMedia) {
+    console.log('[2/6] getDisplayMedia not available, trying HTTPS page...');
+    await page.goto('https://www.example.com');
     
-    const ctx = canvas.getContext('2d')!;
-    
-    // Animation settings
-    const fps = 30;
-    const duration = 3000; // 3 seconds
-    const totalFrames = Math.floor((duration / 1000) * fps);
-    let frame = 0;
-    
-    // Animate
-    const intervalId = setInterval(() => {
-      // Background
-      ctx.fillStyle = '#1a1a2e';
-      ctx.fillRect(0, 0, 640, 360);
-      
-      // Moving colored circles
-      for (let i = 0; i < 5; i++) {
-        const x = ((frame * 2 + i * 100) % 700) - 30;
-        const y = 180 + Math.sin((frame + i * 30) * 0.05) * 80;
-        const radius = 20 + i * 5;
-        
-        ctx.beginPath();
-        ctx.arc(x, y, radius, 0, Math.PI * 2);
-        ctx.fillStyle = `hsl(${(frame * 2 + i * 40) % 360}, 70%, 55%)`;
-        ctx.fill();
-      }
-      
-      // Text
-      ctx.fillStyle = '#ffffff';
-      ctx.font = 'bold 20px sans-serif';
-      ctx.fillText(`Canvas Recording: ${Math.floor(frame / fps)}s / ${duration/1000}s`, 20, 30);
-      
-      // Frame counter
-      ctx.font = '14px monospace';
-      ctx.fillText(`Frame: ${frame}/${totalFrames}`, 20, 55);
-      
-      // REC indicator
-      ctx.fillStyle = '#e94560';
-      ctx.beginPath();
-      ctx.arc(610, 30, 8, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = '#ffffff';
-      ctx.font = '12px sans-serif';
-      ctx.fillText('REC', 580, 35);
-      
-      frame++;
-      if (frame >= totalFrames) {
-        clearInterval(intervalId);
-      }
-    }, 1000 / fps);
-    
-    // Capture stream
-    const stream = canvas.captureStream(fps);
-    
-    // Find best codec
-    let mimeType = 'video/webm';
-    if (MediaRecorder.isTypeSupported('video/webm;codecs=vp9')) {
-      mimeType = 'video/webm;codecs=vp9';
-    } else if (MediaRecorder.isTypeSupported('video/webm;codecs=vp8')) {
-      mimeType = 'video/webm;codecs=vp8';
+    const check2 = await page.evaluate(() => ({
+      hasMediaDevices: typeof navigator?.mediaDevices !== 'undefined',
+      hasGetDisplayMedia: typeof navigator?.mediaDevices?.getDisplayMedia !== 'undefined',
+      origin: location.origin
+    }));
+    console.log('[2/6] HTTPS check:', JSON.stringify(check2));
+  }
+  
+  await page.waitForTimeout(500);
+  
+  // Start recording
+  console.log('[3/6] Starting getDisplayMedia...');
+  
+  const recordingResult = await page.evaluate(async () => {
+    if (!navigator.mediaDevices?.getDisplayMedia) {
+      throw new Error('getDisplayMedia not available');
     }
     
-    console.log('Using codec:', mimeType);
+    const stream = await navigator.mediaDevices.getDisplayMedia({
+      video: { frameRate: { ideal: 30 } },
+      audio: false
+    });
     
-    // Record
+    console.log('[Page] Got stream, tracks:', stream.getVideoTracks().length);
+    
+    const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp8')
+      ? 'video/webm;codecs=vp8'
+      : 'video/webm';
+    
     const recorder = new MediaRecorder(stream, { mimeType });
     const chunks: Blob[] = [];
     
@@ -115,39 +148,39 @@ Output: ${outputPath}
       if (e.data?.size > 0) chunks.push(e.data);
     };
     
-    return new Promise<{ size: number; type: string; data: Uint8Array }>((resolve, reject) => {
-      recorder.onstop = async () => {
-        const blob = new Blob(chunks, { type: mimeType });
-        const buffer = await blob.arrayBuffer();
-        resolve({
-          size: blob.size,
-          type: blob.type,
-          data: new Uint8Array(buffer)
-        });
-      };
-      
-      recorder.start(100);
-      console.log('Recording started');
-      
-      setTimeout(() => {
-        recorder.stop();
-      }, duration + 500);
-    });
+    recorder.start(100);
+    console.log('[Page] Recording...');
+    
+    await new Promise(resolve => setTimeout(resolve, 3000));
+    
+    recorder.stop();
+    stream.getTracks().forEach(t => t.stop());
+    
+    await new Promise(resolve => setTimeout(resolve, 300));
+    
+    const blob = new Blob(chunks, { type: mimeType });
+    const buffer = await blob.arrayBuffer();
+    
+    return {
+      size: blob.size,
+      type: blob.type,
+      data: Array.from(new Uint8Array(buffer))
+    };
   });
   
-  console.log(`[2/5] Generated: ${result.size} bytes`);
+  console.log(`[4/6] Got ${recordingResult.size} bytes`);
   
-  // Save to file
-  console.log('[3/5] Saving to disk...');
-  const buffer = Buffer.from(result.data);
+  // Save
+  console.log('[5/6] Saving...');
+  const buffer = Buffer.from(recordingResult.data);
   fs.writeFileSync(outputPath, buffer);
   
-  console.log(`[4/5] Saved ${buffer.length} bytes`);
-  
   // Verify
-  console.log('[5/5] Verifying...');
+  console.log('[6/6] Verifying...');
   expect(fs.existsSync(outputPath)).toBeTruthy();
   expect(fs.statSync(outputPath).size).toBeGreaterThan(1000);
+  
+  await page.close();
   
   console.log(`
 ========================================
@@ -155,14 +188,9 @@ Output: ${outputPath}
    
    File: ${path.basename(outputPath)}
    Size: ${(buffer.length / 1024).toFixed(2)} KB
-   Duration: 3 seconds
-   Resolution: 640x360
-   Codec: ${result.type}
+   Codec: ${recordingResult.type}
    
-   Play with:
-   open "${outputPath}"
+   Play: open "${outputPath}"
 ========================================
 `);
-  
-  await page.close();
 });
