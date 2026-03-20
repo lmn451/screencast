@@ -152,9 +152,10 @@ async function startCDPCapture(recordingId, width, height) {
   const stream = canvas.captureStream(30);
   mediaStream = stream;
 
-  const mimeType = 'video/webm;codecs=vp9';
+  // Use VP8 for reliable software encoding (avoids green frames in headless/CI)
+  const mimeType = 'video/webm;codecs=vp8';
   const recorder = new MediaRecorder(stream, {
-    mimeType: MediaRecorder.isTypeSupported(mimeType) ? mimeType : undefined,
+    mimeType: MediaRecorder.isTypeSupported(mimeType) ? mimeType : 'video/webm',
   });
 
   let chunkIndex = 0;

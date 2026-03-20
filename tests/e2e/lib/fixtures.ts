@@ -73,12 +73,13 @@ export const test = base.extend<{
         '--use-fake-ui-for-media-stream',
         '--use-fake-device-for-media-stream',
         
-        // GPU acceleration - DISABLE to prevent green screen in recordings
-        // Green screen = GPU encoder failure, fallback to software encoding
-        '--disable-gpu',
-        '--disable-accelerated-video-decode',
-        '--disable-accelerated-video-encode',
-        '--disable-software-rasterizer',
+        // GPU settings - use SwiftShader (software GPU) for reliable rendering
+        // This allows proper frame capture while using software encoding
+        '--use-gl=swiftshader',
+        '--enable-gpu-rasterization',
+        '--ignore-gpu-blocklist',
+        '--enable-accelerated-video-decode',
+        '--enable-zero-copy',
         
         // CI-specific flags
         ...(isCI
@@ -96,11 +97,31 @@ export const test = base.extend<{
     await context.close();
   },
   extensionId: async ({ context }, use) => {
-    let serviceWorker = context.serviceWorkers()[0];
-    if (!serviceWorker) {
-      serviceWorker = await context.waitForEvent('serviceworker');
+    // MV2 uses background page, MV3 uses service worker
+    let extensionId = 'unknown';
+    
+    // Try background page first (MV2)
+    const bgPages = context.backgroundPages();
+    if (bgPages.length > 0) {
+      extensionId = bgPages[0].url().split('/')[2];
+    } else {
+      // Try service worker (MV3)
+      const sws = context.serviceWorkers();
+      if (sws.length > 0) {
+        extensionId = sws[0].url().split('/')[2];
+      } else {
+        // Wait for service worker (MV3 fallback)
+        try {
+          const sw = await context.waitForEvent('serviceworker', { timeout: 10000 });
+          extensionId = sw.url().split('/')[2];
+        } catch (e) {
+          // Try background page (MV2 fallback)
+          const bgPage = await context.waitForEvent('backgroundpage', { timeout: 5000 });
+          extensionId = bgPage.url().split('/')[2];
+        }
+      }
     }
-    const extensionId = serviceWorker.url().split('/')[2];
+    
     await use(extensionId);
   },
 });

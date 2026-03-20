@@ -1,6 +1,6 @@
 import { cleanupOldRecordings } from './db.js';
 import { createLogger } from './logger.js';
-import { STOP_TIMEOUT_MS, AUTO_DELETE_AGE_MS } from './constants.js';
+import { STOP_TIMEOUT_MS, AUTO_DELETE_AGE_MS, CHUNK_INTERVAL_MS } from './constants.js';
 import { checkStorageQuota } from './storage-utils.js';
 
 const logger = createLogger('Background');
@@ -47,8 +47,14 @@ async function updateBadge() {
       text = 'SAVE';
     }
 
-    await chrome.action.setBadgeBackgroundColor({ color });
-    await chrome.action.setBadgeText({ text });
+    // MV2 uses browserAction, MV3 uses action
+    if (chrome.browserAction) {
+      await chrome.browserAction.setBadgeBackgroundColor({ color });
+      await chrome.browserAction.setBadgeText({ text });
+    } else {
+      await chrome.action.setBadgeBackgroundColor({ color });
+      await chrome.action.setBadgeText({ text });
+    }
   } catch (e) {
     /* no-op */
   }
@@ -155,32 +161,39 @@ async function startCDPScreencast(tabId, mode, includeMic, includeSystemAudio, o
   STATE.isAutomation = !!options.automation;
   STATE.cdpTabId = STATE.overlayTabId;
 
-  await ensureOffscreenDocument();
+  // MV2: Use offscreen if available, otherwise use background page canvas
+  if (canUseOffscreen()) {
+    await ensureOffscreenDocument();
+    const cdpPort = chrome.runtime.connect(undefined, { name: 'cdpScreencast' });
+    STATE.cdpPort = cdpPort;
 
-  const cdpPort = chrome.runtime.connect(undefined, { name: 'cdpScreencast' });
-  STATE.cdpPort = cdpPort;
+    cdpPort.onMessage.addListener((msg) => {
+      if (msg.type === 'CDP_ERROR') {
+        logger.error('CDP backend error:', msg.error);
+      }
+    });
 
-  cdpPort.onMessage.addListener((msg) => {
-    if (msg.type === 'CDP_ERROR') {
-      logger.error('CDP backend error:', msg.error);
-    }
-  });
+    cdpPort.onDisconnect.addListener(() => {
+      logger.log('CDP port disconnected');
+      STATE.cdpPort = null;
+      if (STATE.status === 'RECORDING') {
+        stopRecording();
+      }
+    });
 
-  cdpPort.onDisconnect.addListener(() => {
-    logger.log('CDP port disconnected');
-    STATE.cdpPort = null;
-    if (STATE.status === 'RECORDING') {
-      stopRecording();
-    }
-  });
-
-  cdpPort.postMessage({
-    type: 'CDP_START',
-    tabId: STATE.cdpTabId,
-    recordingId: STATE.recordingId,
-    mode: STATE.mode,
-    includeAudio: STATE.includeSystemAudio || STATE.includeMic,
-  });
+    cdpPort.postMessage({
+      type: 'CDP_START',
+      tabId: STATE.cdpTabId,
+      recordingId: STATE.recordingId,
+      mode: STATE.mode,
+      includeAudio: STATE.includeSystemAudio || STATE.includeMic,
+    });
+  } else {
+    // MV2 fallback: Start CDP recording directly in background
+    // This will be handled by the native CDP session below
+    logger.log('Starting CDP screencast without offscreen (background mode)');
+    await startCDPBackgroundCapture(STATE.cdpTabId, STATE.recordingId);
+  }
 
   let overlayInjected = false;
   if (STATE.overlayTabId) {
@@ -190,6 +203,195 @@ async function startCDPScreencast(tabId, mode, includeMic, includeSystemAudio, o
   STATE.status = 'RECORDING';
   await updateBadge();
   return { ok: true, overlayInjected, backend: 'cdpScreencast' };
+}
+
+// CDP Background Capture for MV2 (without offscreen)
+let cdpSession = null;
+let cdpCanvas = null;
+let cdpCtx = null;
+let cdpStream = null;
+let cdpRecorder = null;
+let cdpChunkIndex = 0;
+let cdpTotalSize = 0;
+let cdpRecordingStartTime = 0;
+let cdpAckPending = 0;
+let cdpTabIdForCapture = null;
+
+async function startCDPBackgroundCapture(tabId, recordingId) {
+  try {
+    cdpTabIdForCapture = tabId;
+    logger.log('Starting CDP background capture for tab:', tabId);
+
+    // Create canvas for drawing frames
+    cdpCanvas = document.createElement('canvas');
+    cdpCanvas.width = 1920;
+    cdpCanvas.height = 1080;
+    cdpCtx = cdpCanvas.getContext('2d');
+
+    // Create capture stream from canvas
+    cdpStream = cdpCanvas.captureStream(30);
+    cdpChunkIndex = 0;
+    cdpTotalSize = 0;
+
+    // Use VP8 for reliable software encoding (avoids green frames in headless/CI)
+    const mimeType = 'video/webm;codecs=vp8';
+    cdpRecorder = new MediaRecorder(cdpStream, {
+      mimeType: MediaRecorder.isTypeSupported(mimeType) ? mimeType : 'video/webm',
+    });
+
+    cdpRecorder.onstart = () => {
+      cdpRecordingStartTime = Date.now();
+      logger.log('CDP Background MediaRecorder started, mimeType:', cdpRecorder.mimeType);
+    };
+
+    cdpRecorder.ondataavailable = async (e) => {
+      if (e.data && e.data.size > 0) {
+        try {
+          cdpTotalSize += e.data.size;
+          const { saveChunk } = await import('./db.js');
+          await saveChunk(recordingId, e.data, cdpChunkIndex++);
+        } catch (err) {
+          logger.error('Failed to save CDP chunk:', err);
+        }
+      }
+    };
+
+    cdpRecorder.onerror = (e) => {
+      logger.error('CDP Background MediaRecorder error:', e);
+    };
+
+    cdpRecorder.onstop = async () => {
+      const duration = Date.now() - cdpRecordingStartTime;
+      logger.log(`CDP Background MediaRecorder stopped after ${duration}ms`);
+      try {
+        const { finishRecording: fin } = await import('./db.js');
+        await fin(recordingId, cdpRecorder.mimeType || 'video/webm', duration, cdpTotalSize);
+        await chrome.runtime.sendMessage({
+          type: 'CDP_FINISHED',
+          recordingId: recordingId,
+        });
+      } catch (e) {
+        logger.error('Failed to finish CDP background recording:', e);
+      } finally {
+        cleanupCDPBackground();
+      }
+    };
+
+    cdpRecorder.start(CHUNK_INTERVAL_MS);
+    logger.log('CDP background capture recorder started');
+
+    // Start CDP session to capture tab frames
+    try {
+      cdpSession = await chrome.debugger.attach({ tabId: tabId }, '1.3');
+      chrome.debugger.onEvent.addListener(onCDPEvent);
+      chrome.debugger.onDetach.addListener(onCDPDetach);
+      
+      // Enable Page domain
+      await chrome.debugger.sendCommand({ tabId: tabId }, 'Page.enable');
+      
+      // Start screencast
+      await chrome.debugger.sendCommand({ tabId: tabId }, 'Page.startScreencast', {
+        format: 'jpeg',
+        quality: 80,
+        maxWidth: 1920,
+        maxHeight: 1080,
+        everyNthFrame: 1,
+      });
+      logger.log('CDP screencast started');
+    } catch (e) {
+      logger.error('Failed to start CDP debugger:', e);
+      cleanupCDPBackground();
+      throw e;
+    }
+  } catch (e) {
+    logger.error('CDP background capture failed:', e);
+    cleanupCDPBackground();
+    throw e;
+  }
+}
+
+function onCDPEvent(source, method, params) {
+  if (method === 'Page.screencastFrame') {
+    paintCDPFrameFromBase64(params.data);
+    
+    // Acknowledge frame
+    chrome.debugger.sendCommand(source, 'Page.screencastFrameAck', {
+      sessionId: params.sessionId
+    }).catch(e => logger.warn('Frame ack failed:', e.message));
+  }
+}
+
+function onCDPDetach(source, reason) {
+  logger.log('CDP debugger detached:', reason);
+  if (STATE.status === 'RECORDING' && STATE.backend === 'cdpScreencast') {
+    stopRecording();
+  }
+  cleanupCDPBackground();
+}
+
+function paintCDPFrameFromBase64(data) {
+  if (!cdpCtx || !cdpCanvas) {
+    logger.warn('No canvas context to paint frame');
+    return;
+  }
+
+  try {
+    const img = new Image();
+    img.onload = () => {
+      // Resize canvas if needed
+      if (cdpCanvas.width !== img.width || cdpCanvas.height !== img.height) {
+        cdpCanvas.width = img.width;
+        cdpCanvas.height = img.height;
+      }
+      cdpCtx.drawImage(img, 0, 0);
+    };
+    img.src = 'data:image/jpeg;base64,' + data;
+  } catch (e) {
+    logger.error('Failed to paint CDP frame:', e);
+  }
+}
+
+function cleanupCDPBackground() {
+  if (cdpSession) {
+    try {
+      chrome.debugger.detach(cdpSession);
+    } catch (e) {
+      logger.log('Error detaching CDP debugger:', e);
+    }
+    cdpSession = null;
+  }
+  
+  if (cdpRecorder && cdpRecorder.state !== 'inactive') {
+    try {
+      cdpRecorder.stream?.getTracks().forEach(t => t.stop());
+    } catch (e) {
+      logger.log('Error stopping CDP recorder stream:', e);
+    }
+  }
+  
+  if (cdpStream) {
+    try {
+      cdpStream.getTracks().forEach(t => t.stop());
+    } catch (e) {
+      logger.log('Error stopping CDP stream:', e);
+    }
+  }
+  
+  cdpStream = null;
+  cdpRecorder = null;
+  cdpCanvas = null;
+  cdpCtx = null;
+  cdpTabIdForCapture = null;
+}
+
+function stopCDPBackgroundCapture() {
+  if (cdpRecorder && cdpRecorder.state !== 'inactive') {
+    logger.log('Stopping CDP Background MediaRecorder, current state:', cdpRecorder.state);
+    if (cdpRecorder.state === 'recording') {
+      cdpRecorder.requestData();
+    }
+    cdpRecorder.stop();
+  }
 }
 
 async function startTabCapture(tabId, mode, includeMic, includeSystemAudio, options = {}) {
@@ -361,10 +563,16 @@ async function stopRecording() {
   }, STOP_TIMEOUT_MS);
 
   try {
-    if (STATE.backend === 'cdpScreencast' && STATE.cdpPort) {
-      STATE.cdpPort.postMessage({ type: 'CDP_STOP' });
-      STATE.cdpPort.disconnect();
-      STATE.cdpPort = null;
+    if (STATE.backend === 'cdpScreencast') {
+      if (STATE.cdpPort) {
+        // Offscreen-based CDP
+        STATE.cdpPort.postMessage({ type: 'CDP_STOP' });
+        STATE.cdpPort.disconnect();
+        STATE.cdpPort = null;
+      } else if (cdpSession) {
+        // Background page CDP
+        stopCDPBackgroundCapture();
+      }
     } else if (STATE.strategy === 'page') {
       await chrome.runtime.sendMessage({ type: 'RECORDER_STOP' });
     } else {
@@ -410,6 +618,11 @@ async function resetRecordingState() {
       /* no-op */
     }
     STATE.cdpPort = null;
+  }
+
+  // Clean up CDP background capture if active
+  if (STATE.backend === 'cdpScreencast') {
+    cleanupCDPBackground();
   }
 
   STATE.backend = null;
@@ -623,12 +836,13 @@ chrome.runtime.onStartup.addListener(async () => {
   }
 });
 
-chrome.action.onClicked.addListener(async (tab) => {
-  logger.log('Extension icon clicked on tab:', tab.id);
+// MV2 uses browserAction.onClicked, MV3 uses action.onClicked
+const actionClickHandler = async (tab) => {
+  logger.log('Extension icon clicked on tab:', tab?.id);
 
   if (STATE.status === 'RECORDING') {
     await stopRecording();
-  } else if (STATE.status === 'IDLE') {
+  } else if (STATE.status === 'IDLE' && tab?.id) {
     STATE.backend = 'tabCapture';
     STATE.mode = 'tab';
     STATE.recordingId = crypto.randomUUID();
@@ -667,5 +881,12 @@ chrome.action.onClicked.addListener(async (tab) => {
     await updateBadge();
     logger.log('Recording started via action click');
   }
-});
+};
+
+// Set up the appropriate click handler based on MV version
+if (chrome.browserAction) {
+  chrome.browserAction.onClicked.addListener(actionClickHandler);
+} else if (chrome.action) {
+  chrome.action.onClicked.addListener(actionClickHandler);
+}
 } // конец initBackground()
