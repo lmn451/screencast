@@ -2,6 +2,7 @@
 // Helps prevent out-of-space errors during recording
 
 import { createLogger } from './logger.js';
+import { getAllRecordingIds, getChunks } from './chunkStorage.js';
 
 const logger = createLogger('StorageUtils');
 
@@ -15,6 +16,64 @@ export const MIN_FREE_SPACE_BYTES = 100 * 1024 * 1024; // 100MB
 // 4K VP9 with audio: ~20-50 MB/min
 // Conservative estimate: 20MB/min
 export const ESTIMATED_BYTES_PER_MINUTE = 20 * 1024 * 1024; // 20MB
+
+// Bitrate constants for different resolutions (in bits per second)
+const BITRATES = {
+  // 720p screen capture (lower end)
+  '720p': {
+    video: 2 * 1024 * 1024, // 2 Mbps
+    audio: 128 * 1024, // 128 kbps
+  },
+  // 1080p screen capture (typical)
+  '1080p': {
+    video: 5 * 1024 * 1024, // 5 Mbps
+    audio: 128 * 1024, // 128 kbps
+  },
+  // 1440p screen capture (higher)
+  '1440p': {
+    video: 10 * 1024 * 1024, // 10 Mbps
+    audio: 192 * 1024, // 192 kbps
+  },
+  // 4K screen capture (highest)
+  '4K': {
+    video: 20 * 1024 * 1024, // 20 Mbps
+    audio: 256 * 1024, // 256 kbps
+  },
+};
+
+/**
+ * Estimate the size of a recording based on duration and settings
+ * @param {number} durationMs - Recording duration in milliseconds
+ * @param {boolean} hasAudio - Whether audio is included
+ * @param {string} [resolution='1080p'] - Resolution tier: '720p', '1080p', '1440p', '4K'
+ * @returns {number} Estimated size in bytes
+ */
+export function estimateRecordingSize(durationMs, hasAudio, resolution = '1080p') {
+  const durationMinutes = durationMs / (1000 * 60);
+  const bitrate = BITRATES[resolution] || BITRATES['1080p'];
+
+  let totalBitsPerSecond = bitrate.video;
+  if (hasAudio) {
+    totalBitsPerSecond += bitrate.audio;
+  }
+
+  const estimatedBytes = (totalBitsPerSecond / 8) * durationMinutes * 60;
+  return Math.round(estimatedBytes);
+}
+
+/**
+ * Estimate recording size using simplified MB/min values
+ * @param {number} durationMs - Recording duration in milliseconds
+ * @param {boolean} hasAudio - Whether audio is included
+ * @returns {number} Estimated size in bytes
+ */
+export function estimateRecordingSizeSimple(durationMs, hasAudio) {
+  const durationMinutes = durationMs / (1000 * 60);
+  // Conservative: ~5 MB/min video + ~1 MB/min audio
+  const videoMB = durationMinutes * 5;
+  const audioMB = hasAudio ? durationMinutes * 1 : 0;
+  return Math.round((videoMB + audioMB) * 1024 * 1024);
+}
 
 /**
  * Check if sufficient storage quota is available
@@ -58,6 +117,116 @@ export async function checkStorageQuota() {
     logger.error('Failed to check storage quota:', e);
     // On error, assume sufficient space to avoid blocking legitimate recordings
     return { ok: true, error: 'Could not check storage quota: ' + e.message };
+  }
+}
+
+/**
+ * Check quota during recording to detect low space warnings
+ * @param {number} [minFreeBytes=50*1024*1024] - Minimum free bytes warning threshold
+ * @returns {Promise<{ok: boolean, warning?: boolean, available?: number, message?: string}>}
+ */
+export async function checkQuotaDuringRecording(minFreeBytes = 50 * 1024 * 1024) {
+  try {
+    if (!navigator.storage || !navigator.storage.estimate) {
+      return { ok: true };
+    }
+
+    const estimate = await navigator.storage.estimate();
+    const available = (estimate.quota || 0) - (estimate.usage || 0);
+
+    if (available < minFreeBytes) {
+      const availableMB = (available / 1024 / 1024).toFixed(1);
+      logger.warn(`Low storage space during recording: ${availableMB} MB available`);
+      return {
+        ok: true,
+        warning: true,
+        available,
+        message: `Storage space running low: ${availableMB} MB remaining`,
+      };
+    }
+
+    return { ok: true, warning: false, available };
+  } catch (e) {
+    logger.warn('Failed to check quota during recording:', e);
+    return { ok: true };
+  }
+}
+
+/**
+ * Check if existing partial recordings can be recovered
+ * @returns {Promise<{recoverable: Array, canProceed: boolean}>}
+ */
+export async function checkExistingPartialRecordings() {
+  try {
+    // Import dynamically to avoid circular dependency issues
+    const { getAllRecordings } = await import('./recordings.js');
+    const recordings = await getAllRecordings();
+
+    const partialRecordings = recordings.filter((r) => r.status === 'partial');
+    const failedRecordings = recordings.filter((r) => r.status === 'failed');
+
+    logger.log('Existing partial/failed recordings:', {
+      partial: partialRecordings.length,
+      failed: failedRecordings.length,
+    });
+
+    return {
+      recoverable: partialRecordings,
+      canProceed: true, // We can proceed even with partial recordings
+    };
+  } catch (e) {
+    logger.warn('Failed to check existing partial recordings:', e);
+    return { recoverable: [], canProceed: true };
+  }
+}
+
+/**
+ * Get a breakdown of storage usage by category
+ * @returns {Promise<{recordings: number, chunks: number, diagnostics: number, total: number}>}
+ */
+export async function getStorageUsageBreakdown() {
+  const breakdown = {
+    recordings: 0,
+    chunks: 0,
+    total: 0,
+  };
+
+  try {
+    // Get recordings store size estimate
+    const { getAllRecordings } = await import('./recordings.js');
+    const recordings = await getAllRecordings();
+
+    let recordingsSize = 0;
+    for (const recording of recordings) {
+      recordingsSize += recording.size || 0;
+      // Estimate metadata overhead (~500 bytes per recording)
+      recordingsSize += 500;
+    }
+    breakdown.recordings = recordingsSize;
+
+    // Get chunks store size estimate
+    const recordingIds = await getAllRecordingIds();
+    let chunksSize = 0;
+    for (const id of recordingIds) {
+      const chunks = await getChunks(id);
+      for (const chunk of chunks) {
+        chunksSize += chunk.chunk?.size || 0;
+      }
+    }
+    breakdown.chunks = chunksSize;
+
+    breakdown.total = breakdown.recordings + breakdown.chunks;
+
+    logger.log('Storage usage breakdown:', {
+      recordings: `${(breakdown.recordings / 1024 / 1024).toFixed(1)} MB`,
+      chunks: `${(breakdown.chunks / 1024 / 1024).toFixed(1)} MB`,
+      total: `${(breakdown.total / 1024 / 1024).toFixed(1)} MB`,
+    });
+
+    return breakdown;
+  } catch (e) {
+    logger.error('Failed to get storage usage breakdown:', e);
+    return breakdown;
   }
 }
 

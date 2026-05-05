@@ -2,6 +2,19 @@ import { cleanupOldRecordings } from './db.js';
 import { createLogger } from './logger.js';
 import { STOP_TIMEOUT_MS, AUTO_DELETE_AGE_MS } from './constants.js';
 import { checkStorageQuota } from './storage-utils.js';
+import { hasChunks, markRecordingRecoverable } from './chunkStorage.js';
+import {
+  schemas,
+  validateMessageStrict,
+  validateStateTransition,
+  STATE_IDLE,
+  STATE_STARTING,
+  STATE_RECORDING,
+  STATE_STOPPING,
+  STATE_SAVING,
+  STATE_SAVED,
+  STATE_FAILED,
+} from './src/messages.js';
 
 // CaptureCast background service worker (MV3)
 // Manages offscreen document, recording state, overlay injection, and preview handoff
@@ -17,16 +30,103 @@ globalThis.addEventListener('error', (event) => {
 });
 
 const STATE = {
-  status: 'IDLE', // 'IDLE' | 'RECORDING' | 'SAVING'
-  mode: null, // 'tab' | 'screen' | 'window'
+  status: STATE_IDLE,
   recordingId: null,
+  correlationId: null,
   overlayTabId: null,
-  includeMic: false,
-  includeSystemAudio: false,
   recorderTabId: null,
   strategy: null, // 'offscreen' | 'page'
   stopTimeoutId: null,
+  // Timestamp-based tracking for heartbeat reconciliation (no periodic pings)
+  startedAt: null,
+  lastActivityAt: null,
+  // Recording options
+  options: {
+    mode: null, // 'tab' | 'screen' | 'window'
+    includeMic: false,
+    includeSystemAudio: false,
+  },
 };
+
+// Session snapshot for crash recovery
+const SESSION_SNAPSHOT_KEY = 'sessionSnapshot';
+
+/**
+ * Persist session snapshot to chrome.storage.local for crash recovery
+ * @param {object} [extra] - Extra fields to include in snapshot
+ */
+async function persistSessionSnapshot(extra = {}) {
+  try {
+    const snapshot = {
+      recordingId: STATE.recordingId,
+      status: STATE.status,
+      startedAt: STATE.startedAt,
+      lastActivityAt: STATE.lastActivityAt,
+      options: { ...STATE.options },
+      strategy: STATE.strategy,
+      correlationId: STATE.correlationId,
+      ...extra,
+    };
+    await chrome.storage.local.set({ [SESSION_SNAPSHOT_KEY]: snapshot });
+    logger.log('Session snapshot persisted', { status: STATE.status });
+  } catch (e) {
+    logger.warn('Failed to persist session snapshot:', e);
+  }
+}
+
+/**
+ * Clear session snapshot from chrome.storage.local
+ */
+async function clearSessionSnapshot() {
+  try {
+    await chrome.storage.local.remove(SESSION_SNAPSHOT_KEY);
+    logger.log('Session snapshot cleared');
+  } catch (e) {
+    logger.warn('Failed to clear session snapshot:', e);
+  }
+}
+
+/**
+ * On startup, check for unfinished sessions and clean up stale ones.
+ * Uses timestamp-based reconciliation — no periodic heartbeat pings.
+ */
+async function reconcileUnfinishedSessions() {
+  try {
+    const result = await chrome.storage.local.get(SESSION_SNAPSHOT_KEY);
+    const snapshot = result[SESSION_SNAPSHOT_KEY];
+    if (!snapshot) return;
+
+    logger.log('Found session snapshot, checking age…', { snapshot });
+    const age = Date.now() - snapshot.lastActivityAt;
+
+    if (age > STOP_TIMEOUT_MS) {
+      // Stale session — clean up
+      logger.warn('Found stale recording session, cleaning up', {
+        age,
+        snapshot,
+      });
+      await clearSessionSnapshot();
+
+      // Check for partial recordings
+      if (snapshot.recordingId) {
+        const hasChunksResult = await hasChunks(snapshot.recordingId);
+        if (hasChunksResult) {
+          await markRecordingRecoverable(snapshot.recordingId);
+          logger.log('Marked recording as recoverable', {
+            recordingId: snapshot.recordingId,
+          });
+        }
+      }
+    } else {
+      logger.log('Found active session, will allow reconciliation', {
+        age,
+        status: snapshot.status,
+      });
+    }
+  } catch (e) {
+    logger.error('Session reconciliation failed:', e);
+  }
+}
 
 // Helper to update badge based on status
 async function updateBadge() {
@@ -34,10 +134,10 @@ async function updateBadge() {
     let color = '#00000000';
     let text = '';
 
-    if (STATE.status === 'RECORDING') {
+    if (STATE.status === STATE_RECORDING) {
       color = '#d93025';
       text = 'REC';
-    } else if (STATE.status === 'SAVING') {
+    } else if (STATE.status === STATE_SAVING) {
       color = '#f9ab00';
       text = 'SAVE';
     }
@@ -45,7 +145,7 @@ async function updateBadge() {
     await chrome.action.setBadgeBackgroundColor({ color });
     await chrome.action.setBadgeText({ text });
   } catch (e) {
-    /* no-op */
+    logger.warn('Badge update failed (non-critical):', e);
   }
 }
 
@@ -74,7 +174,7 @@ async function closeOffscreenDocumentIfIdle() {
   try {
     if (!canUseOffscreen()) return;
     const existing = await chrome.offscreen.hasDocument?.();
-    if (existing && STATE.status === 'IDLE') {
+    if (existing && STATE.status === STATE_IDLE) {
       logger.log('Closing idle offscreen document to free resources');
       await chrome.offscreen.closeDocument?.();
     }
@@ -106,7 +206,7 @@ async function removeOverlay(tabId) {
       },
     });
   } catch (e) {
-    /* no-op */
+    logger.warn('Overlay removal failed (non-critical):', e);
   }
 }
 
@@ -122,17 +222,40 @@ async function focusTab(tabId) {
       try {
         await chrome.windows.update(tab.windowId, { focused: true });
       } catch (e) {
-        /* no-op */
+        logger.warn('Window focus failed (non-critical):', e);
       }
     }
     await chrome.tabs.update(tabId, { active: true });
   } catch (e) {
-    /* no-op */
+    logger.warn('Tab focus failed (non-critical):', e);
   }
 }
 
 async function startRecording(mode, includeMic, includeSystemAudio) {
-  if (STATE.status !== 'IDLE') return { ok: false, error: 'Already recording or saving' };
+  const transition = validateStateTransition(STATE.status, STATE_STARTING);
+  if (!transition.valid) {
+    logger.warn('Invalid state transition:', transition.error);
+    return { ok: false, error: transition.error };
+  }
+  if (STATE.status !== STATE_IDLE) return { ok: false, error: 'Already recording or saving' };
+
+  // Task 4.3: Concurrent recording lock
+  try {
+    const result = await chrome.storage.local.get(SESSION_SNAPSHOT_KEY);
+    const snapshot = result[SESSION_SNAPSHOT_KEY];
+    if (snapshot) {
+      const activeStatuses = [STATE_STARTING, STATE_RECORDING, STATE_STOPPING, STATE_SAVING];
+      if (activeStatuses.includes(snapshot.status)) {
+        const age = Date.now() - snapshot.lastActivityAt;
+        if (age < 30000) {
+          logger.warn('Recording already in progress, rejecting new start', { snapshot, age });
+          return { ok: false, error: 'Recording already in progress' };
+        }
+      }
+    }
+  } catch (e) {
+    logger.warn('Failed to check for concurrent recording:', e);
+  }
 
   // Check storage quota before starting
   const storageCheck = await checkStorageQuota();
@@ -141,11 +264,22 @@ async function startRecording(mode, includeMic, includeSystemAudio) {
     return { ok: false, error: storageCheck.error };
   }
 
-  STATE.mode = mode;
+  // Initialize timestamps
+  const now = Date.now();
+  STATE.startedAt = now;
+  STATE.lastActivityAt = now;
+  STATE.options = {
+    mode,
+    includeMic: !!includeMic,
+    includeSystemAudio: !!includeSystemAudio,
+  };
+  STATE.status = STATE_STARTING;
   STATE.recordingId = crypto.randomUUID();
+  STATE.correlationId = crypto.randomUUID();
   STATE.overlayTabId = await getActiveTabId();
-  STATE.includeMic = !!includeMic;
-  STATE.includeSystemAudio = !!includeSystemAudio;
+
+  // Task 4.2: Persist session snapshot
+  await persistSessionSnapshot();
 
   const useOffscreen = !STATE.includeMic && canUseOffscreen();
 
@@ -154,7 +288,7 @@ async function startRecording(mode, includeMic, includeSystemAudio) {
     await chrome.runtime.sendMessage({
       type: 'OFFSCREEN_START',
       mode,
-      includeAudio: STATE.includeSystemAudio,
+      includeAudio: STATE.options.includeSystemAudio,
       recordingId: STATE.recordingId,
       targetTabId: STATE.overlayTabId,
     });
@@ -164,7 +298,7 @@ async function startRecording(mode, includeMic, includeSystemAudio) {
     const url = chrome.runtime.getURL(
       `recorder.html?id=${encodeURIComponent(STATE.recordingId)}&mode=${encodeURIComponent(
         mode
-      )}&mic=${STATE.includeMic ? 1 : 0}&sys=${STATE.includeSystemAudio ? 1 : 0}`
+      )}&mic=${STATE.options.includeMic ? 1 : 0}&sys=${STATE.options.includeSystemAudio ? 1 : 0}`
     );
     const tab = await chrome.tabs.create({ url, active: true });
     STATE.recorderTabId = tab.id ?? null;
@@ -177,40 +311,67 @@ async function startRecording(mode, includeMic, includeSystemAudio) {
     overlayInjected = await injectOverlay(STATE.overlayTabId);
   }
 
-  STATE.status = 'RECORDING';
-  await updateBadge();
+  // Task 4.2: Wait for confirmation from recorder/offscreen before transitioning to RECORDING
+  // Best-effort: if no confirmation within 5 seconds, fall back to RECORDING
+  const confirmationTimeout = setTimeout(() => {
+    if (STATE.status === STATE_STARTING) {
+      logger.warn('No confirmation received within 5 seconds, falling back to RECORDING', {
+        correlationId: STATE.correlationId,
+      });
+      STATE.status = STATE_RECORDING;
+      STATE.lastActivityAt = Date.now();
+      persistSessionSnapshot();
+      updateBadge();
+    }
+  }, 5000);
+
+  // Store timeout ID for cleanup
+  STATE.stopTimeoutId = confirmationTimeout;
+
+  logger.log('Recording starting', {
+    recordingId: STATE.recordingId,
+    correlationId: STATE.correlationId,
+    strategy: STATE.strategy,
+  });
   return { ok: true, overlayInjected };
 }
 
 async function stopRecording() {
-  if (STATE.status !== 'RECORDING') return { ok: false, error: 'Not recording' };
+  const transition = validateStateTransition(STATE.status, STATE_STOPPING);
+  if (!transition.valid) {
+    logger.warn('Invalid state transition:', transition.error);
+    return { ok: false, error: transition.error };
+  }
+  if (STATE.status !== STATE_RECORDING) return { ok: false, error: 'Not recording' };
 
-  // Transition to SAVING state immediately
-  STATE.status = 'SAVING';
+  // Task 4.4: Transition to STOPPING and update session snapshot
+  STATE.status = STATE_STOPPING;
+  STATE.lastActivityAt = Date.now();
+  await persistSessionSnapshot();
   await updateBadge();
+  logger.log('Stopping recording', { correlationId: STATE.correlationId });
 
   // Best-effort immediate overlay removal to avoid it lingering
   try {
     if (STATE.overlayTabId) {
-      // Ask the overlay to remove itself (works if the script is still alive)
       try {
-        await chrome.tabs.sendMessage(STATE.overlayTabId, {
-          type: 'OVERLAY_REMOVE',
-        });
-      } catch (e) {
-        /* no-op */
+        await chrome.tabs.sendMessage(STATE.overlayTabId, { type: 'OVERLAY_REMOVE' });
+      } catch (sendErr) {
+        logger.warn('Overlay sendMessage failed (non-critical):', sendErr);
       }
-      // Also attempt DOM removal via scripting (in case listener isn't present)
       await removeOverlay(STATE.overlayTabId);
     }
   } catch (e) {
-    /* no-op */
+    logger.warn('Overlay removal in stopRecording failed:', e);
   }
 
   // Set a safety timeout (very long) just in case the offscreen/recorder crashes completely
   if (STATE.stopTimeoutId) clearTimeout(STATE.stopTimeoutId);
   STATE.stopTimeoutId = setTimeout(async () => {
-    logger.error(`Save timeout reached (${STOP_TIMEOUT_MS / 1000}s) - forcing reset`);
+    logger.error(`Save timeout reached (${STOP_TIMEOUT_MS / 1000}s) - forcing reset`, {
+      correlationId: STATE.correlationId,
+    });
+    await clearSessionSnapshot();
     await resetRecordingState();
   }, STOP_TIMEOUT_MS);
 
@@ -223,9 +384,6 @@ async function stopRecording() {
     }
   } catch (e) {
     logger.error('Failed to send stop message:', e);
-    // If we can't send stop message, we might be stuck.
-    // But we stay in SAVING state until the timeout or user manual intervention (if we added that).
-    // For now, let the timeout handle the worst case.
     return { ok: false, error: 'Failed to send stop signal: ' + e.message };
   }
   return { ok: true };
@@ -237,7 +395,10 @@ async function resetRecordingState() {
     STATE.stopTimeoutId = null;
   }
 
-  STATE.status = 'IDLE';
+  STATE.status = STATE_IDLE;
+  STATE.lastActivityAt = Date.now();
+  logger.log('State reset', { correlationId: STATE.correlationId });
+  STATE.correlationId = null;
   await updateBadge();
 
   try {
@@ -245,17 +406,23 @@ async function resetRecordingState() {
       await removeOverlay(STATE.overlayTabId);
     }
   } catch (e) {
-    /* no-op */
+    logger.warn('Overlay removal in reset failed:', e);
   }
   try {
     if (STATE.recorderTabId) {
       await chrome.tabs.remove(STATE.recorderTabId);
     }
   } catch (e) {
-    /* no-op */
+    logger.warn('Recorder tab removal in reset failed:', e);
   }
 
-  STATE.mode = null;
+  STATE.startedAt = null;
+  STATE.lastActivityAt = null;
+  STATE.options = {
+    mode: null,
+    includeMic: false,
+    includeSystemAudio: false,
+  };
   STATE.overlayTabId = null;
   STATE.includeMic = false;
   STATE.includeSystemAudio = false;
@@ -264,12 +431,72 @@ async function resetRecordingState() {
   STATE.recordingId = null;
 }
 
+// Rate limiting state: Map<senderId, {count, windowStart}>
+const rateLimitMap = new Map();
+const RATE_LIMIT_WINDOW_MS = 1000;
+const RATE_LIMIT_MAX = 50;
+
+/**
+ * Simple sliding window rate limiter for message throttling
+ * @param {string} senderId - Sender identifier
+ * @returns {boolean} - True if under limit, false if throttled
+ */
+function checkRateLimit(senderId) {
+  const now = Date.now();
+  const entry = rateLimitMap.get(senderId);
+
+  if (!entry || now - entry.windowStart > RATE_LIMIT_WINDOW_MS) {
+    // Start new window
+    rateLimitMap.set(senderId, { count: 1, windowStart: now });
+    return true;
+  }
+
+  entry.count++;
+  if (entry.count > RATE_LIMIT_MAX) {
+    logger.warn('Rate limit exceeded for sender:', senderId, { count: entry.count });
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Validate UUID format for security
+ * @param {string} str - String to validate
+ * @returns {boolean} - True if valid UUID
+ */
+function isValidUUID(str) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str);
+}
+
 // Handle messages from popup, overlay, offscreen, and preview
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // Validate message sender for security
   if (sender.id !== chrome.runtime.id) {
     logger.warn('Ignoring message from unauthorized sender:', sender.id);
     sendResponse({ ok: false, error: 'Unauthorized sender' });
+    return;
+  }
+
+  // Phase 6: Strict validation enabled
+  const schema = schemas[message?.type];
+  if (schema) {
+    const { valid, errors } = validateMessageStrict(message, schema);
+    if (!valid) {
+      logger.warn('Message validation failed:', errors, message.type);
+      sendResponse({ ok: false, error: `Validation failed: ${errors.join(', ')}` });
+      return;
+    }
+  } else {
+    // Unknown message types are rejected (logged and rejected)
+    logger.warn('Unknown message type rejected:', message.type);
+    sendResponse({ ok: false, error: 'Unknown message type' });
+    return;
+  }
+
+  // Rate limiting check
+  const senderId = sender.id || 'unknown';
+  if (!checkRateLimit(senderId)) {
+    sendResponse({ ok: false, error: 'Rate limited' });
     return;
   }
 
@@ -287,19 +514,42 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           break;
         }
         case 'OFFSCREEN_STARTED': {
-          // Acknowledge start to avoid async-channel warnings
+          // Task 4.2: Transition to RECORDING only after confirmation
+          if (STATE.status === STATE_STARTING) {
+            STATE.status = STATE_RECORDING;
+            STATE.lastActivityAt = Date.now();
+            await persistSessionSnapshot();
+            await updateBadge();
+            logger.log('Recording confirmed (offscreen)', {
+              recordingId: STATE.recordingId,
+              correlationId: STATE.correlationId,
+            });
+          }
           sendResponse({ ok: true });
           break;
         }
         case 'OFFSCREEN_DATA': {
-          // Receive notification that data is saved in DB
           const { recordingId } = message;
-          logger.log('Received OFFSCREEN_DATA:', { recordingId });
 
-          // Reset state
-          await resetRecordingState();
+          // Task 6.6: Validate recording ID
+          if (!isValidUUID(recordingId)) {
+            logger.warn('Invalid recording ID in OFFSCREEN_DATA:', recordingId);
+            sendResponse({ ok: false, error: 'Invalid recording ID' });
+            break;
+          }
 
-          // Open preview page and pass the id in URL
+          logger.log('Received OFFSCREEN_DATA:', {
+            recordingId,
+            correlationId: STATE.correlationId,
+          });
+
+          // Task 4.6: Transition to SAVED, clear snapshot, open preview
+          STATE.status = STATE_SAVED;
+          STATE.lastActivityAt = Date.now();
+          await persistSessionSnapshot();
+          await clearSessionSnapshot();
+          await updateBadge();
+
           const url = chrome.runtime.getURL(`preview.html?id=${encodeURIComponent(recordingId)}`);
           await chrome.tabs.create({ url });
           await closeOffscreenDocumentIfIdle();
@@ -307,11 +557,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           break;
         }
         case 'RECORDER_DATA': {
-          // Receive notification that data is saved in DB
           const { recordingId } = message;
-          logger.log('Received RECORDER_DATA:', { recordingId });
 
-          await resetRecordingState();
+          // Task 6.6: Validate recording ID
+          if (!isValidUUID(recordingId)) {
+            logger.warn('Invalid recording ID in RECORDER_DATA:', recordingId);
+            sendResponse({ ok: false, error: 'Invalid recording ID' });
+            break;
+          }
+
+          logger.log('Received RECORDER_DATA:', {
+            recordingId,
+            correlationId: STATE.correlationId,
+          });
+
+          // Task 4.6: Transition to SAVED, clear snapshot, open preview
+          STATE.status = STATE_SAVED;
+          STATE.lastActivityAt = Date.now();
+          await persistSessionSnapshot();
+          await clearSessionSnapshot();
+          await updateBadge();
 
           const url = chrome.runtime.getURL(`preview.html?id=${encodeURIComponent(recordingId)}`);
           await chrome.tabs.create({ url });
@@ -319,6 +584,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           break;
         }
         case 'RECORDER_STARTED': {
+          // Task 4.2: Transition to RECORDING only after confirmation
+          if (STATE.status === STATE_STARTING) {
+            STATE.status = STATE_RECORDING;
+            STATE.lastActivityAt = Date.now();
+            await persistSessionSnapshot();
+            await updateBadge();
+            logger.log('Recording confirmed (recorder page)', {
+              recordingId: STATE.recordingId,
+              correlationId: STATE.correlationId,
+            });
+          }
           if (STATE.overlayTabId) {
             await focusTab(STATE.overlayTabId);
           }
@@ -326,21 +602,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           break;
         }
         case 'PREVIEW_READY': {
-          // No-op or simple ack, as preview now loads from DB directly
           sendResponse({ ok: true });
           break;
         }
         case 'OFFSCREEN_ERROR': {
-          logger.error('Received OFFSCREEN_ERROR:', message.error);
-          await resetRecordingState();
+          // Task 4.7: Transition to FAILED, log, clear snapshot
+          logger.error('Received OFFSCREEN_ERROR:', message.error, {
+            correlationId: STATE.correlationId,
+          });
+          STATE.status = STATE_FAILED;
+          STATE.lastActivityAt = Date.now();
+          await persistSessionSnapshot();
+          await clearSessionSnapshot();
+          await updateBadge();
           sendResponse({ ok: false, error: message.error });
           break;
         }
         case 'GET_STATE': {
-          // Map internal status to boolean for backward compatibility with popup
+          // Task 4.10: Return full state including timestamps and options
           const publicState = {
-            ...STATE,
-            recording: STATE.status === 'RECORDING' || STATE.status === 'SAVING',
+            status: STATE.status,
+            recordingId: STATE.recordingId,
+            correlationId: STATE.correlationId,
+            startedAt: STATE.startedAt,
+            lastActivityAt: STATE.lastActivityAt,
+            options: { ...STATE.options },
+            strategy: STATE.strategy,
+            recording: STATE.status === STATE_RECORDING || STATE.status === STATE_SAVING,
           };
           sendResponse(publicState);
           break;
@@ -351,17 +639,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           break;
         }
         default: {
-          // Unknown message
-          logger.log('Unknown message type:', message.type);
+          logger.warn('Unknown message type:', message.type);
           sendResponse({ ok: false, error: 'Unknown message' });
         }
       }
     } catch (e) {
-      logger.error('Error handling message', message.type, e);
+      logger.error('Error handling message', message.type, e, {
+        correlationId: STATE.correlationId,
+      });
       try {
         sendResponse({ ok: false, error: String(e) });
-      } catch (e2) {
-        /* no-op */
+      } catch (sendErr) {
+        logger.warn('Failed to send error response:', sendErr);
       }
     }
   })();
@@ -371,7 +660,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 // Clean badge on install/update and run cleanup
 chrome.runtime.onInstalled.addListener(async () => {
   await updateBadge();
-  // Cleanup recordings older than configured age
   try {
     await cleanupOldRecordings(AUTO_DELETE_AGE_MS);
   } catch (e) {
@@ -379,11 +667,12 @@ chrome.runtime.onInstalled.addListener(async () => {
   }
 });
 
-// Also run cleanup on startup
+// Task 4.5: Also run reconciliation on startup
 chrome.runtime.onStartup.addListener(async () => {
   try {
+    await reconcileUnfinishedSessions();
     await cleanupOldRecordings(AUTO_DELETE_AGE_MS);
   } catch (e) {
-    logger.error('Cleanup failed:', e);
+    logger.error('Startup handler failed:', e);
   }
 });

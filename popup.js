@@ -1,4 +1,4 @@
-import { createLogger } from './logger.js';
+import { createLogger } from './src/logger.js';
 
 const logger = createLogger('Popup');
 
@@ -20,32 +20,23 @@ function setUi(recording) {
 }
 
 async function start(mode) {
-  const mic = document.getElementById('mic-toggle')?.checked ?? false;
-  const systemAudio = document.getElementById('sys-toggle')?.checked ?? false;
-  const res = await chrome.runtime.sendMessage({
-    type: 'START',
-    mode,
-    mic,
-    systemAudio,
-  });
-  if (!res?.ok) {
-    alert(res?.error || 'Failed to start recording');
-  } else {
-    setUi(true);
-    window.close();
-  }
+  // Redirect to consent page with params
+  const params = new URLSearchParams({ mode, mic: 'false', sys: 'false' });
+  window.location.href = `consent.html?${params.toString()}`;
 }
 
 async function stop() {
   const res = await chrome.runtime.sendMessage({ type: 'STOP' });
-  if (!res?.ok) alert(res?.error || 'Failed to stop recording');
-  else window.close();
+  if (!res?.ok) {
+    logger.error('Failed to stop recording:', res?.error);
+  }
+  window.close();
 }
 
 (async () => {
   const state = await getState();
   setUi(state.recording);
-  document.getElementById('btn-tab').addEventListener('click', () => start('tab'));
+  document.getElementById('btn-record').addEventListener('click', () => start('tab'));
   document.getElementById('btn-stop').addEventListener('click', stop);
   document.getElementById('btn-view-recordings').addEventListener('click', () => {
     chrome.tabs.create({ url: 'recordings.html' });

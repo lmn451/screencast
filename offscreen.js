@@ -1,11 +1,13 @@
-import { finishRecording } from './db.js';
+import { finishRecording, RECORDING_STATUS } from './recording.js';
 import { createLogger } from './logger.js';
 import {
   createMediaRecorder,
   applyContentHints,
   setupAutoStop,
   CHUNK_INTERVAL_MS,
+  getFailedChunkCount,
 } from './media-recorder-utils.js';
+import { createError, CODES } from './error-codes.js';
 
 // Offscreen document script to handle getDisplayMedia + MediaRecorder
 
@@ -47,6 +49,24 @@ logger.log('Document loaded and script executing');
 let mediaStream = null;
 let mediaRecorder = null;
 let currentId = null;
+
+/**
+ * Attempt to save partial recording data before unload
+ */
+function attemptPartialSave() {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    logger.log('Attempting partial save before unload');
+    if (mediaRecorder.state === 'recording') {
+      mediaRecorder.requestData();
+    }
+    mediaRecorder.stop().catch((err) => {
+      logger.warn('Partial save failed:', err);
+    });
+  }
+}
+
+// Save partial data on unexpected document close
+globalThis.addEventListener('beforeunload', attemptPartialSave);
 
 function getConstraintsFromMode(mode, includeAudio) {
   // For now, mode is informative only; actual selection (tab/window/screen)
@@ -96,10 +116,19 @@ async function startCapture(mode, recordingId, includeAudio) {
     onStart: () => {
       logger.log('Recording started');
     },
-    onStop: async (mimeType, duration, totalSize) => {
+    onStop: async (mimeType, duration, totalSize, extra) => {
+      const failedChunks = extra?.failedChunks || getFailedChunkCount();
+      let status = RECORDING_STATUS.SAVED;
+
       try {
+        // Determine recording status based on chunk save results
+        if (failedChunks > 0) {
+          status = failedChunks > 5 ? RECORDING_STATUS.FAILED : RECORDING_STATUS.PARTIAL;
+          logger.warn(`Recording finished with ${failedChunks} failed chunks, status: ${status}`);
+        }
+
         // Finish recording in DB
-        await finishRecording(currentId, mimeType, duration, totalSize);
+        await finishRecording(currentId, mimeType, duration, totalSize, status);
         logger.log('Finished recording in DB');
 
         // Send data to background script
@@ -115,9 +144,16 @@ async function startCapture(mode, recordingId, includeAudio) {
         }
       } catch (dbError) {
         logger.error('Failed to finish recording in DB:', dbError);
+        const structuredError = createError(CODES.RECORDING_SAVE_FAILED, dbError.message, {
+          recordingId: currentId,
+          mimeType,
+          duration,
+          totalSize,
+        });
         chrome.runtime.sendMessage({
           type: 'OFFSCREEN_ERROR',
-          error: 'Failed to save recording: ' + dbError.message,
+          error: structuredError,
+          code: 'RECORDING_SAVE_FAILED',
         });
         throw dbError;
       } finally {

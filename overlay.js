@@ -1,5 +1,5 @@
 // Injected overlay with a Stop button. Minimal footprint, avoids interfering with page.
-// Note: Cannot import modules in content script, so inline logging is minimal
+// Task 4.9: State-aware overlay — shows different states based on background status
 
 // Constants (duplicated from constants.js since content scripts can't import modules easily)
 const ERROR_DISPLAY_DURATION_MS = 2000;
@@ -28,24 +28,56 @@ const ERROR_DISPLAY_DURATION_MS = 2000;
     boxShadow: '0 2px 6px rgba(0,0,0,0.25)',
     cursor: 'pointer',
   });
+
+  /**
+   * Update button state based on recording state
+   * @param {string} status - Current status from GET_STATE
+   */
+  function updateButtonState(status) {
+    if (status === 'STOPPING' || status === 'SAVING') {
+      btn.disabled = true;
+      btn.textContent = 'Saving…';
+      btn.style.opacity = '0.7';
+      btn.style.cursor = 'wait';
+    } else if (status === 'STARTING') {
+      btn.disabled = true;
+      btn.textContent = 'Starting…';
+      btn.style.opacity = '0.7';
+      btn.style.cursor = 'wait';
+    } else {
+      btn.disabled = false;
+      btn.textContent = 'Stop';
+      btn.style.opacity = '1';
+      btn.style.cursor = 'pointer';
+    }
+  }
+
+  // Query initial state from background
+  chrome.runtime
+    .sendMessage({ type: 'GET_STATE' })
+    .then((state) => {
+      if (state && state.status) {
+        updateButtonState(state.status);
+      }
+    })
+    .catch(() => {
+      // Ignore errors, overlay will use default Stop button
+    });
+
   btn.addEventListener('click', async () => {
     // Prevent multiple clicks and provide visual feedback
     btn.disabled = true;
-    btn.textContent = 'Saving...';
+    btn.textContent = 'Saving…';
     btn.style.opacity = '0.7';
     btn.style.cursor = 'wait';
 
     try {
       const response = await chrome.runtime.sendMessage({ type: 'STOP' });
       if (!response || !response.ok) {
-        // Only log errors in overlay
         console.error('[CaptureCast Overlay] Stop failed:', response?.error);
         btn.textContent = 'Error!';
         setTimeout(() => {
-          btn.disabled = false;
-          btn.textContent = 'Stop';
-          btn.style.cursor = 'pointer';
-          btn.style.opacity = '1';
+          updateButtonState('RECORDING');
         }, ERROR_DISPLAY_DURATION_MS);
       }
       // On success, overlay will be removed anyway
@@ -53,10 +85,7 @@ const ERROR_DISPLAY_DURATION_MS = 2000;
       console.error('[CaptureCast Overlay] Failed to send stop message:', e);
       btn.textContent = 'Error!';
       setTimeout(() => {
-        btn.disabled = false;
-        btn.textContent = 'Stop';
-        btn.style.cursor = 'pointer';
-        btn.style.opacity = '1';
+        updateButtonState('RECORDING');
       }, ERROR_DISPLAY_DURATION_MS);
     }
   });
@@ -68,12 +97,16 @@ const ERROR_DISPLAY_DURATION_MS = 2000;
         try {
           root.remove();
         } catch (e) {
-          /* no-op */
+          console.warn('[CaptureCast Overlay] Failed to remove overlay root', e);
         }
+      }
+      // Handle state updates from background
+      if (msg && msg.type === 'STATE_UPDATE') {
+        updateButtonState(msg.status);
       }
     });
   } catch (e) {
-    /* no-op */
+    console.warn('[CaptureCast Overlay] Failed to set up message listener', e);
   }
 
   root.appendChild(btn);

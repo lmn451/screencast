@@ -1,4 +1,4 @@
-import { finishRecording } from './db.js';
+import { finishRecording, RECORDING_STATUS } from './recording.js';
 import { createLogger } from './logger.js';
 import {
   createMediaRecorder,
@@ -6,7 +6,9 @@ import {
   combineStreams,
   setupAutoStop,
   CHUNK_INTERVAL_MS,
+  getFailedChunkCount,
 } from './media-recorder-utils.js';
+import { createError, CODES } from './error-codes.js';
 
 const logger = createLogger('Recorder');
 
@@ -32,6 +34,24 @@ let mediaStream = null;
 let mediaRecorder = null;
 let recordingId = null;
 
+/**
+ * Attempt to save partial recording data before unload
+ */
+function attemptPartialSave() {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    logger.log('Attempting partial save before unload');
+    if (mediaRecorder.state === 'recording') {
+      mediaRecorder.requestData();
+    }
+    mediaRecorder.stop().catch((err) => {
+      logger.warn('Partial save failed:', err);
+    });
+  }
+}
+
+// Save partial data on unexpected document close
+globalThis.addEventListener('beforeunload', attemptPartialSave);
+
 async function start() {
   const _mode = getQueryParam('mode') || 'tab';
   void _mode;
@@ -52,51 +72,34 @@ async function start() {
 
     status.textContent = 'Requesting screen capture…';
     startBtn.classList.add('hidden');
-    // Request audio: true to show both mic and system audio options in the picker
-    // The picker shows options for both - user can enable mic, system audio, both, or neither
+    // 1. Request screen share (requires user gesture, if auto-start fails this needs a button click)
     const displayStream = await navigator.mediaDevices.getDisplayMedia({
       video: true,
-      audio: true,
+      audio: wantSys, // only ask for system audio if requested
     });
 
-    // Analyze audio tracks from the picker selection
-    const displayAudioTracks = displayStream.getAudioTracks();
-    const audioLabels = displayAudioTracks.map(t => t.label);
-    
-    // Determine track types - system audio includes "system", mic includes "mic" or "microphone"
-    const hasSystemAudio = audioLabels.some(l => {
-      const lower = l.toLowerCase();
-      return lower.includes('system') || lower.includes('wave link') || lower.includes('stereo mix');
-    });
-    const hasMicrophone = audioLabels.some(l => {
-      const lower = l.toLowerCase();
-      return lower.includes('mic') || lower.includes('microphone');
-    });
-    
-    logger.log('Display stream audio:', { total: displayAudioTracks.length, labels: audioLabels, hasSystemAudio, hasMicrophone });
+    // Apply content hints to screen stream
+    applyContentHints(displayStream, { hasSystemAudio: wantSys });
 
-    // Apply content hints for encoder optimization
-    applyContentHints(displayStream, { hasSystemAudio: hasSystemAudio || wantSys, hasMicrophone: hasMicrophone || wantMic });
-
+    // 2. Request microphone separately if needed
     let micStream = null;
-    if (wantMic && hasMicrophone) {
-      // Mic was enabled in the picker - extract it as a separate stream for proper processing
-      const micTrack = displayAudioTracks.find(t => {
-        const lower = t.label.toLowerCase();
-        return lower.includes('mic') || lower.includes('microphone');
-      });
-      if (micTrack) {
-        micStream = new MediaStream([micTrack.clone()]);
-        // Remove from displayStream so combineStreams doesn't duplicate it
-        displayStream.removeTrack(micTrack);
-        micTrack.stop();
-        // Apply speech hint for better voice encoding
+    if (wantMic) {
+      status.textContent = 'Requesting microphone…';
+      try {
+        micStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        });
+        // Apply content hints for voice
         applyContentHints(micStream, { hasMicrophone: true });
-        logger.log('Mic extracted from display picker as separate stream');
+        logger.log('Microphone stream obtained.');
+      } catch (e) {
+        logger.warn('Mic request failed, proceeding without mic:', e);
+        status.textContent = 'Mic request failed. Recording without mic.';
       }
-    } else if (wantMic && !hasMicrophone) {
-      status.textContent = 'Mic not enabled. Please check "Share audio" and select microphone in the picker.';
-      logger.warn('User requested mic but it was not enabled in the picker');
     }
 
     mediaStream = combineStreams({ displayStream, micStream });
@@ -109,10 +112,19 @@ async function start() {
       onStart: () => {
         logger.log('Recording started');
       },
-      onStop: async (mimeType, duration, totalSize) => {
+      onStop: async (mimeType, duration, totalSize, extra) => {
+        const failedChunks = extra?.failedChunks || getFailedChunkCount();
+        let status = RECORDING_STATUS.SAVED;
+
         try {
+          // Determine recording status based on chunk save results
+          if (failedChunks > 0) {
+            status = failedChunks > 5 ? RECORDING_STATUS.FAILED : RECORDING_STATUS.PARTIAL;
+            logger.warn(`Recording finished with ${failedChunks} failed chunks, status: ${status}`);
+          }
+
           // Finish recording in DB
-          await finishRecording(recordingId, mimeType, duration, totalSize);
+          await finishRecording(recordingId, mimeType, duration, totalSize, status);
           logger.log('Finished recording in DB');
 
           await chrome.runtime.sendMessage({
@@ -122,6 +134,17 @@ async function start() {
           });
         } catch (dbError) {
           logger.error('Failed to finish recording in DB:', dbError);
+          const structuredError = createError(CODES.RECORDING_SAVE_FAILED, dbError.message, {
+            recordingId,
+            mimeType,
+            duration,
+            totalSize,
+          });
+          await chrome.runtime.sendMessage({
+            type: 'RECORDER_ERROR',
+            error: structuredError,
+            code: 'RECORDING_SAVE_FAILED',
+          });
           alert('Failed to save recording: ' + dbError.message);
           return;
         } finally {
@@ -182,8 +205,7 @@ window.addEventListener('DOMContentLoaded', () => {
   start().catch((err) => {
     // If auto-start fails (e.g., user gesture required), show the button
     startBtn.classList.remove('hidden');
-    document.getElementById('status').textContent =
-      'Auto-start failed. Click Start to begin.';
+    document.getElementById('status').textContent = 'Auto-start failed. Click Start to begin.';
     logger.error('Auto-start failed:', err);
   });
 });

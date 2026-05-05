@@ -19,7 +19,16 @@
       "128": "icons/icon-128.png"
     }
   },
-  "permissions": ["activeTab", "scripting", "offscreen", "tabs"],
+  /*
+   * Permissions rationale:
+   * - activeTab: Needed for injecting overlay into the user's active tab during recording
+   * - scripting: Required for chrome.scripting.executeScript to inject overlay.js
+   * - offscreen: Required for the offscreen document API used for headless recording
+   * - tabs: NOT USED - removed in Phase 6 audit (no chrome.tabs.* calls in code)
+   * - notifications: Optional - requested only when needed for user alerts
+   */
+  "permissions": ["activeTab", "scripting", "offscreen"],
+  "optional_permissions": ["notifications"],
   "background": {
     "service_worker": "background.js",
     "type": "module"
@@ -27,10 +36,11 @@
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'self'"
   },
-  "web_accessible_resources": [
-    {
-      "resources": ["overlay.js"],
-      "matches": ["http://*/*", "https://*/*"]
-    }
-  ]
+  /*
+   * Phase 6 audit: overlay.js is NOT web_accessible.
+   * It's injected via chrome.scripting.executeScript which does NOT require web_accessible.
+   * Keeping it accessible would be a security risk.
+   * Removed from web_accessible_resources.
+   */
+  "web_accessible_resources": []
 }

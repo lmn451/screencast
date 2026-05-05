@@ -1,5 +1,18 @@
 import { DB_NAME, DB_VERSION, STORE_RECORDINGS, STORE_CHUNKS } from './db-shared.js';
 
+/**
+ * Recording status values
+ * @readonly
+ * @enum {string}
+ */
+export const RECORDING_STATUS = {
+  RECORDING: 'recording', // Active, chunks being saved
+  SAVING: 'saving', // Stop requested, final chunks being saved
+  SAVED: 'saved', // Fully saved, playable
+  FAILED: 'failed', // Save failed (no chunks or corrupted)
+  PARTIAL: 'partial', // Some chunks saved but incomplete
+};
+
 function openDB() {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
@@ -20,7 +33,22 @@ function openDB() {
   });
 }
 
-export async function finishRecording(id, mimeType, duration, size) {
+/**
+ * Finish a recording and save its metadata
+ * @param {string} id - Recording ID
+ * @param {string} mimeType - MIME type of the recording
+ * @param {number} duration - Duration in milliseconds
+ * @param {number} size - Total size in bytes
+ * @param {string} [status='saved'] - Recording status
+ * @returns {Promise<void>}
+ */
+export async function finishRecording(
+  id,
+  mimeType,
+  duration,
+  size,
+  status = RECORDING_STATUS.SAVED
+) {
   let db;
   try {
     db = await openDB();
@@ -40,6 +68,7 @@ export async function finishRecording(id, mimeType, duration, size) {
       size,
       createdAt: Date.now(),
       name: null,
+      status,
     });
     request.onsuccess = () => resolve();
     request.onerror = () => reject(request.error);
@@ -130,6 +159,7 @@ export async function getRecording(id) {
     duration: meta.duration,
     size: meta.size,
     name: meta.name,
+    status: meta.status,
   };
 }
 

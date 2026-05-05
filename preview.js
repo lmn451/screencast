@@ -65,7 +65,8 @@ export function fixDurationAndReset(video, opts = {}) {
   const safeCT = () => {
     try {
       return video.currentTime || 0;
-    } catch {
+    } catch (e) {
+      logger.warn('Failed to get currentTime', e);
       return 0;
     }
   };
@@ -99,7 +100,7 @@ export function fixDurationAndReset(video, opts = {}) {
   try {
     video.pause?.();
   } catch (e) {
-    /* no-op */
+    logger.warn('Failed to pause video', e);
   }
 
   let fixed = false;
@@ -121,7 +122,7 @@ export function fixDurationAndReset(video, opts = {}) {
     try {
       video.currentTime = 0;
     } catch (e) {
-      /* no-op */
+      logger.warn('Failed to reset video currentTime', e);
     }
     if (video.dataset) video.dataset.stable = 'true';
     metrics.normalizedAtMs = startNow() - t0;
@@ -259,7 +260,7 @@ if (typeof window !== 'undefined' && window.location.search.includes('test')) {
         filenameInput.focus();
         filenameInput.select();
       } catch (e) {
-        /* no-op */
+        logger.warn('Failed to focus/select filename input', e);
       }
     }
   }

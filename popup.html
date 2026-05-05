@@ -45,20 +45,24 @@
         width: 16px;
         height: 16px;
       }
+      #status {
+        font-size: 12px;
+        color: #666;
+        min-height: 16px;
+        margin-top: 4px;
+      }
+      #status.error {
+        color: #c5221f;
+      }
+      #status.success {
+        color: #1e7e34;
+      }
     </style>
   </head>
   <body>
     <h1>CaptureCast</h1>
     <div id="idle-ui" class="mode">
-      <div class="option">
-        <input type="checkbox" id="mic-toggle" />
-        <label for="mic-toggle">Include microphone</label>
-      </div>
-      <div class="option">
-        <input type="checkbox" id="sys-toggle" />
-        <label for="sys-toggle">Include system/tab audio</label>
-      </div>
-      <button id="btn-tab" class="primary">Record</button>
+      <button id="btn-record" class="primary">Record</button>
       <div style="margin-top: 10px; border-top: 1px solid #eee; padding-top: 10px">
         <button
           id="btn-view-recordings"
@@ -74,6 +78,7 @@
         Stop Recording
       </button>
     </div>
+    <div id="status"></div>
     <script type="module" src="popup.js"></script>
   </body>
 </html>
