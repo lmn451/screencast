@@ -52,35 +52,55 @@ async function start() {
 
     status.textContent = 'Requesting screen capture…';
     startBtn.classList.add('hidden');
+    // Request audio: true to show both mic and system audio options in the picker
+    // The picker is unified - user can enable either, both, or neither
     const displayStream = await navigator.mediaDevices.getDisplayMedia({
       video: true,
-      audio: wantSys
-        ? {
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false,
-          }
-        : false,
+      audio: true,
     });
 
+    // Check what audio the user selected in the picker
+    const displayAudioTracks = displayStream.getAudioTracks();
+    const hasSystemAudio = displayAudioTracks.some(t => t.label.toLowerCase().includes('system') || t.getSettings().displaySurface);
+    logger.log('Display stream audio tracks:', displayAudioTracks.length, displayAudioTracks.map(t => ({ label: t.label, kind: t.kind })));
+
     // Apply content hints for encoder optimization
-    applyContentHints(displayStream, { hasSystemAudio: wantSys });
+    applyContentHints(displayStream, { hasSystemAudio });
 
     let micStream = null;
+    // Check if user enabled mic in the picker (look for a mic track, not system audio)
+    const micTrack = displayAudioTracks.find(t => {
+      const settings = t.getSettings();
+      // Mic from picker has a specific source type
+      return settings && (settings.systemAudio === false || !t.label.toLowerCase().includes('system'));
+    });
+
     if (wantMic) {
-      try {
-        status.textContent = 'Requesting microphone…';
-        micStream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-          },
-        });
-        // Apply content hints for encoder optimization
+      if (micTrack) {
+        // User enabled mic in the picker - extract it as micStream
+        logger.log('Mic obtained from display picker');
+        micStream = new MediaStream([micTrack.clone()]);
         applyContentHints(micStream, { hasMicrophone: true });
-      } catch (e) {
-        logger.warn('Mic request failed, proceeding without mic:', e);
+        // Remove the mic track from displayStream so it doesn't get duplicated
+        micTrack.stop();
+      } else {
+        // Mic not in picker - try to get it via getUserMedia (may fail without user gesture)
+        try {
+          status.textContent = 'Requesting microphone…';
+          micStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+            },
+          });
+          const audioTracks = micStream.getAudioTracks();
+          logger.log('Mic stream obtained via getUserMedia, tracks:', audioTracks.length);
+          applyContentHints(micStream, { hasMicrophone: true });
+        } catch (e) {
+          logger.error('Mic request failed:', e.name, e.message);
+          status.textContent = 'Mic permission denied. Recording without microphone.';
+        }
       }
     }
 
@@ -164,9 +184,12 @@ window.addEventListener('DOMContentLoaded', () => {
   // Auto-start recording (mic mode is triggered from popup → background)
   const startBtn = document.getElementById('start');
   startBtn.classList.add('hidden');
-  start().catch(() => {
+  start().catch((err) => {
     // If auto-start fails (e.g., user gesture required), show the button
     startBtn.classList.remove('hidden');
+    document.getElementById('status').textContent =
+      'Auto-start failed. Click Start to begin.';
+    logger.error('Auto-start failed:', err);
   });
 });
 
