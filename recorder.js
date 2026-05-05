@@ -76,7 +76,6 @@ async function start() {
             noiseSuppression: true,
             autoGainControl: true,
           },
-          video: false,
         });
         // Apply content hints for encoder optimization
         applyContentHints(micStream, { hasMicrophone: true });
@@ -161,6 +160,14 @@ async function stop() {
 window.addEventListener('DOMContentLoaded', () => {
   document.getElementById('start').addEventListener('click', start, { once: false });
   document.getElementById('stop').addEventListener('click', stop);
+
+  // Auto-start recording (mic mode is triggered from popup → background)
+  const startBtn = document.getElementById('start');
+  startBtn.classList.add('hidden');
+  start().catch(() => {
+    // If auto-start fails (e.g., user gesture required), show the button
+    startBtn.classList.remove('hidden');
+  });
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
