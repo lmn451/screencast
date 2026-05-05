@@ -53,55 +53,50 @@ async function start() {
     status.textContent = 'Requesting screen capture…';
     startBtn.classList.add('hidden');
     // Request audio: true to show both mic and system audio options in the picker
-    // The picker is unified - user can enable either, both, or neither
+    // The picker shows options for both - user can enable mic, system audio, both, or neither
     const displayStream = await navigator.mediaDevices.getDisplayMedia({
       video: true,
       audio: true,
     });
 
-    // Check what audio the user selected in the picker
+    // Analyze audio tracks from the picker selection
     const displayAudioTracks = displayStream.getAudioTracks();
-    const hasSystemAudio = displayAudioTracks.some(t => t.label.toLowerCase().includes('system') || t.getSettings().displaySurface);
-    logger.log('Display stream audio tracks:', displayAudioTracks.length, displayAudioTracks.map(t => ({ label: t.label, kind: t.kind })));
+    const audioLabels = displayAudioTracks.map(t => t.label);
+    
+    // Determine track types - system audio includes "system", mic includes "mic" or "microphone"
+    const hasSystemAudio = audioLabels.some(l => {
+      const lower = l.toLowerCase();
+      return lower.includes('system') || lower.includes('wave link') || lower.includes('stereo mix');
+    });
+    const hasMicrophone = audioLabels.some(l => {
+      const lower = l.toLowerCase();
+      return lower.includes('mic') || lower.includes('microphone');
+    });
+    
+    logger.log('Display stream audio:', { total: displayAudioTracks.length, labels: audioLabels, hasSystemAudio, hasMicrophone });
 
     // Apply content hints for encoder optimization
-    applyContentHints(displayStream, { hasSystemAudio });
+    applyContentHints(displayStream, { hasSystemAudio: hasSystemAudio || wantSys, hasMicrophone: hasMicrophone || wantMic });
 
     let micStream = null;
-    // Check if user enabled mic in the picker (look for a mic track, not system audio)
-    const micTrack = displayAudioTracks.find(t => {
-      const settings = t.getSettings();
-      // Mic from picker has a specific source type
-      return settings && (settings.systemAudio === false || !t.label.toLowerCase().includes('system'));
-    });
-
-    if (wantMic) {
+    if (wantMic && hasMicrophone) {
+      // Mic was enabled in the picker - extract it as a separate stream for proper processing
+      const micTrack = displayAudioTracks.find(t => {
+        const lower = t.label.toLowerCase();
+        return lower.includes('mic') || lower.includes('microphone');
+      });
       if (micTrack) {
-        // User enabled mic in the picker - extract it as micStream
-        logger.log('Mic obtained from display picker');
         micStream = new MediaStream([micTrack.clone()]);
-        applyContentHints(micStream, { hasMicrophone: true });
-        // Remove the mic track from displayStream so it doesn't get duplicated
+        // Remove from displayStream so combineStreams doesn't duplicate it
+        displayStream.removeTrack(micTrack);
         micTrack.stop();
-      } else {
-        // Mic not in picker - try to get it via getUserMedia (may fail without user gesture)
-        try {
-          status.textContent = 'Requesting microphone…';
-          micStream = await navigator.mediaDevices.getUserMedia({
-            audio: {
-              echoCancellation: true,
-              noiseSuppression: true,
-              autoGainControl: true,
-            },
-          });
-          const audioTracks = micStream.getAudioTracks();
-          logger.log('Mic stream obtained via getUserMedia, tracks:', audioTracks.length);
-          applyContentHints(micStream, { hasMicrophone: true });
-        } catch (e) {
-          logger.error('Mic request failed:', e.name, e.message);
-          status.textContent = 'Mic permission denied. Recording without microphone.';
-        }
+        // Apply speech hint for better voice encoding
+        applyContentHints(micStream, { hasMicrophone: true });
+        logger.log('Mic extracted from display picker as separate stream');
       }
+    } else if (wantMic && !hasMicrophone) {
+      status.textContent = 'Mic not enabled. Please check "Share audio" and select microphone in the picker.';
+      logger.warn('User requested mic but it was not enabled in the picker');
     }
 
     mediaStream = combineStreams({ displayStream, micStream });
