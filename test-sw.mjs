@@ -22,31 +22,29 @@ let context;
 let testSuccess = false;
 
 try {
+  // NOTE: Using --use-fake-device-for-media-stream creates a virtual display
+  // that shows BLACK, not real content. The recording will be all black/green.
+  // For real content, you need:
+  // 1. A real display attached to the machine
+  // 2. Run with headless:false on a real display
+  // 3. Use a different approach like VNC virtual display
+  
   context = await chromium.launchPersistentContext('', {
     headless: false,
     args: [
       `--disable-extensions-except=${rootDir}`,
       `--load-extension=${rootDir}`,
       
-      // Media stream - no picker needed
-      '--use-fake-ui-for-media-stream',
-      '--use-fake-device-for-media-stream',
-      
-      // Browser stability
       '--no-sandbox',
       '--disable-dev-shm-usage',
       '--no-first-run',
       '--no-default-browser-check',
       
-      // ANTI-GREEN-SCREEN FLAGS (from Chrome architecture expert)
-      // Disable GPU entirely for software encoding
       '--disable-gpu',
-      // Disable hardware video encoding (forces software VP8/AV1)
       '--disable-accelerated-video-encode',
       '--disable-accelerated-video-decode',
       '--disable-software-rasterizer',
       
-      // Prevent tab freezing (keeps frames coming)
       '--disable-background-timer-throttling',
       '--disable-backgrounding-occluded-windows',
       '--disable-renderer-backgrounding',
@@ -55,7 +53,6 @@ try {
 
   console.log('✓ Context created');
 
-  // Get service worker
   let sw;
   const existingSWs = context.serviceWorkers();
   sw = existingSWs[0] || await context.waitForEvent('serviceworker', { timeout: 10000 });
@@ -64,7 +61,6 @@ try {
   const extensionId = sw.url().split('/')[2];
   console.log(`✓ Extension ID: ${extensionId}`);
 
-  // Extension page for messages
   const extPage = await context.newPage();
   await extPage.goto(`chrome-extension://${extensionId}/preview.html?test=1`, {
     waitUntil: 'domcontentloaded'
@@ -95,7 +91,6 @@ try {
     process.exit(1);
   }
 
-  // Get recording ID
   const stateResult = await extPage.evaluate(async () => {
     return new Promise((resolve) => {
       const t = setTimeout(() => resolve({}), 3000);
@@ -108,27 +103,23 @@ try {
 
   const recordingId = stateResult.recordingId;
   console.log(`✓ Recording ID: ${recordingId}`);
+  console.log(`✓ Strategy: ${stateResult.strategy}`);
 
-  // Page to record - set EVEN viewport (expert rule #1)
   console.log('\n--- Recording interaction ---');
   const recordPage = await context.newPage();
   
-  // CRITICAL: Even dimensions prevent encoder crash
   await recordPage.setViewportSize({ width: 1920, height: 1080 });
-  console.log('✓ Viewport set to 1920x1080 (even dimensions)');
+  console.log('✓ Viewport set to 1920x1080');
   
-  // Navigate to google.com
   console.log('Navigating to google.com...');
   await recordPage.goto('https://www.google.com', { waitUntil: 'networkidle', timeout: 30000 });
   console.log('✓ Page loaded');
   
-  // CRITICAL: Bring page to front (expert rule #3)
   await recordPage.bringToFront();
   console.log('✓ Page brought to front');
   
   await new Promise(r => setTimeout(r, 500));
   
-  // Type "Hello World"
   console.log('Typing "Hello World"...');
   const searchBox = recordPage.locator('textarea[name="q"], input[name="q"]').first();
   const isVisible = await searchBox.isVisible().catch(() => false);
@@ -140,7 +131,6 @@ try {
     
     await new Promise(r => setTimeout(r, 1000));
     
-    // Keep page focused
     await recordPage.bringToFront();
     await recordPage.keyboard.press('Enter');
     console.log('✓ Pressed Enter');
@@ -149,7 +139,6 @@ try {
     console.log('✓ Search results loaded');
   }
 
-  // Stop recording
   console.log('\n--- Stopping recording ---');
   await extPage.evaluate(async () => {
     return new Promise((resolve) => {
@@ -158,7 +147,6 @@ try {
   });
   console.log('Stop signal sent');
 
-  // Wait for preview
   console.log('Waiting for preview page...');
   await new Promise(r => setTimeout(r, 5000));
 
@@ -191,7 +179,6 @@ try {
         const req = store.getAll();
         req.onsuccess = () => resolve(req.result);
       });
-      
       const meta = allRecordings.find(r => r.id === id);
 
       const chunks = await new Promise((resolve) => {
@@ -236,7 +223,7 @@ try {
       console.log(`Duration: ${(result.duration / 1000).toFixed(2)} seconds`);
       console.log(`Size: ${(result.blobSize / 1024).toFixed(2)} KB`);
       console.log(`Type: ${result.mimeType}`);
-      console.log(`Codec: ${result.mimeType.includes('av01') ? 'AV1' : result.mimeType.includes('vp9') ? 'VP9' : 'VP8'}`);
+      console.log(`Codec: ${result.mimeType.includes('vp8') ? 'VP8' : result.mimeType.includes('av01') ? 'AV1' : 'Other'}`);
       console.log('='.repeat(50));
       
       testSuccess = true;
