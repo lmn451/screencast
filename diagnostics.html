@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Diagnostics — CaptureCast</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        font-family: system-ui, -apple-system, sans-serif;
+        margin: 16px;
+        color: #202124;
+      }
+      h1 {
+        font-size: 18px;
+        margin: 0 0 16px;
+      }
+      .summary {
+        background: #f1f3f4;
+        border-radius: 8px;
+        padding: 12px 16px;
+        margin-bottom: 16px;
+        font-size: 13px;
+        display: flex;
+        gap: 24px;
+      }
+      .summary span strong {
+        color: #1a73e8;
+      }
+      .export-btn {
+        background: #1a73e8;
+        color: #fff;
+        border: none;
+        border-radius: 8px;
+        padding: 10px 16px;
+        font-size: 14px;
+        cursor: pointer;
+        margin-bottom: 16px;
+      }
+      .export-btn:disabled {
+        background: #ccc;
+        cursor: not-allowed;
+      }
+      .log-list {
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        overflow: hidden;
+      }
+      .log-entry {
+        border-bottom: 1px solid #eee;
+        padding: 10px 12px;
+        font-size: 12px;
+      }
+      .log-entry:last-child {
+        border-bottom: none;
+      }
+      .log-meta {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 4px;
+      }
+      .log-level {
+        font-weight: 600;
+        padding: 1px 6px;
+        border-radius: 4px;
+        font-size: 11px;
+      }
+      .log-level.error {
+        background: #fce8e6;
+        color: #c5221f;
+      }
+      .log-level.warn {
+        background: #fef7e0;
+        color: #b06000;
+      }
+      .log-level.info {
+        background: #e8f0fe;
+        color: #1a73e8;
+      }
+      .log-level.debug {
+        background: #f1f3f4;
+        color: #666;
+      }
+      .log-code {
+        color: #666;
+      }
+      .log-ts {
+        color: #999;
+        margin-left: auto;
+      }
+      .log-user {
+        margin: 4px 0;
+      }
+      .log-tech {
+        color: #666;
+        font-size: 11px;
+        word-break: break-all;
+      }
+      .empty {
+        color: #666;
+        font-size: 13px;
+        padding: 24px;
+        text-align: center;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>CaptureCast Diagnostics</h1>
+
+    <div class="summary" id="summary">
+      <span>Total entries: <strong id="total-count">—</strong></span>
+      <span>Latest: <strong id="latest-time">—</strong></span>
+    </div>
+
+    <button class="export-btn" id="btn-export" disabled>Export diagnostics</button>
+    <button class="export-btn" style="background: #f1f3f4; color: #333" id="btn-clear">
+      Clear all
+    </button>
+
+    <div id="log-list" class="log-list">
+      <div class="empty" id="empty-msg">Loading diagnostics…</div>
+    </div>
+
+    <script src="diagnostics.js"></script>
+  </body>
+</html>

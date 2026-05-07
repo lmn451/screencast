@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Recover Recording — CaptureCast</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        font-family: system-ui, -apple-system, sans-serif;
+        margin: 16px;
+        color: #202124;
+      }
+      h1 {
+        font-size: 18px;
+        margin: 0 0 8px;
+      }
+      .subtitle {
+        font-size: 13px;
+        color: #666;
+        margin-bottom: 20px;
+      }
+      .item {
+        border: 1px solid #ddd;
+        border-radius: 12px;
+        padding: 16px;
+        margin-bottom: 12px;
+      }
+      .item-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 12px;
+      }
+      .item-name {
+        font-size: 15px;
+        font-weight: 500;
+      }
+      .item-date {
+        font-size: 12px;
+        color: #666;
+      }
+      .item-status {
+        font-size: 12px;
+        padding: 3px 8px;
+        border-radius: 4px;
+      }
+      .status-partial {
+        background: #fef7e0;
+        color: #b06000;
+      }
+      .status-recoverable {
+        background: #e8f0fe;
+        color: #1a73e8;
+      }
+      .item-actions {
+        display: flex;
+        gap: 8px;
+      }
+      button {
+        flex: 1;
+        padding: 8px 12px;
+        font-size: 13px;
+        border-radius: 6px;
+        border: none;
+        cursor: pointer;
+      }
+      .btn-retry {
+        background: #1a73e8;
+        color: #fff;
+      }
+      .btn-discard {
+        background: #f1f3f4;
+        color: #444;
+      }
+      .empty {
+        text-align: center;
+        padding: 40px 24px;
+        color: #666;
+      }
+      .empty-icon {
+        font-size: 48px;
+        margin-bottom: 12px;
+      }
+      .nav {
+        display: flex;
+        gap: 12px;
+        margin-top: 24px;
+        padding-top: 16px;
+        border-top: 1px solid #eee;
+      }
+      .nav a {
+        font-size: 13px;
+        color: #1a73e8;
+        text-decoration: none;
+      }
+      .nav a:hover {
+        text-decoration: underline;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Recover Recordings</h1>
+    <p class="subtitle" id="subtitle">Loading…</p>
+
+    <div id="list"></div>
+
+    <div class="nav">
+      <a href="recordings.html">← View all recordings</a>
+      <a href="diagnostics.html">View diagnostics</a>
+    </div>
+
+    <script src="recovery.js"></script>
+  </body>
+</html>
