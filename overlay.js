@@ -5,6 +5,20 @@
 const ERROR_DISPLAY_DURATION_MS = 2000;
 
 (function () {
+  // Protected URLs that block script injection
+  const currentUrl = window.location.href;
+  const isProtected =
+    currentUrl.startsWith('chrome:') ||
+    currentUrl.startsWith('about:') ||
+    currentUrl.startsWith('devtools:') ||
+    currentUrl.startsWith('chrome-extension:') ||
+    /\.pdf$/i.test(currentUrl);
+
+  if (isProtected) {
+    console.debug('[CaptureCast Overlay] Skipping on protected page');
+    return;
+  }
+
   if (document.getElementById('cc-overlay')) return;
   const root = document.createElement('div');
   root.id = 'cc-overlay';

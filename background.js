@@ -14,6 +14,8 @@ import {
   STATE_SAVING,
   STATE_SAVED,
   STATE_FAILED,
+  MSG_RECOVERY_RESUME,
+  MSG_RECOVERY_DISCARD,
 } from './src/messages.js';
 
 // CaptureCast background service worker (MV3)
@@ -86,6 +88,38 @@ async function clearSessionSnapshot() {
   }
 }
 
+// Checkpoint interval: 30 seconds
+const CHECKPOINT_INTERVAL_MS = 30_000;
+
+let checkpointIntervalId = null;
+
+/**
+ * Start periodic session snapshot checkpointing
+ * Persists state every CHECKPOINT_INTERVAL_MS to survive SW termination
+ */
+function startCheckpointTimer() {
+  stopCheckpointTimer();
+  checkpointIntervalId = setInterval(async () => {
+    if (
+      (STATE.status === STATE_RECORDING || STATE.status === STATE_STOPPING) &&
+      STATE.recordingId
+    ) {
+      STATE.lastActivityAt = Date.now();
+      await persistSessionSnapshot();
+    }
+  }, CHECKPOINT_INTERVAL_MS);
+}
+
+/**
+ * Stop periodic checkpoint timer
+ */
+function stopCheckpointTimer() {
+  if (checkpointIntervalId) {
+    clearInterval(checkpointIntervalId);
+    checkpointIntervalId = null;
+  }
+}
+
 /**
  * On startup, check for unfinished sessions and clean up stale ones.
  * Uses timestamp-based reconciliation — no periodic heartbeat pings.
@@ -118,13 +152,30 @@ async function reconcileUnfinishedSessions() {
         }
       }
     } else {
-      logger.log('Found active session, will allow reconciliation', {
+      // ACTIVE SESSION — show recovery prompt
+      logger.log('Found active session, showing recovery prompt', {
         age,
         status: snapshot.status,
       });
+      if (snapshot.status === STATE_RECORDING || snapshot.status === STATE_STOPPING) {
+        await showRecoveryPrompt(snapshot);
+      }
     }
   } catch (e) {
     logger.error('Session reconciliation failed:', e);
+  }
+}
+
+/**
+ * Show recovery prompt by opening recovery.html
+ * @param {object} snapshot - Session snapshot to recover
+ */
+async function showRecoveryPrompt(snapshot) {
+  try {
+    await chrome.storage.local.set({ [SESSION_SNAPSHOT_KEY]: snapshot });
+    await chrome.tabs.create({ url: chrome.runtime.getURL('recovery.html') });
+  } catch (e) {
+    logger.error('Failed to show recovery prompt:', e);
   }
 }
 
@@ -281,7 +332,7 @@ async function startRecording(mode, includeMic, includeSystemAudio) {
   // Task 4.2: Persist session snapshot
   await persistSessionSnapshot();
 
-  const useOffscreen = !STATE.includeMic && canUseOffscreen();
+  const useOffscreen = !STATE.options.includeMic && canUseOffscreen();
 
   if (useOffscreen) {
     await ensureOffscreenDocument();
@@ -333,6 +384,8 @@ async function startRecording(mode, includeMic, includeSystemAudio) {
     correlationId: STATE.correlationId,
     strategy: STATE.strategy,
   });
+  // Start periodic checkpoint timer
+  startCheckpointTimer();
   return { ok: true, overlayInjected };
 }
 
@@ -347,6 +400,7 @@ async function stopRecording() {
   // Task 4.4: Transition to STOPPING and update session snapshot
   STATE.status = STATE_STOPPING;
   STATE.lastActivityAt = Date.now();
+  stopCheckpointTimer(); // Stop periodic checkpoint
   await persistSessionSnapshot();
   await updateBadge();
   logger.log('Stopping recording', { correlationId: STATE.correlationId });
@@ -418,14 +472,13 @@ async function resetRecordingState() {
 
   STATE.startedAt = null;
   STATE.lastActivityAt = null;
+  stopCheckpointTimer(); // Stop periodic checkpoint
   STATE.options = {
     mode: null,
     includeMic: false,
     includeSystemAudio: false,
   };
   STATE.overlayTabId = null;
-  STATE.includeMic = false;
-  STATE.includeSystemAudio = false;
   STATE.recorderTabId = null;
   STATE.strategy = null;
   STATE.recordingId = null;
@@ -636,6 +689,36 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         case 'OFFSCREEN_TEST': {
           logger.log('Received OFFSCREEN_TEST message');
           sendResponse({ ok: true, message: 'Test successful' });
+          break;
+        }
+        case MSG_RECOVERY_RESUME: {
+          // Resume is limited: can only save existing chunks, cannot continue recording
+          // Original MediaStream is lost when tab was closed
+          const { recordingId } = message;
+          logger.log('User requested recovery resume', { recordingId });
+          sendResponse({
+            ok: true,
+            message: 'Resume opens existing recording for save - cannot continue capture',
+            recordingId,
+          });
+          break;
+        }
+        case MSG_RECOVERY_DISCARD: {
+          const { recordingId } = message;
+          // Validate we're in a valid state to reset
+          if (
+            STATE.status !== STATE_RECORDING &&
+            STATE.status !== STATE_STOPPING &&
+            STATE.status !== STATE_IDLE
+          ) {
+            logger.warn('RECOVERY_DISCARD called but not in recording state', {
+              status: STATE.status,
+            });
+          }
+          logger.log('User requested recovery discard', { recordingId });
+          await clearSessionSnapshot();
+          await resetRecordingState();
+          sendResponse({ ok: true });
           break;
         }
         default: {
