@@ -64,56 +64,92 @@ function buildNote(mode, mic, _systemAudio) {
 }
 
 async function init() {
-  const { mode, mic, systemAudio } = await loadParams();
+  try {
+    const { mode, mic, systemAudio } = await loadParams();
 
-  // Render capture list
-  const listEl = document.getElementById('capture-list');
-  const items = buildCaptureList(mode, mic, systemAudio);
-  listEl.innerHTML = items.map((item) => `<li>${item}</li>`).join('');
+    // Render capture list
+    const listEl = document.getElementById('capture-list');
+    const noteEl = document.getElementById('note');
+    const btnContinue = document.getElementById('btn-continue');
+    const btnCancel = document.getElementById('btn-cancel');
 
-  // Render note
-  const noteEl = document.getElementById('note');
-  noteEl.textContent = buildNote(mode, mic, systemAudio) || 'Everything stays on your device.';
+    if (!listEl || !noteEl || !btnContinue || !btnCancel) {
+      console.error('[Consent] Required DOM elements not found');
+      alert('CaptureCast: Consent page failed to load properly. Please try again.');
+      return;
+    }
 
-  // Track consent displayed
-  trackConsent('displayed', { mode, mic, systemAudio });
+    const items = buildCaptureList(mode, mic, systemAudio);
+    listEl.innerHTML = items.map((item) => `<li>${item}</li>`).join('');
 
-  // Continue button
-  document.getElementById('btn-continue').addEventListener('click', () => {
-    trackConsent('accepted', { mode, mic, systemAudio });
+    // Render note
+    noteEl.textContent = buildNote(mode, mic, systemAudio) || 'Everything stays on your device.';
 
-    // Store consent flag in sessionStorage
-    sessionStorage.setItem('cc_consent_given', 'true');
-    sessionStorage.setItem('cc_consent_ts', String(Date.now()));
+    // Track consent displayed
+    trackConsent('displayed', { mode, mic, systemAudio });
 
-    // Send START message to background
-    chrome.runtime.sendMessage(
-      {
-        type: 'START',
-        mode,
-        mic,
-        systemAudio,
-      },
-      (res) => {
-        if (res?.ok) {
-          window.close();
-        } else {
-          // Show error inline and keep consent screen open
-          const errMsg = res?.error || 'Failed to start recording';
-          noteEl.style.color = '#c5221f';
-          noteEl.textContent = `Error: ${errMsg}`;
-          noteEl.style.background = '#fce8e6';
-          trackConsent('failed', { mode, mic, systemAudio, error: errMsg });
-        }
+    // Continue button
+    btnContinue.addEventListener('click', () => {
+      trackConsent('accepted', { mode, mic, systemAudio });
+
+      // Store consent flag in sessionStorage
+      try {
+        sessionStorage.setItem('cc_consent_given', 'true');
+        sessionStorage.setItem('cc_consent_ts', String(Date.now()));
+      } catch (e) {
+        console.warn('[Consent] Failed to write sessionStorage (non-critical):', e);
       }
-    );
-  });
 
-  // Cancel button
-  document.getElementById('btn-cancel').addEventListener('click', () => {
-    trackConsent('cancelled', { mode, mic, systemAudio });
-    window.close();
-  });
+      // Send START message to background
+      try {
+        chrome.runtime.sendMessage(
+          {
+            type: 'START',
+            mode,
+            mic,
+            systemAudio,
+          },
+          (res) => {
+            if (chrome.runtime.lastError) {
+              const errMsg = chrome.runtime.lastError.message || 'Extension communication failed';
+              console.error('[Consent] sendMessage error:', errMsg);
+              noteEl.style.color = '#c5221f';
+              noteEl.textContent = `Error: ${errMsg}`;
+              noteEl.style.background = '#fce8e6';
+              alert('CaptureCast: Failed to start recording — ' + errMsg);
+              return;
+            }
+            if (res?.ok) {
+              window.close();
+            } else {
+              // Show error inline and keep consent screen open
+              const errMsg = res?.error || 'Failed to start recording';
+              noteEl.style.color = '#c5221f';
+              noteEl.textContent = `Error: ${errMsg}`;
+              noteEl.style.background = '#fce8e6';
+              alert('CaptureCast: ' + errMsg);
+              trackConsent('failed', { mode, mic, systemAudio, error: errMsg });
+            }
+          }
+        );
+      } catch (e) {
+        console.error('[Consent] Failed to send START message:', e);
+        noteEl.style.color = '#c5221f';
+        noteEl.textContent = `Error: ${e.message || 'Failed to communicate with extension'}`;
+        noteEl.style.background = '#fce8e6';
+        alert('CaptureCast: Failed to start recording. The extension may need to be reloaded.');
+      }
+    });
+
+    // Cancel button
+    btnCancel.addEventListener('click', () => {
+      trackConsent('cancelled', { mode, mic, systemAudio });
+      window.close();
+    });
+  } catch (e) {
+    console.error('[Consent] Initialization failed:', e);
+    alert('CaptureCast: Consent page failed to initialize: ' + (e.message || e));
+  }
 }
 
 function trackConsent(action, params) {
@@ -131,7 +167,7 @@ function trackConsent(action, params) {
     if (existing.length > 10) existing.shift();
     sessionStorage.setItem(key, JSON.stringify(existing)); // FIX: saves array
   } catch (e) {
-    // Non-critical
+    // Non-critical — sessionStorage may be unavailable in some contexts
   }
 }
 

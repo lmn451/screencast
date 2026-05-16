@@ -64,6 +64,12 @@ async function start() {
   const startBtn = document.getElementById('start');
   const stopBtn = document.getElementById('stop');
 
+  if (!status || !preview || !startBtn || !stopBtn) {
+    logger.error('Required DOM elements not found');
+    alert('CaptureCast: Recorder page failed to load properly. Please close and try again.');
+    return;
+  }
+
   try {
     // Validate recording ID
     if (!recordingId || !isValidUUID(recordingId)) {
@@ -73,10 +79,30 @@ async function start() {
     status.textContent = 'Requesting screen capture…';
     startBtn.classList.add('hidden');
     // 1. Request screen share (requires user gesture, if auto-start fails this needs a button click)
-    const displayStream = await navigator.mediaDevices.getDisplayMedia({
-      video: true,
-      audio: wantSys, // only ask for system audio if requested
-    });
+    let displayStream;
+    try {
+      displayStream = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        audio: wantSys, // only ask for system audio if requested
+      });
+    } catch (captureError) {
+      const isPermissionDenied =
+        captureError.name === 'NotAllowedError' || captureError.name === 'AbortError';
+      if (isPermissionDenied) {
+        alert(
+          'CaptureCast: Screen capture permission was denied. Please allow access and try again.'
+        );
+        status.textContent = 'Screen capture permission denied.';
+      } else {
+        alert(
+          'CaptureCast: Failed to start screen capture: ' + (captureError.message || captureError)
+        );
+        status.textContent = 'Failed to capture screen: ' + captureError.message;
+      }
+      logger.error('getDisplayMedia failed:', captureError);
+      startBtn.classList.remove('hidden');
+      return;
+    }
 
     // Apply content hints to screen stream
     applyContentHints(displayStream, { hasSystemAudio: wantSys });
@@ -98,7 +124,12 @@ async function start() {
         logger.log('Microphone stream obtained.');
       } catch (e) {
         logger.warn('Mic request failed, proceeding without mic:', e);
-        status.textContent = 'Mic request failed. Recording without mic.';
+        const isMicDenied = e.name === 'NotAllowedError' || e.name === 'NotFoundError';
+        const micMsg = isMicDenied
+          ? 'Microphone permission denied. Recording without mic.'
+          : 'Microphone request failed. Recording without mic.';
+        alert('CaptureCast: ' + micMsg);
+        status.textContent = micMsg;
       }
     }
 
@@ -184,6 +215,7 @@ async function start() {
       message: e?.message,
       toString: e?.toString?.(),
     });
+    alert('CaptureCast: Recording failed to start — ' + details);
     startBtn.classList.remove('hidden');
   }
 }

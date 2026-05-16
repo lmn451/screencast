@@ -11,34 +11,83 @@ globalThis.addEventListener('error', (event) => {
 });
 
 async function getState() {
-  return await chrome.runtime.sendMessage({ type: 'GET_STATE' });
+  try {
+    return await chrome.runtime.sendMessage({ type: 'GET_STATE' });
+  } catch (e) {
+    logger.error('Failed to get state from background:', e);
+    alert('CaptureCast: Unable to communicate with the extension. Try reloading.');
+    return null;
+  }
 }
 
 function setUi(recording) {
-  document.getElementById('idle-ui').style.display = recording ? 'none' : 'flex';
-  document.getElementById('rec-ui').style.display = recording ? 'flex' : 'none';
+  const idleUi = document.getElementById('idle-ui');
+  const recUi = document.getElementById('rec-ui');
+  if (!idleUi || !recUi) {
+    logger.error('Popup UI elements not found');
+    return;
+  }
+  idleUi.style.display = recording ? 'none' : 'flex';
+  recUi.style.display = recording ? 'flex' : 'none';
 }
 
 async function start(mode) {
-  // Redirect to consent page with params
-  const params = new URLSearchParams({ mode, mic: 'false', sys: 'false' });
-  window.location.href = `consent.html?${params.toString()}`;
+  try {
+    // Redirect to consent page with params
+    const params = new URLSearchParams({ mode, mic: 'false', sys: 'false' });
+    window.location.href = `consent.html?${params.toString()}`;
+  } catch (e) {
+    logger.error('Failed to navigate to consent page:', e);
+    alert('CaptureCast: Failed to open recording consent page.');
+  }
 }
 
 async function stop() {
-  const res = await chrome.runtime.sendMessage({ type: 'STOP' });
-  if (!res?.ok) {
-    logger.error('Failed to stop recording:', res?.error);
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'STOP' });
+    if (!res?.ok) {
+      logger.error('Failed to stop recording:', res?.error);
+      alert('CaptureCast: Failed to stop recording: ' + (res?.error || 'Unknown error'));
+    }
+  } catch (e) {
+    logger.error('Failed to send stop message:', e);
+    alert('CaptureCast: Could not stop recording. The extension may need to be reloaded.');
   }
   window.close();
 }
 
 (async () => {
-  const state = await getState();
-  setUi(state.recording);
-  document.getElementById('btn-record').addEventListener('click', () => start('tab'));
-  document.getElementById('btn-stop').addEventListener('click', stop);
-  document.getElementById('btn-view-recordings').addEventListener('click', () => {
-    chrome.tabs.create({ url: 'recordings.html' });
-  });
+  try {
+    const state = await getState();
+    if (!state) {
+      // getState already alerted the user
+      setUi(false);
+      return;
+    }
+    setUi(state.recording);
+
+    const btnRecord = document.getElementById('btn-record');
+    const btnStop = document.getElementById('btn-stop');
+    const btnViewRecordings = document.getElementById('btn-view-recordings');
+
+    if (btnRecord) {
+      btnRecord.addEventListener('click', () => start('tab'));
+    }
+    if (btnStop) {
+      btnStop.addEventListener('click', stop);
+    }
+    if (btnViewRecordings) {
+      btnViewRecordings.addEventListener('click', () => {
+        try {
+          chrome.tabs.create({ url: 'recordings.html' });
+        } catch (e) {
+          logger.error('Failed to open recordings page:', e);
+          alert('CaptureCast: Failed to open recordings page.');
+        }
+      });
+    }
+  } catch (e) {
+    logger.error('Popup initialization failed:', e);
+    alert('CaptureCast: Popup failed to initialize. Please try again.');
+  }
 })();

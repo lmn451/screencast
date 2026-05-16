@@ -74,9 +74,14 @@ async function render() {
       playBtn.className = 'btn-play';
       playBtn.textContent = 'Play / Download';
       playBtn.onclick = () => {
-        chrome.tabs.create({
-          url: `preview.html?id=${encodeURIComponent(rec.id)}`,
-        });
+        try {
+          chrome.tabs.create({
+            url: `preview.html?id=${encodeURIComponent(rec.id)}`,
+          });
+        } catch (e) {
+          logger.error('Failed to open recording preview:', e);
+          alert('CaptureCast: Failed to open recording preview.');
+        }
       };
 
       const delBtn = document.createElement('button');

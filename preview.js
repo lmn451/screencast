@@ -192,187 +192,223 @@ if (typeof window !== 'undefined' && window.location.search.includes('test')) {
 }
 
 (async () => {
-  const id = getQueryParam('id');
-  let blob;
-  let mimeType;
-  let recordName = null;
-  let recordCreatedAt = null;
+  try {
+    const id = getQueryParam('id');
+    let blob;
+    let mimeType;
+    let recordName = null;
+    let recordCreatedAt = null;
 
-  if (window.__TEST_BLOB__) {
-    logger.log('Using injected __TEST_BLOB__ for video source');
-    blob = window.__TEST_BLOB__;
-    mimeType = blob.type || 'video/webm';
-  } else {
-    if (!id) {
-      document.body.textContent = 'Missing recording id';
-      return;
-    }
-
-    // Validate recording ID format for security
-    if (!isValidUUID(id)) {
-      logger.error('Invalid recording ID format:', id);
-      document.body.textContent = 'Invalid recording ID format';
-      return;
-    }
-
-    // Load from DB
-    try {
-      const record = await getRecording(id);
-      if (!record || !record.blob) {
-        throw new Error('Recording not found in DB');
+    if (window.__TEST_BLOB__) {
+      logger.log('Using injected __TEST_BLOB__ for video source');
+      blob = window.__TEST_BLOB__;
+      mimeType = blob.type || 'video/webm';
+    } else {
+      if (!id) {
+        document.body.textContent = 'Missing recording id';
+        return;
       }
-      blob = record.blob;
-      mimeType = record.mimeType;
-      recordName = record.name;
-      recordCreatedAt = record.createdAt;
-      logger.log('Loaded from DB:', blob.size, 'bytes');
-    } catch (e) {
-      logger.error('Failed to load from DB:', e);
-      document.body.textContent = 'Failed to load recording: ' + e.message;
+
+      // Validate recording ID format for security
+      if (!isValidUUID(id)) {
+        logger.error('Invalid recording ID format:', id);
+        document.body.textContent = 'Invalid recording ID format';
+        return;
+      }
+
+      // Load from DB
+      try {
+        const record = await getRecording(id);
+        if (!record || !record.blob) {
+          throw new Error('Recording not found in DB');
+        }
+        blob = record.blob;
+        mimeType = record.mimeType;
+        recordName = record.name;
+        recordCreatedAt = record.createdAt;
+        logger.log('Loaded from DB:', blob.size, 'bytes');
+      } catch (e) {
+        logger.error('Failed to load from DB:', e);
+        document.body.textContent = 'Failed to load recording: ' + e.message;
+        alert('CaptureCast: Failed to load recording — ' + e.message);
+        return;
+      }
+    }
+
+    const filenameInput = document.getElementById('filename-input');
+    const video = document.getElementById('video');
+    const downloadBtn = document.getElementById('btn-download');
+    const actionsContainer = document.querySelector('.actions');
+
+    if (!video) {
+      logger.error('Video element not found');
+      alert('CaptureCast: Preview page is missing the video player. Please try again.');
       return;
     }
+
+    const mtForNaming = mimeType || 'video/webm';
+    let extForNaming = 'webm';
+    if (mtForNaming.includes('mp4')) extForNaming = 'mp4';
+    else if (mtForNaming.includes('webm')) extForNaming = 'webm';
+
+    // Deterministic default name so it stays stable across reloads/clicks.
+    // Prefer createdAt from DB; fall back to "now" only if missing (should be rare).
+    const tsSource = recordCreatedAt ?? Date.now();
+    const tsForName = new Date(tsSource).toISOString().replaceAll(/[:.]/g, '-');
+    const defaultBaseName = `CaptureCast-${tsForName}`;
+
+    // Show current filename base in the input: saved name if present, otherwise default.
+    // (Input holds base name only, without extension)
+    const _currentBaseName = recordName || defaultBaseName;
+    void _currentBaseName;
+    if (filenameInput) {
+      // Set value to the saved custom name if present, otherwise empty (so placeholder shows)
+      filenameInput.value = recordName || '';
+
+      // Select the text only when there's no saved name, to make it easy to overwrite.
+      if (!recordName) {
+        try {
+          filenameInput.focus();
+          filenameInput.select();
+        } catch (e) {
+          logger.warn('Failed to focus/select filename input', e);
+        }
+      }
+    }
+
+    let url;
+    try {
+      url = URL.createObjectURL(blob);
+    } catch (e) {
+      logger.error('Failed to create object URL from blob:', e);
+      alert('CaptureCast: Failed to load video for preview. The recording may be corrupted.');
+      return;
+    }
+    video.src = url;
+    // Start hidden until normalized to avoid visible jump
+    if (video.dataset) video.dataset.stable = 'false';
+
+    // Important: Do NOT revoke the URL immediately; the video element may request ranges during playback.
+    // Revoke on page unload to avoid net::ERR_FILE_NOT_FOUND and truncated playback.
+
+    const startNormalization = () => {
+      fixDurationAndReset(video, { timeoutMs: 2000 });
+    };
+
+    video.onloadedmetadata = () => {
+      logger.log('Video metadata loaded:', {
+        duration: video.duration,
+        mimeType,
+      });
+      startNormalization();
+    };
+    // Reset to start if browser fires ended immediately after load
+    const onEndedReset = () => {
+      try {
+        video.currentTime = 0;
+      } catch (e) {
+        logger.log('Error resetting video (non-fatal):', e);
+      }
+      try {
+        video.pause();
+      } catch (e) {
+        logger.log('Error pausing video (non-fatal):', e);
+      }
+      logger.log('Ended event caught, reset to start');
+    };
+    video.addEventListener('ended', onEndedReset);
+
+    // Extra guard in case metadata was already loaded
+    if (video.readyState >= 1) startNormalization();
+
+    window.addEventListener('beforeunload', () => URL.revokeObjectURL(url));
+    video.onerror = (e) => {
+      logger.error('Video failed to load:', e);
+    };
+
+    if (downloadBtn) {
+      downloadBtn.addEventListener('click', async () => {
+        // Input holds base name only (no extension)
+        const inputBaseName = document.getElementById('filename-input').value.trim();
+
+        // If user cleared the input, fall back to deterministic default.
+        const baseName = inputBaseName || defaultBaseName;
+        const filename = `${baseName}.${extForNaming}`;
+
+        // Persist to DB if:
+        // 1. User provided a non-empty custom name, AND
+        // 2. It's different from the default name, AND
+        // 3. It's different from the current saved name (avoid redundant updates)
+        const shouldPersistName =
+          !!id &&
+          !!inputBaseName &&
+          inputBaseName !== defaultBaseName &&
+          inputBaseName !== recordName;
+
+        if (shouldPersistName) {
+          try {
+            const { updateRecordingName } = await import('./db.js');
+            await updateRecordingName(id, inputBaseName);
+            logger.log('Saved custom name to database:', inputBaseName);
+          } catch (e) {
+            logger.error('Failed to save custom name:', e);
+          }
+        }
+
+        // If user cleared a previously saved custom name, clear it from DB
+        if (!!id && !inputBaseName && recordName) {
+          try {
+            const { updateRecordingName } = await import('./db.js');
+            await updateRecordingName(id, null);
+            logger.log('Cleared custom name from database');
+          } catch (e) {
+            logger.error('Failed to clear custom name:', e);
+          }
+        }
+
+        logger.log('Downloading file:', filename, 'Size:', blob.size, 'bytes');
+        try {
+          saveFile(blob, filename);
+        } catch (e) {
+          logger.error('Failed to save/download file:', e);
+          alert('CaptureCast: Failed to download recording: ' + (e.message || e));
+        }
+      });
+    }
+
+    if (actionsContainer) {
+      const deleteBtn = document.createElement('button');
+      deleteBtn.textContent = 'Delete Recording';
+      deleteBtn.style.background = '#d93025';
+      deleteBtn.style.color = '#fff';
+      deleteBtn.style.border = 'none';
+      deleteBtn.addEventListener('click', async () => {
+        if (!confirm('Delete this recording? This cannot be undone.')) return;
+        try {
+          const { deleteRecording } = await import('./db.js');
+          await deleteRecording(id);
+          document.body.innerHTML = '<h1>Recording Deleted</h1><p>You can close this tab.</p>';
+        } catch (e) {
+          alert('CaptureCast: Failed to delete recording: ' + e.message);
+        }
+      });
+      actionsContainer.appendChild(deleteBtn);
+
+      const viewAllBtn = document.createElement('button');
+      viewAllBtn.textContent = 'View All Recordings';
+      viewAllBtn.style.marginLeft = '10px';
+      viewAllBtn.addEventListener('click', () => {
+        try {
+          chrome.tabs.create({ url: 'recordings.html' });
+        } catch (e) {
+          logger.error('Failed to open recordings page:', e);
+          alert('CaptureCast: Failed to open recordings page.');
+        }
+      });
+      actionsContainer.appendChild(viewAllBtn);
+    }
+  } catch (e) {
+    logger.error('Preview page initialization failed:', e);
+    alert('CaptureCast: Preview page failed to load: ' + (e.message || e));
   }
-
-  const filenameInput = document.getElementById('filename-input');
-
-  const mtForNaming = mimeType || 'video/webm';
-  let extForNaming = 'webm';
-  if (mtForNaming.includes('mp4')) extForNaming = 'mp4';
-  else if (mtForNaming.includes('webm')) extForNaming = 'webm';
-
-  // Deterministic default name so it stays stable across reloads/clicks.
-  // Prefer createdAt from DB; fall back to "now" only if missing (should be rare).
-  const tsSource = recordCreatedAt ?? Date.now();
-  const tsForName = new Date(tsSource).toISOString().replaceAll(/[:.]/g, '-');
-  const defaultBaseName = `CaptureCast-${tsForName}`;
-
-  // Show current filename base in the input: saved name if present, otherwise default.
-  // (Input holds base name only, without extension)
-  const _currentBaseName = recordName || defaultBaseName;
-  void _currentBaseName;
-  if (filenameInput) {
-    // Set value to the saved custom name if present, otherwise empty (so placeholder shows)
-    filenameInput.value = recordName || '';
-
-    // Select the text only when there's no saved name, to make it easy to overwrite.
-    if (!recordName) {
-      try {
-        filenameInput.focus();
-        filenameInput.select();
-      } catch (e) {
-        logger.warn('Failed to focus/select filename input', e);
-      }
-    }
-  }
-
-  const url = URL.createObjectURL(blob);
-  const video = document.getElementById('video');
-  video.src = url;
-  // Start hidden until normalized to avoid visible jump
-  if (video.dataset) video.dataset.stable = 'false';
-
-  // Important: Do NOT revoke the URL immediately; the video element may request ranges during playback.
-  // Revoke on page unload to avoid net::ERR_FILE_NOT_FOUND and truncated playback.
-
-  const startNormalization = () => {
-    fixDurationAndReset(video, { timeoutMs: 2000 });
-  };
-
-  video.onloadedmetadata = () => {
-    logger.log('Video metadata loaded:', {
-      duration: video.duration,
-      mimeType,
-    });
-    startNormalization();
-  };
-  // Reset to start if browser fires ended immediately after load
-  const onEndedReset = () => {
-    try {
-      video.currentTime = 0;
-    } catch (e) {
-      logger.log('Error resetting video (non-fatal):', e);
-    }
-    try {
-      video.pause();
-    } catch (e) {
-      logger.log('Error pausing video (non-fatal):', e);
-    }
-    logger.log('Ended event caught, reset to start');
-  };
-  video.addEventListener('ended', onEndedReset);
-
-  // Extra guard in case metadata was already loaded
-  if (video.readyState >= 1) startNormalization();
-
-  window.addEventListener('beforeunload', () => URL.revokeObjectURL(url));
-  video.onerror = (e) => {
-    logger.error('Video failed to load:', e);
-  };
-
-  const downloadBtn = document.getElementById('btn-download');
-  downloadBtn.addEventListener('click', async () => {
-    // Input holds base name only (no extension)
-    const inputBaseName = document.getElementById('filename-input').value.trim();
-
-    // If user cleared the input, fall back to deterministic default.
-    const baseName = inputBaseName || defaultBaseName;
-    const filename = `${baseName}.${extForNaming}`;
-
-    // Persist to DB if:
-    // 1. User provided a non-empty custom name, AND
-    // 2. It's different from the default name, AND
-    // 3. It's different from the current saved name (avoid redundant updates)
-    const shouldPersistName =
-      !!id && !!inputBaseName && inputBaseName !== defaultBaseName && inputBaseName !== recordName;
-
-    if (shouldPersistName) {
-      try {
-        const { updateRecordingName } = await import('./db.js');
-        await updateRecordingName(id, inputBaseName);
-        logger.log('Saved custom name to database:', inputBaseName);
-      } catch (e) {
-        logger.error('Failed to save custom name:', e);
-      }
-    }
-
-    // If user cleared a previously saved custom name, clear it from DB
-    if (!!id && !inputBaseName && recordName) {
-      try {
-        const { updateRecordingName } = await import('./db.js');
-        await updateRecordingName(id, null);
-        logger.log('Cleared custom name from database');
-      } catch (e) {
-        logger.error('Failed to clear custom name:', e);
-      }
-    }
-
-    logger.log('Downloading file:', filename, 'Size:', blob.size, 'bytes');
-    saveFile(blob, filename);
-  });
-
-  // Add cleanup button
-  const deleteBtn = document.createElement('button');
-  deleteBtn.textContent = 'Delete Recording';
-  deleteBtn.style.background = '#d93025';
-  deleteBtn.style.color = '#fff';
-  deleteBtn.style.border = 'none';
-  deleteBtn.addEventListener('click', async () => {
-    if (!confirm('Delete this recording? This cannot be undone.')) return;
-    try {
-      const { deleteRecording } = await import('./db.js');
-      await deleteRecording(id);
-      document.body.innerHTML = '<h1>Recording Deleted</h1><p>You can close this tab.</p>';
-    } catch (e) {
-      alert('Failed to delete recording: ' + e.message);
-    }
-  });
-  document.querySelector('.actions').appendChild(deleteBtn);
-
-  const viewAllBtn = document.createElement('button');
-  viewAllBtn.textContent = 'View All Recordings';
-  viewAllBtn.style.marginLeft = '10px';
-  viewAllBtn.addEventListener('click', () => {
-    chrome.tabs.create({ url: 'recordings.html' });
-  });
-  document.querySelector('.actions').appendChild(viewAllBtn);
 })();

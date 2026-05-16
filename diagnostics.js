@@ -113,18 +113,28 @@ document.addEventListener('DOMContentLoaded', async () => {
     renderEntries(entries);
 
     document.getElementById('btn-export').addEventListener('click', async () => {
-      const entries = await getAllDiagnostics();
-      downloadJSON({
-        exportedAt: new Date().toISOString(),
-        count: entries.length,
-        entries,
-      });
+      try {
+        const entries = await getAllDiagnostics();
+        downloadJSON({
+          exportedAt: new Date().toISOString(),
+          count: entries.length,
+          entries,
+        });
+      } catch (e) {
+        console.error('[Diagnostics] Export failed:', e);
+        alert('CaptureCast: Failed to export diagnostics: ' + (e.message || e));
+      }
     });
 
     document.getElementById('btn-clear').addEventListener('click', async () => {
       if (confirm('Clear all diagnostic entries? This cannot be undone.')) {
-        await clearDiagnostics();
-        renderEntries([]);
+        try {
+          await clearDiagnostics();
+          renderEntries([]);
+        } catch (e) {
+          console.error('[Diagnostics] Clear failed:', e);
+          alert('CaptureCast: Failed to clear diagnostics: ' + (e.message || e));
+        }
       }
     });
   } catch (err) {

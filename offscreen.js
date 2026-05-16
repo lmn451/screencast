@@ -108,6 +108,20 @@ async function startCapture(mode, recordingId, includeAudio) {
     mediaStream = displayStream;
   } catch (error) {
     logger.error('getDisplayMedia failed:', error);
+    // Notify background about the failure so it can reset state and inform the user
+    const isPermissionDenied = error.name === 'NotAllowedError' || error.name === 'AbortError';
+    const userMessage = isPermissionDenied
+      ? 'Screen capture permission was denied. Please allow access and try again.'
+      : 'Failed to start screen capture: ' + (error.message || error);
+    try {
+      await chrome.runtime.sendMessage({
+        type: 'OFFSCREEN_ERROR',
+        error: userMessage,
+        code: isPermissionDenied ? 'PERMISSION_DENIED' : 'CAPTURE_FAILED',
+      });
+    } catch (sendErr) {
+      logger.error('Failed to send OFFSCREEN_ERROR to background:', sendErr);
+    }
     throw error;
   }
 
@@ -171,7 +185,11 @@ async function startCapture(mode, recordingId, includeAudio) {
   setupAutoStop(mediaStream, mediaRecorder);
 
   mediaRecorder.start(CHUNK_INTERVAL_MS);
-  await chrome.runtime.sendMessage({ type: 'OFFSCREEN_STARTED' });
+  try {
+    await chrome.runtime.sendMessage({ type: 'OFFSCREEN_STARTED' });
+  } catch (e) {
+    logger.warn('Failed to send OFFSCREEN_STARTED message (non-critical):', e);
+  }
 }
 
 function cleanup() {
@@ -214,10 +232,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ ok: false, error: String(e) });
       }
     } else if (message.type === 'OFFSCREEN_STOP') {
-      logger.log('Received STOP message');
-      await stopCapture();
-      logger.log('stopCapture completed');
-      sendResponse({ ok: true });
+      try {
+        logger.log('Received STOP message');
+        await stopCapture();
+        logger.log('stopCapture completed');
+        sendResponse({ ok: true });
+      } catch (e) {
+        logger.error('stopCapture failed:', e);
+        sendResponse({ ok: false, error: 'Failed to stop capture: ' + (e.message || e) });
+      }
     }
   })();
   return true;

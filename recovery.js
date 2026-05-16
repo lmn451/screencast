@@ -154,28 +154,50 @@ async function render() {
       btn.addEventListener('click', async () => {
         const id = btn.dataset.id;
         const action = btn.dataset.action;
-        if (action === 'discard') {
-          if (confirm('Discard this recording? This cannot be undone.')) {
-            // Check if this is an active session (has sessionSnapshot)
-            const snapshot = await chrome.storage.local.get('sessionSnapshot');
-            if (snapshot.sessionSnapshot && snapshot.sessionSnapshot.recordingId === id) {
-              // Active session: clear via background message
-              await chrome.runtime.sendMessage({ type: 'RECOVERY_DISCARD', id });
-              // Also clear from storage
-              await chrome.storage.local.remove('sessionSnapshot');
-            } else {
-              await deleteRecording(id);
+        try {
+          if (action === 'discard') {
+            if (confirm('Discard this recording? This cannot be undone.')) {
+              // Check if this is an active session (has sessionSnapshot)
+              try {
+                const snapshot = await chrome.storage.local.get('sessionSnapshot');
+                if (snapshot.sessionSnapshot && snapshot.sessionSnapshot.recordingId === id) {
+                  // Active session: clear via background message
+                  await chrome.runtime.sendMessage({ type: 'RECOVERY_DISCARD', id });
+                  // Also clear from storage
+                  await chrome.storage.local.remove('sessionSnapshot');
+                } else {
+                  await deleteRecording(id);
+                }
+              } catch (storageErr) {
+                // Fall back to direct delete if storage/message fails
+                console.error('[Recovery] Storage/message error during discard:', storageErr);
+                try {
+                  await deleteRecording(id);
+                } catch (deleteErr) {
+                  alert(
+                    'CaptureCast: Failed to discard recording: ' + (deleteErr.message || deleteErr)
+                  );
+                  return;
+                }
+              }
+              render();
             }
-            render();
+          } else if (action === 'retry') {
+            // Send resume message for active sessions
+            try {
+              const snapshot = await chrome.storage.local.get('sessionSnapshot');
+              if (snapshot.sessionSnapshot && snapshot.sessionSnapshot.recordingId === id) {
+                await chrome.runtime.sendMessage({ type: 'RECOVERY_RESUME', id });
+              }
+            } catch (e) {
+              console.warn('[Recovery] Failed to send resume message (non-critical):', e);
+            }
+            // Navigate to preview with this ID
+            window.location.href = `preview.html?id=${encodeURIComponent(id)}`;
           }
-        } else if (action === 'retry') {
-          // Send resume message for active sessions
-          const snapshot = await chrome.storage.local.get('sessionSnapshot');
-          if (snapshot.sessionSnapshot && snapshot.sessionSnapshot.recordingId === id) {
-            await chrome.runtime.sendMessage({ type: 'RECOVERY_RESUME', id });
-          }
-          // Navigate to preview with this ID
-          window.location.href = `preview.html?id=${encodeURIComponent(id)}`;
+        } catch (e) {
+          console.error('[Recovery] Button action failed:', e);
+          alert('CaptureCast: Operation failed: ' + (e.message || e));
         }
       });
     });
