@@ -24,10 +24,10 @@
    * - activeTab: Needed for injecting overlay into the user's active tab during recording
    * - scripting: Required for chrome.scripting.executeScript to inject overlay.js
    * - offscreen: Required for the offscreen document API used for headless recording
-   * - tabs: NOT USED - removed in Phase 6 audit (no chrome.tabs.* calls in code)
+   * - tabCapture: Required for capturing specific tabs with chrome.tabCapture API
    * - notifications: Optional - requested only when needed for user alerts
    */
-  "permissions": ["activeTab", "scripting", "offscreen"],
+  "permissions": ["activeTab", "scripting", "offscreen", "tabCapture"],
   "optional_permissions": ["notifications"],
   "background": {
     "service_worker": "background.js",
