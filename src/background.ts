@@ -1,19 +1,18 @@
 /**
- * CaptureCast Background Service Worker
- * 
- * Refactored with XState v5 state machine
- * Phase: Implementation
- * 
- * This file provides the integration layer between Chrome APIs
- * and the XState recording machine.
+ * CaptureCast Background Service Worker Entry Point
+ * XState v5 with Recording Service
+ *
+ * Bundled by esbuild from this TypeScript source.
+ * All Chrome API side effects live in RecordingService.
  */
 
-import { createRecordingService, getRecordingService } from './src/services/recordingService';
-import { cleanupOldRecordings } from './db.js';
-import { createLogger } from './logger.js';
-import { STOP_TIMEOUT_MS, AUTO_DELETE_AGE_MS } from './constants.js';
-import { hasChunks, markRecordingRecoverable } from './chunkStorage.js';
-import { SESSION_SNAPSHOT_KEY } from './src/machines/types';
+import { createRecordingService } from './services/recordingService.js';
+import { cleanupOldRecordings } from '../db.js';
+import { createLogger } from '../logger.js';
+import { STOP_TIMEOUT_MS, AUTO_DELETE_AGE_MS } from '../constants.js';
+import { hasChunks, markRecordingRecoverable } from '../chunkStorage.js';
+import { SESSION_SNAPSHOT_KEY } from './machines/types.js';
+import { validateMessageStrict, schemas } from './messages.js';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CONSTANTS & GLOBALS
@@ -21,7 +20,10 @@ import { SESSION_SNAPSHOT_KEY } from './src/machines/types';
 
 const logger = createLogger('Background');
 
-let service: ReturnType<typeof createRecordingService> | null = null;
+// Rate limiting
+const rateLimitMap = new Map<string, { count: number; windowStart: number }>();
+const RATE_LIMIT_WINDOW_MS = 1000;
+const RATE_LIMIT_MAX = 50;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CHROME API WRAPPER
@@ -39,13 +41,14 @@ const chromeAPI = {
     remove: (tabId: number) => chrome.tabs.remove(tabId),
     update: (tabId: number, options: { active: boolean }) => chrome.tabs.update(tabId, options),
     get: (tabId: number) => chrome.tabs.get(tabId),
+    sendMessage: (tabId: number, message: Record<string, unknown>) => chrome.tabs.sendMessage(tabId, message),
   },
   scripting: {
-    executeScript: (options: { target: { tabId: number }; files: string[] }) => 
+    executeScript: (options: { target: { tabId: number }; files: string[] }) =>
       chrome.scripting.executeScript(options),
   },
   offscreen: {
-    createDocument: (options: { url: string; reasons: string[]; justification: string }) => 
+    createDocument: (options: { url: string; reasons: string[]; justification: string }) =>
       chrome.offscreen.createDocument(options),
     closeDocument: () => chrome.offscreen.closeDocument(),
     hasDocument: () => chrome.offscreen.hasDocument(),
@@ -59,21 +62,92 @@ const chromeAPI = {
     sendMessage: (message: Record<string, unknown>) => chrome.runtime.sendMessage(message),
     id: chrome.runtime.id,
   },
+  windows: {
+    update: (windowId: number, options: { focused: boolean }) => chrome.windows.update(windowId, options),
+  },
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// INITIALIZATION
+// SERVICE INITIALIZATION
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/**
- * Initialize the recording service
- */
-function initService() {
-  if (!service) {
-    service = createRecordingService(chromeAPI);
-    logger.log('Recording service initialized');
+const service = createRecordingService(chromeAPI);
+logger.log('Recording service initialized');
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// RATE LIMITING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function checkRateLimit(senderId: string): boolean {
+  const now = Date.now();
+  const entry = rateLimitMap.get(senderId);
+
+  if (!entry || now - entry.windowStart > RATE_LIMIT_WINDOW_MS) {
+    rateLimitMap.set(senderId, { count: 1, windowStart: now });
+    return true;
   }
-  return service;
+
+  entry.count++;
+  if (entry.count > RATE_LIMIT_MAX) {
+    logger.warn('Rate limit exceeded for sender:', senderId, { count: entry.count });
+    return false;
+  }
+  return true;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// UUID VALIDATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+function isValidUUID(str: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SESSION RECONCILIATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function reconcileUnfinishedSessions(): Promise<void> {
+  try {
+    const result = await chrome.storage.local.get(SESSION_SNAPSHOT_KEY);
+    const snapshot = result[SESSION_SNAPSHOT_KEY];
+    if (!snapshot) return;
+
+    logger.log('Found session snapshot, checking age…', { snapshot });
+    const age = Date.now() - snapshot.lastActivityAt;
+
+    if (age > STOP_TIMEOUT_MS) {
+      // Stale session — clean up
+      logger.warn('Found stale recording session, cleaning up', { age, snapshot });
+      await chrome.storage.local.remove(SESSION_SNAPSHOT_KEY);
+
+      // Check for partial recordings
+      if (snapshot.recordingId) {
+        const hasChunksResult = await hasChunks(snapshot.recordingId);
+        if (hasChunksResult) {
+          await markRecordingRecoverable(snapshot.recordingId);
+          logger.log('Marked recording as recoverable', { recordingId: snapshot.recordingId });
+        }
+      }
+    } else {
+      // Active session — show recovery prompt
+      logger.log('Found active session, showing recovery prompt', { age, status: snapshot.status });
+      if (snapshot.status === 'recording' || snapshot.status === 'stopping') {
+        await showRecoveryPrompt(snapshot);
+      }
+    }
+  } catch (e) {
+    logger.error('Session reconciliation failed:', e);
+  }
+}
+
+async function showRecoveryPrompt(snapshot: { recordingId: string; status: string }): Promise<void> {
+  try {
+    await chrome.storage.local.set({ [SESSION_SNAPSHOT_KEY]: snapshot });
+    await chrome.tabs.create({ url: chrome.runtime.getURL('recovery.html') });
+  } catch (e) {
+    logger.error('Failed to show recovery prompt:', e);
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -93,11 +167,38 @@ globalThis.addEventListener('error', (event) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  const svc = initService();
+  // Validate sender
+  if (sender.id !== chrome.runtime.id) {
+    logger.warn('Ignoring message from unauthorized sender:', sender.id);
+    sendResponse({ ok: false, error: 'Unauthorized sender' });
+    return;
+  }
+
+  // Phase 6: Strict validation
+  const schema = schemas[message?.type as keyof typeof schemas];
+  if (schema) {
+    const { valid, errors } = validateMessageStrict(message, schema);
+    if (!valid) {
+      logger.warn('Message validation failed:', errors, message.type);
+      sendResponse({ ok: false, error: `Validation failed: ${errors.join(', ')}` });
+      return;
+    }
+  } else {
+    logger.warn('Unknown message type rejected:', message.type);
+    sendResponse({ ok: false, error: 'Unknown message type' });
+    return;
+  }
+
+  // Rate limiting
+  const senderId = sender.id || 'unknown';
+  if (!checkRateLimit(senderId)) {
+    sendResponse({ ok: false, error: 'Rate limited' });
+    return;
+  }
 
   (async () => {
     try {
-      const result = await svc.handleMessage(message, sender);
+      const result = await service.handleMessage(message as Record<string, unknown>, sender);
       if (result) {
         sendResponse(result);
       }
@@ -107,62 +208,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
   })();
 
-  return true; // Keep message channel open for async response
+  return true; // Keep channel open for async response
 });
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// SESSION RECONCILIATION
-// ═══════════════════════════════════════════════════════════════════════════════
-
-async function reconcileUnfinishedSessions() {
-  try {
-    const result = await chrome.storage.local.get(SESSION_SNAPSHOT_KEY);
-    const snapshot = result[SESSION_SNAPSHOT_KEY];
-    if (!snapshot) return;
-
-    logger.log('Found session snapshot, checking age…', { snapshot });
-    const age = Date.now() - snapshot.lastActivityAt;
-
-    if (age > STOP_TIMEOUT_MS) {
-      // Stale session — clean up
-      logger.warn('Found stale recording session, cleaning up', { age, snapshot });
-      await chrome.storage.local.remove(SESSION_SNAPSHOT_KEY);
-
-      // Check for partial recordings
-      if (snapshot.recordingId) {
-        const hasChunksResult = await hasChunks(snapshot.recordingId);
-        if (hasChunksResult) {
-          await markRecordingRecoverable(snapshot.recordingId);
-          logger.log('Marked recording as recoverable', {
-            recordingId: snapshot.recordingId,
-          });
-        }
-      }
-    } else {
-      // Active session — show recovery prompt
-      logger.log('Found active session, showing recovery prompt', {
-        age,
-        status: snapshot.status,
-      });
-      if (snapshot.status === 'recording' || snapshot.status === 'stopping') {
-        await showRecoveryPrompt(snapshot);
-      }
-    }
-  } catch (e) {
-    logger.error('Session reconciliation failed:', e);
-  }
-}
-
-async function showRecoveryPrompt(snapshot: {
-  recordingId: string;
-  status: string;
-}) {
-  try {
-    await chrome.tabs.create({ url: chrome.runtime.getURL('recovery.html') });
-  } catch (e) {
-    logger.error('Failed to show recovery prompt:', e);
-  }
-}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // LIFECYCLE HANDLERS
@@ -190,7 +237,6 @@ chrome.runtime.onStartup.addListener(async () => {
 });
 
 // Periodic reconciliation (every 5 minutes while SW is active)
-// This ensures stale sessions are cleaned up even if startup was missed
 setInterval(async () => {
   await reconcileUnfinishedSessions();
 }, 5 * 60 * 1000);

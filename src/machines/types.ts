@@ -58,7 +58,7 @@ export type RecordingEvent =
   | { type: 'RECORDER_STARTED' }
   | { type: 'OFFSCREEN_DATA'; recordingId: string; mimeType: string }
   | { type: 'RECORDER_DATA'; recordingId: string; mimeType: string }
-  | { type: 'OFFSCREEN_ERROR'; error: string }
+  | { type: 'OFFSCREEN_ERROR'; error: string; code?: string }
   | { type: 'RECORDER_ERROR'; error: string }
   | { type: 'CONFIRMATION_TIMEOUT' }
   | { type: 'SAVE_TIMEOUT' }
@@ -73,6 +73,8 @@ export type RecordingEvent =
   | { type: 'RECOVERY_RESUME'; recordingId: string }
   | { type: 'RECOVERY_DISCARD'; recordingId: string }
   | { type: 'TAB_CLOSING'; tabId: number }
+  | { type: 'PREVIEW_READY'; recordingId?: string }
+  | { type: 'CHUNK_FAILED'; chunkIndex: number }
   | { type: 'UPDATE_STATE'; status: RecordingStatus };
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -141,8 +143,7 @@ export const STORAGE_KEYS = {
   SESSION_SNAPSHOT: 'sessionSnapshot',
 } as const;
 
-// Alias for backwards compatibility with background-xstate.js
-// TODO: Remove this alias once background-xstate.js is updated to use STORAGE_KEYS.SESSION_SNAPSHOT
+/** Alias for backwards compatibility with background-xstate.js */
 export const SESSION_SNAPSHOT_KEY = STORAGE_KEYS.SESSION_SNAPSHOT;
 
 // ═══════════════════════════════════════════════════════════════════════════════

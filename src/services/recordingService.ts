@@ -1,26 +1,22 @@
 /**
  * Recording Service
- * 
+ *
  * Bridges XState machine with Chrome APIs.
  * This service handles all Chrome-specific operations and
  * translates them to machine events.
- * 
- * Phase: Implementation
+ *
+ * Key principle: The XState machine is PURE (state + assign only).
+ * All Chrome API side effects live in this service.
  */
 
-import {
-  createRecordingManager,
-  getRecordingManager,
-  type RecordingEvent,
-  type RecordingContext,
-} from '../machines/recordingMachine';
-import { setChromeApi } from '../machines/recordingMachine';
-import { validateMessageStrict, schemas } from '../messages';
-import { checkStorageQuota } from './storage-utils';
-import { TIMEOUTS } from '../machines/types';
+import { createActor } from 'xstate';
+import { recordingMachine, type RecordingContext } from '../machines/recordingMachine.js';
+import { validateMessageStrict, schemas, MSG_RECOVERY_RESUME, MSG_RECOVERY_DISCARD } from '../messages.js';
+import { checkStorageQuota } from '../../storage-utils.js';
+import { TIMEOUTS, STORAGE_KEYS, isValidUUID } from '../machines/types.js';
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// CHROME API WRAPPER
+// CHROME API TYPES
 // ═══════════════════════════════════════════════════════════════════════════════
 
 interface ChromeAPI {
@@ -35,6 +31,7 @@ interface ChromeAPI {
     remove: (tabId: number) => Promise<void>;
     update: (tabId: number, options: { active: boolean }) => Promise<void>;
     get: (tabId: number) => Promise<{ windowId: number }>;
+    sendMessage: (tabId: number, message: Record<string, unknown>) => Promise<void>;
   };
   scripting: {
     executeScript: (options: { target: { tabId: number }; files: string[] }) => Promise<void>;
@@ -52,6 +49,9 @@ interface ChromeAPI {
     getURL: (path: string) => string;
     sendMessage: (message: Record<string, unknown>) => Promise<unknown>;
     id: string;
+  };
+  windows: {
+    update: (windowId: number, options: { focused: boolean }) => Promise<void>;
   };
 }
 
@@ -74,18 +74,10 @@ function checkRateLimit(senderId: string): boolean {
 
   entry.count++;
   if (entry.count > RATE_LIMIT_MAX) {
-    console.warn(`[RateLimit] Exceeded for sender: ${senderId}`);
+    console.warn(`[RecordingService] Rate limit exceeded for sender: ${senderId}`);
     return false;
   }
   return true;
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// UUID VALIDATION
-// ═══════════════════════════════════════════════════════════════════════════════
-
-function isValidUUID(str: string): boolean {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -94,213 +86,107 @@ function isValidUUID(str: string): boolean {
 
 export class RecordingService {
   private chrome: ChromeAPI;
-  private manager: ReturnType<typeof createRecordingManager>;
+  private actor: ReturnType<typeof createActor<typeof recordingMachine>>;
   private confirmationTimeout: ReturnType<typeof setTimeout> | null = null;
   private saveTimeout: ReturnType<typeof setTimeout> | null = null;
   private checkpointInterval: ReturnType<typeof setInterval> | null = null;
+  private overlayTabId: number | null = null;
+  private recorderTabId: number | null = null;
 
   constructor(chrome: ChromeAPI) {
     this.chrome = chrome;
-    
-    // Initialize XState machine with Chrome API
-    setChromeApi(chrome);
-    this.manager = createRecordingManager();
-  }
 
-  // ═══════════════════════════════════════════════════════════════════════════
-  // CORE OPERATIONS
-  // ═══════════════════════════════════════════════════════════════════════════
+    // Create XState actor
+    this.actor = createActor(recordingMachine);
 
-  /**
-   * Start a new recording
-   */
-  async startRecording(
-    mode: 'tab' | 'window' | 'screen',
-    includeMic: boolean,
-    includeSystemAudio: boolean
-  ): Promise<{ ok: boolean; error?: string; overlayInjected?: boolean }> {
-    // Check storage quota
-    const quotaCheck = await checkStorageQuota();
-    if (!quotaCheck.ok) {
-      return { ok: false, error: quotaCheck.error };
-    }
-
-    // Send START event to machine
-    this.manager.send({
-      type: 'START',
-      mode,
-      mic: includeMic,
-      systemAudio: includeSystemAudio,
+    // Subscribe to state changes for side effects (badge, persistence, overlay)
+    this.actor.subscribe((snapshot) => {
+      this.onStateChange(snapshot);
     });
 
-    const context = this.manager.getSnapshot().context;
-
-    // Inject overlay on active tab
-    let overlayInjected = false;
-    const [activeTab] = await this.chrome.tabs.query({ active: true, currentWindow: true });
-    if (activeTab?.id) {
-      overlayInjected = await this.injectOverlay(activeTab.id);
-      this.manager.send({
-        type: 'UPDATE_STATE',
-        status: 'recording',
-      });
-    }
-
-    // Set confirmation timeout
-    this.confirmationTimeout = setTimeout(() => {
-      this.manager.send({ type: 'CONFIRMATION_TIMEOUT' });
-    }, TIMEOUTS.CONFIRMATION);
-
-    // Start checkpoint interval
-    this.startCheckpointTimer();
-
-    return { ok: true, overlayInjected };
-  }
-
-  /**
-   * Stop the current recording
-   */
-  async stopRecording(): Promise<{ ok: boolean; error?: string }> {
-    const state = this.manager.getSnapshot().value;
-    
-    if (state !== 'recording') {
-      return { ok: false, error: `Cannot stop: invalid state ${state}` };
-    }
-
-    // Send STOP event
-    this.manager.send({ type: 'STOP' });
-
-    // Set save timeout
-    this.saveTimeout = setTimeout(() => {
-      this.manager.send({ type: 'SAVE_TIMEOUT' });
-    }, TIMEOUTS.SAVE);
-
-    // Send stop message to offscreen/recorder
-    const context = this.manager.getSnapshot().context;
-    if (context.strategy === 'offscreen') {
-      await this.chrome.runtime.sendMessage({ type: 'OFFSCREEN_STOP' });
-    } else {
-      await this.chrome.runtime.sendMessage({ type: 'RECORDER_STOP' });
-    }
-
-    return { ok: true };
-  }
-
-  /**
-   * Handle message from offscreen/recorder confirming start
-   */
-  async handleOffscreenStarted(): Promise<void> {
-    if (this.confirmationTimeout) {
-      clearTimeout(this.confirmationTimeout);
-      this.confirmationTimeout = null;
-    }
-    this.manager.send({ type: 'OFFSCREEN_STARTED' });
-  }
-
-  /**
-   * Handle message from recorder tab confirming start
-   */
-  async handleRecorderStarted(): Promise<void> {
-    if (this.confirmationTimeout) {
-      clearTimeout(this.confirmationTimeout);
-      this.confirmationTimeout = null;
-    }
-    this.manager.send({ type: 'RECORDER_STARTED' });
-  }
-
-  /**
-   * Handle recording data from offscreen
-   */
-  async handleOffscreenData(recordingId: string, mimeType: string): Promise<void> {
-    if (!isValidUUID(recordingId)) {
-      console.error('[RecordingService] Invalid recording ID:', recordingId);
-      return;
-    }
-
-    if (this.saveTimeout) {
-      clearTimeout(this.saveTimeout);
-      this.saveTimeout = null;
-    }
-
-    this.manager.send({ type: 'OFFSCREEN_DATA', recordingId, mimeType });
-
-    // Open preview page
-    const url = this.chrome.runtime.getURL(`preview.html?id=${encodeURIComponent(recordingId)}`);
-    await this.chrome.tabs.create({ url });
-
-    // Clean up
-    this.cleanup();
-  }
-
-  /**
-   * Handle recording data from recorder tab
-   */
-  async handleRecorderData(recordingId: string, mimeType: string): Promise<void> {
-    if (!isValidUUID(recordingId)) {
-      console.error('[RecordingService] Invalid recording ID:', recordingId);
-      return;
-    }
-
-    if (this.saveTimeout) {
-      clearTimeout(this.saveTimeout);
-      this.saveTimeout = null;
-    }
-
-    this.manager.send({ type: 'RECORDER_DATA', recordingId, mimeType });
-
-    // Open preview page
-    const url = this.chrome.runtime.getURL(`preview.html?id=${encodeURIComponent(recordingId)}`);
-    await this.chrome.tabs.create({ url });
-
-    // Clean up
-    this.cleanup();
-  }
-
-  /**
-   * Handle error from offscreen
-   */
-  handleOffscreenError(error: string): void {
-    this.manager.send({ type: 'OFFSCREEN_ERROR', error });
-    this.cleanup();
-  }
-
-  /**
-   * Handle error from recorder
-   */
-  handleRecorderError(error: string): void {
-    this.manager.send({ type: 'RECORDER_ERROR', error });
-    this.cleanup();
-  }
-
-  /**
-   * Get current state for popup/UI
-   */
-  getState() {
-    const snapshot = this.manager.getSnapshot();
-    const context = snapshot.context;
-    
-    return {
-      status: snapshot.value,
-      recordingId: context.recordingId,
-      correlationId: context.correlationId,
-      startedAt: context.startedAt,
-      lastActivityAt: context.lastActivityAt,
-      options: { ...context.options },
-      strategy: context.strategy,
-      recording: context.strategy !== null && context.strategy !== undefined,
-    };
-  }
-
-  /**
-   * Reset to idle state
-   */
-  reset(): void {
-    this.cleanup();
-    this.manager.send({ type: 'RESET' });
+    this.actor.start();
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // HELPER METHODS
+  // STATE CHANGE HANDLER (Chrome API side effects)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  private async onStateChange(snapshot: { value: string; context: RecordingContext }): Promise<void> {
+    const state = snapshot.value as string;
+    const context = snapshot.context;
+
+    // Badge management
+    await this.updateBadge(state);
+
+    // Session persistence based on state
+    if (state === 'recording' || state === 'stopping') {
+      await this.persistSessionSnapshot(context);
+    } else if (state === 'idle' || state === 'saved') {
+      await this.clearSessionSnapshot();
+    }
+
+    // Overlay injection/removal on state transitions
+    if (state === 'recording' && context.overlayTabId && !context.overlayInjected) {
+      await this.injectOverlay(context.overlayTabId);
+    } else if (state === 'idle' && this.overlayTabId) {
+      await this.removeOverlay(this.overlayTabId);
+      this.overlayTabId = null;
+    }
+
+    // Offscreen document lifecycle
+    if (state === 'idle') {
+      await this.closeOffscreenDocumentIfIdle();
+    }
+  }
+
+  private async updateBadge(state: string): Promise<void> {
+    try {
+      let color = '#00000000';
+      let text = '';
+
+      if (state === 'recording') {
+        color = '#d93025';
+        text = 'REC';
+      } else if (state === 'stopping') {
+        color = '#f9ab00';
+        text = 'SAVE';
+      }
+
+      await this.chrome.action.setBadgeBackgroundColor({ color });
+      await this.chrome.action.setBadgeText({ text });
+    } catch (e) {
+      // Non-critical
+    }
+  }
+
+  private async persistSessionSnapshot(context: RecordingContext): Promise<void> {
+    if (!context.recordingId) return;
+    try {
+      const snapshot = {
+        recordingId: context.recordingId,
+        status: this.actor.getSnapshot().value,
+        startedAt: context.startedAt,
+        lastActivityAt: Date.now(),
+        options: { ...context.options },
+        strategy: context.strategy,
+        correlationId: context.correlationId,
+      };
+      await this.chrome.storage.set({ [STORAGE_KEYS.SESSION_SNAPSHOT]: snapshot });
+    } catch (e) {
+      console.warn('[RecordingService] Failed to persist session snapshot:', e);
+    }
+  }
+
+  private async clearSessionSnapshot(): Promise<void> {
+    try {
+      await this.chrome.storage.remove(STORAGE_KEYS.SESSION_SNAPSHOT);
+    } catch (e) {
+      console.warn('[RecordingService] Failed to clear session snapshot:', e);
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // OVERLAY MANAGEMENT
   // ═══════════════════════════════════════════════════════════════════════════
 
   private async injectOverlay(tabId: number): Promise<boolean> {
@@ -318,32 +204,73 @@ export class RecordingService {
 
   private async removeOverlay(tabId: number): Promise<void> {
     try {
-      // This would need a message to the overlay
-      // For now it's handled via OVERLAY_REMOVE message
+      await this.chrome.scripting.executeScript({
+        target: { tabId },
+        func: () => {
+          const el = document.getElementById('cc-overlay');
+          if (el) el.remove();
+        },
+      });
     } catch (e) {
       console.warn('[RecordingService] Overlay removal failed:', e);
     }
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // OFFSCREEN DOCUMENT LIFECYCLE
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  private async ensureOffscreenDocument(mode: string, includeSystemAudio: boolean, recordingId: string, targetTabId: number | null): Promise<void> {
+    try {
+      const existing = await this.chrome.offscreen.hasDocument();
+      if (existing) return;
+
+      await this.chrome.offscreen.createDocument({
+        url: this.chrome.runtime.getURL('offscreen.html'),
+        reasons: ['USER_MEDIA', 'BLOBS'],
+        justification: 'Record a screen capture stream using MediaRecorder in an offscreen document.',
+      });
+
+      // Send start message to offscreen
+      await this.chrome.runtime.sendMessage({
+        type: 'OFFSCREEN_START',
+        mode,
+        includeAudio: includeSystemAudio,
+        recordingId,
+        targetTabId,
+      });
+    } catch (e) {
+      console.error('[RecordingService] Failed to create offscreen document:', e);
+      throw e;
+    }
+  }
+
+  private async closeOffscreenDocumentIfIdle(): Promise<void> {
+    try {
+      const existing = await this.chrome.offscreen.hasDocument();
+      if (existing) {
+        const state = this.actor.getSnapshot().value;
+        if (state === 'idle') {
+          await this.chrome.offscreen.closeDocument();
+        }
+      }
+    } catch (e) {
+      console.warn('[RecordingService] Failed to close offscreen document:', e);
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // TIMER MANAGEMENT
+  // ═══════════════════════════════════════════════════════════════════════════
+
   private startCheckpointTimer(): void {
     this.stopCheckpointTimer();
     this.checkpointInterval = setInterval(async () => {
-      const state = this.manager.getSnapshot().value;
+      const state = this.actor.getSnapshot().value;
       if (state === 'recording' || state === 'stopping') {
-        const context = this.manager.getSnapshot().context;
+        const context = this.actor.getSnapshot().context;
         if (context.recordingId) {
-          // Persist checkpoint
-          await this.chrome.storage.set({
-            sessionSnapshot: {
-              recordingId: context.recordingId,
-              status: state,
-              startedAt: context.startedAt,
-              lastActivityAt: Date.now(),
-              options: context.options,
-              strategy: context.strategy,
-              correlationId: context.correlationId,
-            },
-          });
+          await this.persistSessionSnapshot(context);
         }
       }
     }, TIMEOUTS.CHECKPOINT);
@@ -356,8 +283,7 @@ export class RecordingService {
     }
   }
 
-  private cleanup(): void {
-    // Clear all timers
+  private clearTimers(): void {
     if (this.confirmationTimeout) {
       clearTimeout(this.confirmationTimeout);
       this.confirmationTimeout = null;
@@ -367,29 +293,249 @@ export class RecordingService {
       this.saveTimeout = null;
     }
     this.stopCheckpointTimer();
+  }
 
-    // Clear overlay
-    const context = this.manager.getSnapshot().context;
+  // ═══════════════════════════════════════════════════════════════════════════
+  // CORE OPERATIONS
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  async startRecording(
+    mode: 'tab' | 'window' | 'screen',
+    includeMic: boolean,
+    includeSystemAudio: boolean
+  ): Promise<{ ok: boolean; error?: string; overlayInjected?: boolean }> {
+    // Check storage quota
+    const quotaCheck = await checkStorageQuota();
+    if (!quotaCheck.ok) {
+      return { ok: false, error: quotaCheck.error };
+    }
+
+    // Get active tab for overlay
+    const [activeTab] = await this.chrome.tabs.query({ active: true, currentWindow: true });
+    this.overlayTabId = activeTab?.id ?? null;
+
+    // Send START event to machine
+    this.actor.send({
+      type: 'START',
+      mode,
+      mic: includeMic,
+      systemAudio: includeSystemAudio,
+    });
+
+    const context = this.actor.getSnapshot().context;
+
+    // Inject overlay
+    let overlayInjected = false;
+    if (this.overlayTabId) {
+      overlayInjected = await this.injectOverlay(this.overlayTabId);
+    }
+
+    // Set confirmation timeout
+    this.confirmationTimeout = setTimeout(() => {
+      this.actor.send({ type: 'CONFIRMATION_TIMEOUT' });
+    }, TIMEOUTS.CONFIRMATION);
+
+    // Start checkpoint timer
+    this.startCheckpointTimer();
+
+    return { ok: true, overlayInjected };
+  }
+
+  async stopRecording(): Promise<{ ok: boolean; error?: string }> {
+    const state = this.actor.getSnapshot().value;
+
+    if (state !== 'recording') {
+      return { ok: false, error: `Cannot stop: invalid state ${state}` };
+    }
+
+    // Send STOP event
+    this.actor.send({ type: 'STOP' });
+
+    // Set save timeout
+    this.saveTimeout = setTimeout(() => {
+      this.actor.send({ type: 'SAVE_TIMEOUT' });
+    }, TIMEOUTS.SAVE);
+
+    // Send stop message to offscreen/recorder
+    const context = this.actor.getSnapshot().context;
+    if (context.strategy === 'offscreen') {
+      await this.chrome.runtime.sendMessage({ type: 'OFFSCREEN_STOP' });
+    } else {
+      await this.chrome.runtime.sendMessage({ type: 'RECORDER_STOP' });
+    }
+
+    // Best-effort overlay removal
+    if (this.overlayTabId) {
+      try {
+        await this.chrome.tabs.sendMessage(this.overlayTabId, { type: 'OVERLAY_REMOVE' });
+      } catch (e) {
+        // Non-critical
+      }
+      await this.removeOverlay(this.overlayTabId);
+    }
+
+    return { ok: true };
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // EVENT HANDLERS (called by message handler)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  handleOffscreenStarted(): void {
+    if (this.confirmationTimeout) {
+      clearTimeout(this.confirmationTimeout);
+      this.confirmationTimeout = null;
+    }
+    this.actor.send({ type: 'OFFSCREEN_STARTED' });
+  }
+
+  handleRecorderStarted(): void {
+    if (this.confirmationTimeout) {
+      clearTimeout(this.confirmationTimeout);
+      this.confirmationTimeout = null;
+    }
+    this.actor.send({ type: 'RECORDER_STARTED' });
+
+    // Focus original tab
+    const context = this.actor.getSnapshot().context;
     if (context.overlayTabId) {
-      this.removeOverlay(context.overlayTabId);
+      this.focusTab(context.overlayTabId);
+    }
+  }
+
+  async handleOffscreenData(recordingId: string, mimeType: string): Promise<void> {
+    if (!isValidUUID(recordingId)) {
+      console.error('[RecordingService] Invalid recording ID:', recordingId);
+      return;
+    }
+
+    this.clearTimers();
+
+    this.actor.send({ type: 'OFFSCREEN_DATA', recordingId, mimeType });
+
+    // Open preview page
+    const url = this.chrome.runtime.getURL(`preview.html?id=${encodeURIComponent(recordingId)}`);
+    await this.chrome.tabs.create({ url });
+
+    // Clean up
+    await this.cleanup();
+  }
+
+  async handleRecorderData(recordingId: string, mimeType: string): Promise<void> {
+    if (!isValidUUID(recordingId)) {
+      console.error('[RecordingService] Invalid recording ID:', recordingId);
+      return;
+    }
+
+    this.clearTimers();
+
+    this.actor.send({ type: 'RECORDER_DATA', recordingId, mimeType });
+
+    // Open preview page
+    const url = this.chrome.runtime.getURL(`preview.html?id=${encodeURIComponent(recordingId)}`);
+    await this.chrome.tabs.create({ url });
+
+    // Clean up
+    await this.cleanup();
+  }
+
+  handleOffscreenError(error: string, code?: string): void {
+    this.clearTimers();
+    this.actor.send({ type: 'OFFSCREEN_ERROR', error, code: code || undefined });
+  }
+
+  handleRecorderError(error: string): void {
+    this.clearTimers();
+    this.actor.send({ type: 'RECORDER_ERROR', error });
+  }
+
+  handleTabClosing(tabId: number): void {
+    this.actor.send({ type: 'TAB_CLOSING', tabId });
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // RECOVERY HANDLERS
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  async handleRecoveryDiscard(recordingId: string): Promise<void> {
+    this.clearTimers();
+    this.actor.send({ type: 'RECOVERY_DISCARD', recordingId });
+    await this.cleanup();
+  }
+
+  async handleRecoveryResume(recordingId: string): Promise<void> {
+    this.actor.send({ type: 'RECOVERY_RESUME', recordingId });
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // STATE QUERY
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  getState() {
+    const snapshot = this.actor.getSnapshot();
+    const context = snapshot.context;
+
+    return {
+      status: snapshot.value,
+      recordingId: context.recordingId,
+      correlationId: context.correlationId,
+      startedAt: context.startedAt,
+      lastActivityAt: context.lastActivityAt,
+      options: { ...context.options },
+      strategy: context.strategy,
+      recording: context.strategy !== null && context.strategy !== undefined,
+    };
+  }
+
+  reset(): void {
+    this.clearTimers();
+    this.actor.send({ type: 'RESET' });
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // HELPER METHODS
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  private async focusTab(tabId: number): Promise<void> {
+    try {
+      const tab = await this.chrome.tabs.get(tabId);
+      if (tab?.windowId) {
+        await this.chrome.windows.update(tab.windowId, { focused: true });
+      }
+      await this.chrome.tabs.update(tabId, { active: true });
+    } catch (e) {
+      console.warn('[RecordingService] Tab focus failed:', e);
+    }
+  }
+
+  private async cleanup(): Promise<void> {
+    // Remove overlay
+    if (this.overlayTabId) {
+      await this.removeOverlay(this.overlayTabId);
+      this.overlayTabId = null;
     }
 
     // Close recorder tab
-    if (context.recorderTabId) {
-      this.chrome.tabs.remove(context.recorderTabId).catch(() => {});
+    if (this.recorderTabId) {
+      await this.chrome.tabs.remove(this.recorderTabId);
+      this.recorderTabId = null;
     }
 
     // Close offscreen document
-    this.chrome.offscreen.closeDocument().catch(() => {});
+    try {
+      const existing = await this.chrome.offscreen.hasDocument();
+      if (existing) {
+        await this.chrome.offscreen.closeDocument();
+      }
+    } catch (e) {
+      console.warn('[RecordingService] Offscreen cleanup failed:', e);
+    }
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
   // MESSAGE HANDLER
   // ═══════════════════════════════════════════════════════════════════════════
 
-  /**
-   * Handle incoming message from popup/offscreen/recorder
-   */
   async handleMessage(
     message: Record<string, unknown>,
     sender: { id: string }
@@ -406,7 +552,7 @@ export class RecordingService {
     }
 
     // Validate message against schema
-    const schema = schemas[message.type as string];
+    const schema = schemas[message.type as keyof typeof schemas];
     if (!schema) {
       console.warn('[RecordingService] Unknown message type:', message.type);
       return { ok: false, error: 'Unknown message type' };
@@ -431,11 +577,11 @@ export class RecordingService {
         return await this.stopRecording();
 
       case 'OFFSCREEN_STARTED':
-        await this.handleOffscreenStarted();
+        this.handleOffscreenStarted();
         return { ok: true };
 
       case 'RECORDER_STARTED':
-        await this.handleRecorderStarted();
+        this.handleRecorderStarted();
         return { ok: true };
 
       case 'OFFSCREEN_DATA':
@@ -453,7 +599,10 @@ export class RecordingService {
         return { ok: true };
 
       case 'OFFSCREEN_ERROR':
-        this.handleOffscreenError(message.error as string);
+        this.handleOffscreenError(
+          message.error as string,
+          message.code as string | undefined
+        );
         return { ok: true };
 
       case 'RECORDER_ERROR':
@@ -462,6 +611,22 @@ export class RecordingService {
 
       case 'GET_STATE':
         return { ok: true, ...this.getState() };
+
+      case 'TAB_CLOSING':
+        this.handleTabClosing(message.tabId as number);
+        return { ok: true };
+
+      case 'PREVIEW_READY':
+        // Preview is ready - no state change needed
+        return { ok: true };
+
+      case MSG_RECOVERY_RESUME:
+        await this.handleRecoveryResume(message.recordingId as string);
+        return { ok: true };
+
+      case MSG_RECOVERY_DISCARD:
+        await this.handleRecoveryDiscard(message.recordingId as string);
+        return { ok: true };
 
       default:
         return { ok: false, error: 'Unhandled message type' };

@@ -5,6 +5,9 @@
   "version": "0.0.0",
   "description": "Playwright E2E tests for CaptureCast stop feature",
   "scripts": {
+    "build": "node esbuild.config.js",
+    "dev": "node esbuild.config.js --watch",
+    "prebuild": "node esbuild.config.js",
     "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
     "test:unit": "node --experimental-vm-modules node_modules/jest/bin/jest.js tests/unit",
     "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --watch",
@@ -16,6 +19,7 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.55.0",
+    "esbuild": "^0.28.0",
     "eslint": "^8.45.0",
     "eslint-config-prettier": "^8.8.0",
     "eslint-plugin-prettier": "^5.1.0",
