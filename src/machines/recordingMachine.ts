@@ -11,7 +11,7 @@
  *                          failed → recoverable → idle
  */
 
-import { setup, assign, createMachine } from 'xstate';
+import { setup, assign } from 'xstate';
 import type { RecordingContext, RecordingEvent, RecordingMode, RecordingStrategy } from './types.js';
 import { TIMEOUTS } from './types.js';
 
@@ -41,10 +41,15 @@ export const initialContext: RecordingContext = {
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ACTION CREATORS (pure assign only - no async)
+// STATE MACHINE DEFINITION
 // ═══════════════════════════════════════════════════════════════════════════════
 
-const actions = setup({
+export const recordingMachine = setup({
+  types: {} as {
+    context: RecordingContext;
+    events: RecordingEvent;
+  },
+
   guards: {
     isValidUUID: ({ event }) => {
       if ('recordingId' in event && typeof (event as { recordingId?: string }).recordingId === 'string') {
@@ -55,25 +60,8 @@ const actions = setup({
       return false;
     },
   },
+
   actions: {
-    initializeRecording: assign({
-      recordingId: () => crypto.randomUUID(),
-      correlationId: () => crypto.randomUUID(),
-      startedAt: () => Date.now(),
-      lastActivityAt: () => Date.now(),
-      error: () => null,
-      failedChunkCount: () => 0,
-      overlayInjected: () => false,
-    }),
-
-    setRecordingOptions: assign({
-      options: ({ event }) => ({
-        mode: (event as { type: 'START'; mode: RecordingMode }).mode,
-        includeMic: (event as { type: 'START'; mic?: boolean }).mic ?? false,
-        includeSystemAudio: (event as { type: 'START'; systemAudio?: boolean }).systemAudio ?? false,
-      }),
-    }),
-
     clearRecordingState: assign({
       recordingId: () => null,
       correlationId: () => null,
@@ -92,59 +80,21 @@ const actions = setup({
       strategy: ({ context }) => (context.options.includeMic ? 'page' : 'offscreen'),
     }),
 
-    setOverlayTabId: assign({
-      overlayTabId: (_, params: { tabId: number | null }) => params.tabId,
-    }),
-
-    setRecorderTabId: assign({
-      recorderTabId: (_, params: { tabId: number | null }) => params.tabId,
-    }),
-
-    setOverlayInjected: assign({
-      overlayInjected: () => true,
-    }),
-
     updateLastActivity: assign({
       lastActivityAt: () => Date.now(),
-    }),
-
-    setError: assign({
-      error: ({ event }) => (event as { type: 'OFFSCREEN_ERROR' | 'RECORDER_ERROR' }).error,
     }),
 
     incrementFailedChunks: assign({
       failedChunkCount: ({ context }) => context.failedChunkCount + 1,
     }),
 
-    reconcileFromSnapshot: assign({
-      recordingId: ({ event }) => (event as { type: 'RECONCILE'; snapshot: { recordingId: string } }).snapshot.recordingId,
-      strategy: ({ event }) => (event as { type: 'RECONCILE'; snapshot: { strategy: RecordingStrategy } }).snapshot.strategy,
-      startedAt: ({ event }) => (event as { type: 'RECONCILE'; snapshot: { startedAt: number } }).snapshot.startedAt,
-      lastActivityAt: () => Date.now(),
-      options: ({ event }) =>
-        (event as { type: 'RECONCILE'; snapshot: { options: RecordingContext['options'] } }).snapshot.options,
-      correlationId: ({ event }) =>
-        (event as { type: 'RECONCILE'; snapshot: { correlationId: string } }).snapshot.correlationId,
+    setError: assign({
+      error: ({ event }) => (event as { type: 'OFFSCREEN_ERROR' | 'RECORDER_ERROR' }).error,
     }),
-  },
 
-  actors: {
-    // Callback actor for confirmation timeout
-    confirmationTimeoutCallback: {
-      src: function* confirmationTimeoutCallback() {
-        // Timeout is managed by RecordingService
-        // This actor just yields to allow the transition
-      },
-      onDone: 'recording',
-    },
-
-    // Callback actor for save timeout
-    saveTimeoutCallback: {
-      src: function* saveTimeoutCallback() {
-        // Timeout is managed by RecordingService
-      },
-      onDone: 'recoverable',
-    },
+    setTabClosedError: assign({
+      error: () => 'Tab closed during recording',
+    }),
   },
 
   delays: {
@@ -152,21 +102,9 @@ const actions = setup({
     SAVE_DELAY: TIMEOUTS.SAVE,
     CHECKPOINT_INTERVAL: TIMEOUTS.CHECKPOINT,
   },
-}).create();
-
-const { actions: recordingActions, guards, actors } = actions;
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// STATE MACHINE DEFINITION
-// ═══════════════════════════════════════════════════════════════════════════════
-
-export const recordingMachine = createMachine({
+}).createMachine({
   id: 'recording',
   initial: 'idle',
-  types: {} as {
-    context: RecordingContext;
-    events: RecordingEvent;
-  },
   context: initialContext,
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -177,19 +115,7 @@ export const recordingMachine = createMachine({
     // IDLE STATE
     // ─────────────────────────────────────────────────────────────────────────
     idle: {
-      entry: assign({
-        recordingId: () => null,
-        correlationId: () => null,
-        strategy: () => null,
-        overlayTabId: () => null,
-        recorderTabId: () => null,
-        startedAt: () => null,
-        lastActivityAt: () => null,
-        options: () => ({ mode: null, includeMic: false, includeSystemAudio: false }),
-        error: () => null,
-        failedChunkCount: () => 0,
-        overlayInjected: () => false,
-      }),
+      entry: 'clearRecordingState',
       on: {
         START: {
           target: 'starting',
@@ -225,89 +151,57 @@ export const recordingMachine = createMachine({
 
     // ─────────────────────────────────────────────────────────────────────────
     // STARTING STATE
+    // Note: Timing is managed by RecordingService (not via invoke actors)
     // ─────────────────────────────────────────────────────────────────────────
     starting: {
-      entry: assign({
-        strategy: ({ context }) => (context.options.includeMic ? 'page' : 'offscreen'),
-      }),
-      invoke: {
-        src: 'confirmationTimeoutCallback',
-        onDone: 'recording',
-      },
+      entry: 'determineStrategy',
       on: {
-        OFFSCREEN_STARTED: [
-          {
-            target: 'recording',
-            actions: [recordingActions.updateLastActivity],
-          },
-        ],
-        RECORDER_STARTED: [
-          {
-            target: 'recording',
-            actions: [recordingActions.updateLastActivity],
-          },
-        ],
-        CONFIRMATION_TIMEOUT: [
-          {
-            target: 'recording',
-            actions: [recordingActions.updateLastActivity],
-          },
-        ],
-        OFFSCREEN_ERROR: [
-          {
-            target: 'failed',
-            actions: assign({
-              error: ({ event }) => (event as { type: 'OFFSCREEN_ERROR'; error: string }).error,
-            }),
-          },
-        ],
-        RECORDER_ERROR: [
-          {
-            target: 'failed',
-            actions: assign({
-              error: ({ event }) => (event as { type: 'RECORDER_ERROR'; error: string }).error,
-            }),
-          },
-        ],
-        STOP: [
-          {
-            target: 'idle',
-          },
-        ],
+        OFFSCREEN_STARTED: {
+          target: 'recording',
+          actions: 'updateLastActivity',
+        },
+        RECORDER_STARTED: {
+          target: 'recording',
+          actions: 'updateLastActivity',
+        },
+        CONFIRMATION_TIMEOUT: {
+          target: 'recording',
+          actions: 'updateLastActivity',
+        },
+        OFFSCREEN_ERROR: {
+          target: 'failed',
+          actions: 'setError',
+        },
+        RECORDER_ERROR: {
+          target: 'failed',
+          actions: 'setError',
+        },
+        STOP: {
+          target: 'idle',
+        },
       },
     },
 
     // ─────────────────────────────────────────────────────────────────────────
     // RECORDING STATE
-    // Note: checkpointTimerActor removed - handled by RecordingService
     // ─────────────────────────────────────────────────────────────────────────
     recording: {
-      entry: assign({
-        lastActivityAt: () => Date.now(),
-      }),
+      entry: 'updateLastActivity',
       on: {
         STOP: { target: 'stopping' },
-        OFFSCREEN_ERROR: [
-          {
-            target: 'failed',
-            actions: assign({
-              error: ({ event }) => (event as { type: 'OFFSCREEN_ERROR'; error: string }).error,
-            }),
-          },
-        ],
-        RECORDER_ERROR: [
-          {
-            target: 'failed',
-            actions: assign({
-              error: ({ event }) => (event as { type: 'RECORDER_ERROR'; error: string }).error,
-            }),
-          },
-        ],
+        OFFSCREEN_ERROR: {
+          target: 'failed',
+          actions: 'setError',
+        },
+        RECORDER_ERROR: {
+          target: 'failed',
+          actions: 'setError',
+        },
         CHUNK_FAILED: {
-          actions: recordingActions.incrementFailedChunks,
+          actions: 'incrementFailedChunks',
         },
         UPDATE_STATE: {
-          actions: recordingActions.updateLastActivity,
+          actions: 'updateLastActivity',
         },
         TAB_CLOSING: {
           // Guard: only if closing the recorder tab
@@ -315,9 +209,7 @@ export const recordingMachine = createMachine({
             const tabId = (event as { type: 'TAB_CLOSING'; tabId: number }).tabId;
             return context.recorderTabId === tabId || context.overlayTabId === tabId;
           },
-          actions: assign({
-            error: () => 'Tab closed during recording',
-          }),
+          actions: 'setTabClosedError',
           target: 'failed',
         },
       },
@@ -327,29 +219,17 @@ export const recordingMachine = createMachine({
     // STOPPING STATE
     // ─────────────────────────────────────────────────────────────────────────
     stopping: {
-      entry: assign({
-        lastActivityAt: () => Date.now(),
-      }),
-      invoke: {
-        src: 'saveTimeoutCallback',
-        onDone: 'recoverable',
-      },
+      entry: 'updateLastActivity',
       on: {
-        OFFSCREEN_DATA: [
-          {
-            target: 'saved',
-          },
-        ],
-        RECORDER_DATA: [
-          {
-            target: 'saved',
-          },
-        ],
-        SAVE_TIMEOUT: [
-          {
-            target: 'recoverable',
-          },
-        ],
+        OFFSCREEN_DATA: {
+          target: 'saved',
+        },
+        RECORDER_DATA: {
+          target: 'saved',
+        },
+        SAVE_TIMEOUT: {
+          target: 'recoverable',
+        },
         STOP: { target: 'stopping' }, // Idempotent
       },
     },
@@ -358,9 +238,7 @@ export const recordingMachine = createMachine({
     // SAVED STATE (terminal with auto-reset after 1 second)
     // ─────────────────────────────────────────────────────────────────────────
     saved: {
-      entry: assign({
-        lastActivityAt: () => Date.now(),
-      }),
+      entry: 'updateLastActivity',
       after: {
         1000: { target: 'idle' },
       },
@@ -370,16 +248,12 @@ export const recordingMachine = createMachine({
     // FAILED STATE
     // ─────────────────────────────────────────────────────────────────────────
     failed: {
-      entry: assign({
-        lastActivityAt: () => Date.now(),
-      }),
+      entry: 'updateLastActivity',
       on: {
         RESET: { target: 'idle' },
-        RECOVERY_DISCARD: [
-          {
-            target: 'idle',
-          },
-        ],
+        RECOVERY_DISCARD: {
+          target: 'idle',
+        },
       },
     },
 
@@ -388,18 +262,14 @@ export const recordingMachine = createMachine({
     // ─────────────────────────────────────────────────────────────────────────
     recoverable: {
       on: {
-        RECOVERY_RESUME: [
-          {
-            target: 'recording',
-            actions: [recordingActions.updateLastActivity],
-            guard: guards.isValidUUID,
-          },
-        ],
-        RECOVERY_DISCARD: [
-          {
-            target: 'idle',
-          },
-        ],
+        RECOVERY_RESUME: {
+          target: 'recording',
+          actions: 'updateLastActivity',
+          guard: 'isValidUUID',
+        },
+        RECOVERY_DISCARD: {
+          target: 'idle',
+        },
         RESET: { target: 'idle' },
       },
     },
@@ -409,7 +279,7 @@ export const recordingMachine = createMachine({
   // GLOBAL EVENT HANDLERS
   // ───────────────────────────────────────────────────────────────────────────
   on: {
-    RESET: { target: 'idle' },
+    RESET: '.idle',
   },
 });
 
