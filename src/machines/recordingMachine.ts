@@ -164,6 +164,12 @@ export const recordingMachine = setup({
           target: 'recording',
           actions: 'updateLastActivity',
         },
+        OFFSCREEN_DATA: {
+          target: 'saved',
+        },
+        RECORDER_DATA: {
+          target: 'saved',
+        },
         CONFIRMATION_TIMEOUT: {
           target: 'recording',
           actions: 'updateLastActivity',
@@ -189,6 +195,12 @@ export const recordingMachine = setup({
       entry: 'updateLastActivity',
       on: {
         STOP: { target: 'stopping' },
+        OFFSCREEN_DATA: {
+          target: 'saved',
+        },
+        RECORDER_DATA: {
+          target: 'saved',
+        },
         OFFSCREEN_ERROR: {
           target: 'failed',
           actions: 'setError',
@@ -230,6 +242,14 @@ export const recordingMachine = setup({
         SAVE_TIMEOUT: {
           target: 'recoverable',
         },
+        OFFSCREEN_ERROR: {
+          target: 'failed',
+          actions: 'setError',
+        },
+        RECORDER_ERROR: {
+          target: 'failed',
+          actions: 'setError',
+        },
         STOP: { target: 'stopping' }, // Idempotent
       },
     },
@@ -270,6 +290,12 @@ export const recordingMachine = setup({
         RECOVERY_DISCARD: {
           target: 'idle',
         },
+        OFFSCREEN_DATA: {
+          target: 'saved',
+        },
+        RECORDER_DATA: {
+          target: 'saved',
+        },
         RESET: { target: 'idle' },
       },
     },
@@ -280,6 +306,7 @@ export const recordingMachine = setup({
   // ───────────────────────────────────────────────────────────────────────────
   on: {
     RESET: '.idle',
+    RECOVERY_DISCARD: '.idle',
   },
 });
 

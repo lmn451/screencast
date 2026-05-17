@@ -8,7 +8,7 @@ import {
   deleteRecording,
   cleanupOldRecordings,
   getAllRecordings,
-} from '../../db.js';
+} from '../../src/lib/db.js';
 
 beforeEach(async () => {
   setupIndexedDB();
@@ -327,7 +327,7 @@ describe('db.js', () => {
 describe('db.js - API Contract', () => {
   describe('expected exports', () => {
     it('should export saveChunk function', () => {
-      // import { saveChunk } from '../../db.js';
+      // import { saveChunk } from '../../src/lib/db.js';
       // expect(typeof saveChunk).toBe('function');
       expect(true).toBe(true);
     });

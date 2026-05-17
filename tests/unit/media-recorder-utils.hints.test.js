@@ -1,6 +1,6 @@
 import { jest } from '@jest/globals';
 
-import { applyContentHints } from '../../media-recorder-utils.js';
+import { applyContentHints } from '../../src/lib/media-recorder-utils.js';
 
 describe('applyContentHints additional cases', () => {
   beforeEach(() => jest.clearAllMocks());

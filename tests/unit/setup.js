@@ -19,6 +19,16 @@ global.indexedDB = {
   open: () => ({}),
 };
 
+// Polyfill crypto.randomUUID for jsdom environment (required by the recording
+// state machine's START action and any code path that mints a recording id).
+import { randomUUID as _nodeRandomUUID } from 'node:crypto';
+if (typeof globalThis.crypto === 'undefined') {
+  globalThis.crypto = {};
+}
+if (typeof globalThis.crypto.randomUUID !== 'function') {
+  globalThis.crypto.randomUUID = () => _nodeRandomUUID();
+}
+
 // Polyfill structuredClone for Node environments where it's not available.
 // Keep it minimal for tests: pass-through for Blob and JSON-clone for plain objects.
 if (typeof structuredClone === 'undefined') {

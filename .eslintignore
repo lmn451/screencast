@@ -1,6 +1,11 @@
 node_modules
 coverage
-dist
 build
-coverage/
+dist
 tests/e2e/playwright-report
+test-results
+
+# Local agent / IDE artifacts
+worktrees
+.specstory
+.omc

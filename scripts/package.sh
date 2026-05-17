@@ -1,21 +1,40 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Package the extension directory into a versioned zip ready for store uploads.
-# The ZIP must contain manifest.json at the root and no parent folder.
-# Usage: ./scripts/package.sh [source_dir]
-# Default source_dir is the repo root (this directory).
+# Package the extension into a versioned zip ready for store uploads.
+# The ZIP contains manifest.json at the root and no parent folder.
+#
+# Usage:
+#   pnpm run build && ./scripts/package.sh
+#
+# Output: dist/capturecast-mv3-<version>.zip
+#
+# Layout that ships:
+#   manifest.json
+#   *.html                    # popup, consent, recorder, offscreen, preview, recordings, recovery, diagnostics
+#   build/*.js                # esbuild output (background, page bundles, overlay)
+#   icons/                    # extension icons
+#
+# Everything else (src/, tests/, docs/, scripts/, store-assets/, configs,
+# node_modules/, .git/) is intentionally excluded.
 
-SRC_DIR=${1:-.}
-MANIFEST="$SRC_DIR/manifest.json"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$REPO_ROOT"
+
+MANIFEST="manifest.json"
 if [[ ! -f "$MANIFEST" ]]; then
-  echo "manifest.json not found under $SRC_DIR" >&2
+  echo "manifest.json not found at $REPO_ROOT" >&2
   exit 1
 fi
 
-VERSION=$(grep -E '"version"\s*:\s*"[0-9]+(\.[0-9]+)*"' "$MANIFEST" | sed -E 's/.*"version"\s*:\s*"([0-9]+(\.[0-9]+)*)".*/\1/')
+VERSION=$(sed -nE 's/.*"version"[[:space:]]*:[[:space:]]*"([0-9]+(\.[0-9]+)*)".*/\1/p' "$MANIFEST" | head -n1)
 if [[ -z "$VERSION" ]]; then
   echo "Unable to parse version from manifest.json" >&2
+  exit 1
+fi
+
+if [[ ! -d "build" ]] || ! ls build/*.js >/dev/null 2>&1; then
+  echo "build/ is missing or empty — run 'pnpm run build' first." >&2
   exit 1
 fi
 
@@ -23,30 +42,26 @@ OUT_DIR="dist"
 PKG_NAME="capturecast-mv3-${VERSION}.zip"
 mkdir -p "$OUT_DIR"
 
-# Create a temp staging directory to control included files
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
 
-# Copy required files
-rsync -a --delete \
-  --exclude ".git/" \
-  --exclude "node_modules/" \
-  --exclude "dist/" \
-  --exclude "store-assets/" \
-  --exclude "scripts/" \
-  "$SRC_DIR/" "$STAGE/"
+# Explicit include list. Add new top-level extension assets here.
+cp "$MANIFEST" "$STAGE/"
+cp ./*.html "$STAGE/"
+mkdir -p "$STAGE/build"
+# Bundles only — strip sourcemaps from the store package.
+for f in build/*.js; do
+  cp "$f" "$STAGE/build/"
+done
+cp -R icons "$STAGE/"
 
-# Sanity check
-if [[ ! -f "$STAGE/manifest.json" ]]; then
-  echo "Staging failed; manifest.json missing" >&2
+if [[ ! -f "$STAGE/manifest.json" ]] || [[ ! -f "$STAGE/build/background.js" ]]; then
+  echo "Staging failed; required files missing" >&2
   exit 1
 fi
 
-# Zip contents of staging root
 ( cd "$STAGE" && zip -qr "${PKG_NAME}" . )
-
-# Move package to dist
 mv "$STAGE/${PKG_NAME}" "$OUT_DIR/"
 
 echo "Package created: $OUT_DIR/${PKG_NAME}"
-
+( cd "$OUT_DIR" && unzip -l "${PKG_NAME}" )

@@ -1,3 +1,19 @@
-node_modules
+# Dependencies
+node_modules/
+
+# Coverage and test artifacts
 coverage/
-background.js
+test-results/
+jest-output.json
+
+# esbuild output (regenerated via `pnpm run build`)
+build/
+
+# Store packages (produced by scripts/package.sh)
+dist/
+
+# Local agent / IDE artifacts
+worktrees/
+.specstory/
+.omc/
+.DS_Store

@@ -8,7 +8,7 @@ import {
   requestPersistentStorage,
   MIN_FREE_SPACE_BYTES,
   ESTIMATED_BYTES_PER_MINUTE,
-} from '../../storage-utils.js';
+} from '../../src/lib/storage-utils.js';
 
 describe('storage-utils.js', () => {
   beforeEach(() => {

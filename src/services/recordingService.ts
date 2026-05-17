@@ -11,8 +11,8 @@
 
 import { createActor } from 'xstate';
 import { recordingMachine, type RecordingContext } from '../machines/recordingMachine.js';
-import { validateMessageStrict, schemas, MSG_RECOVERY_RESUME, MSG_RECOVERY_DISCARD } from '../messages.js';
-import { checkStorageQuota } from '../../storage-utils.js';
+import { MSG_RECOVERY_RESUME, MSG_RECOVERY_DISCARD } from '../messages.js';
+import { checkStorageQuota } from '../lib/storage-utils.js';
 import { TIMEOUTS, STORAGE_KEYS, isValidUUID } from '../machines/types.js';
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -56,37 +56,17 @@ interface ChromeAPI {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// RATE LIMITING
-// ═══════════════════════════════════════════════════════════════════════════════
-
-const rateLimitMap = new Map<string, { count: number; windowStart: number }>();
-const RATE_LIMIT_WINDOW_MS = 1000;
-const RATE_LIMIT_MAX = 50;
-
-function checkRateLimit(senderId: string): boolean {
-  const now = Date.now();
-  const entry = rateLimitMap.get(senderId);
-
-  if (!entry || now - entry.windowStart > RATE_LIMIT_WINDOW_MS) {
-    rateLimitMap.set(senderId, { count: 1, windowStart: now });
-    return true;
-  }
-
-  entry.count++;
-  if (entry.count > RATE_LIMIT_MAX) {
-    console.warn(`[RecordingService] Rate limit exceeded for sender: ${senderId}`);
-    return false;
-  }
-  return true;
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
 // RECORDING SERVICE
+//
+// Sender validation, schema validation, and rate limiting all live in
+// `src/background.ts`'s `chrome.runtime.onMessage` listener — the single
+// extension-wide entry point. handleMessage assumes the message has already
+// been validated and is from a trusted sender.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 export class RecordingService {
-  private chrome: ChromeAPI;
-  private actor: ReturnType<typeof createActor<typeof recordingMachine>>;
+  private readonly chrome: ChromeAPI;
+  private readonly actor: ReturnType<typeof createActor<typeof recordingMachine>>;
   private confirmationTimeout: ReturnType<typeof setTimeout> | null = null;
   private saveTimeout: ReturnType<typeof setTimeout> | null = null;
   private checkpointInterval: ReturnType<typeof setInterval> | null = null;
@@ -112,7 +92,7 @@ export class RecordingService {
   // ═══════════════════════════════════════════════════════════════════════════
 
   private async onStateChange(snapshot: { value: string; context: RecordingContext }): Promise<void> {
-    const state = snapshot.value as string;
+    const state = snapshot.value;
     const context = snapshot.context;
 
     // Badge management
@@ -121,14 +101,14 @@ export class RecordingService {
     // Session persistence based on state
     if (state === 'recording' || state === 'stopping') {
       await this.persistSessionSnapshot(context);
-    } else if (state === 'idle' || state === 'saved') {
+    } else if (state === 'idle' || state === 'saved' || state === 'failed' || state === 'recoverable') {
       await this.clearSessionSnapshot();
     }
 
-    // Overlay injection/removal on state transitions
-    if (state === 'recording' && context.overlayTabId && !context.overlayInjected) {
-      await this.injectOverlay(context.overlayTabId);
-    } else if (state === 'idle' && this.overlayTabId) {
+    // Overlay removal on transition back to idle.
+    // (Injection is driven explicitly from startRecording, not from state changes,
+    // since overlayTabId is owned by the service instance, not the machine context.)
+    if (state === 'idle' && this.overlayTabId) {
       await this.removeOverlay(this.overlayTabId);
       this.overlayTabId = null;
     }
@@ -136,6 +116,8 @@ export class RecordingService {
     // Offscreen document lifecycle
     if (state === 'idle') {
       await this.closeOffscreenDocumentIfIdle();
+    } else if (state === 'recoverable') {
+      await this.cleanup();
     }
   }
 
@@ -161,10 +143,18 @@ export class RecordingService {
 
   private async persistSessionSnapshot(context: RecordingContext): Promise<void> {
     if (!context.recordingId) return;
+    const current = this.actor.getSnapshot();
+    if (
+      !(current.matches('recording') || current.matches('stopping')) ||
+      current.context.recordingId !== context.recordingId
+    ) {
+      return;
+    }
+
     try {
       const snapshot = {
         recordingId: context.recordingId,
-        status: this.actor.getSnapshot().value,
+        status: current.value,
         startedAt: context.startedAt,
         lastActivityAt: Date.now(),
         options: { ...context.options },
@@ -185,6 +175,11 @@ export class RecordingService {
     }
   }
 
+  private async clearActiveSessionArtifacts(): Promise<void> {
+    await this.clearSessionSnapshot();
+    await this.updateBadge('idle');
+  }
+
   // ═══════════════════════════════════════════════════════════════════════════
   // OVERLAY MANAGEMENT
   // ═══════════════════════════════════════════════════════════════════════════
@@ -193,7 +188,7 @@ export class RecordingService {
     try {
       await this.chrome.scripting.executeScript({
         target: { tabId },
-        files: ['overlay.js'],
+        files: ['build/overlay.js'],
       });
       return true;
     } catch (e) {
@@ -223,13 +218,13 @@ export class RecordingService {
   private async ensureOffscreenDocument(mode: string, includeSystemAudio: boolean, recordingId: string, targetTabId: number | null): Promise<void> {
     try {
       const existing = await this.chrome.offscreen.hasDocument();
-      if (existing) return;
-
-      await this.chrome.offscreen.createDocument({
-        url: this.chrome.runtime.getURL('offscreen.html'),
-        reasons: ['USER_MEDIA', 'BLOBS'],
-        justification: 'Record a screen capture stream using MediaRecorder in an offscreen document.',
-      });
+      if (!existing) {
+        await this.chrome.offscreen.createDocument({
+          url: this.chrome.runtime.getURL('offscreen.html'),
+          reasons: ['USER_MEDIA', 'BLOBS'],
+          justification: 'Record a screen capture stream using MediaRecorder in an offscreen document.',
+        });
+      }
 
       // Send start message to offscreen
       await this.chrome.runtime.sendMessage({
@@ -243,6 +238,25 @@ export class RecordingService {
       console.error('[RecordingService] Failed to create offscreen document:', e);
       throw e;
     }
+  }
+
+  private async openRecorderTab(
+    mode: 'tab' | 'window' | 'screen',
+    includeMic: boolean,
+    includeSystemAudio: boolean,
+    recordingId: string
+  ): Promise<void> {
+    const params = new URLSearchParams({
+      id: recordingId,
+      mode,
+      mic: includeMic ? '1' : '0',
+      sys: includeSystemAudio ? '1' : '0',
+    });
+    const tab = await this.chrome.tabs.create({
+      url: this.chrome.runtime.getURL(`recorder.html?${params.toString()}`),
+      active: true,
+    });
+    this.recorderTabId = tab.id ?? null;
   }
 
   private async closeOffscreenDocumentIfIdle(): Promise<void> {
@@ -304,6 +318,11 @@ export class RecordingService {
     includeMic: boolean,
     includeSystemAudio: boolean
   ): Promise<{ ok: boolean; error?: string; overlayInjected?: boolean }> {
+    const currentState = this.actor.getSnapshot().value;
+    if (currentState !== 'idle') {
+      return { ok: false, error: `Cannot start: invalid state ${currentState}` };
+    }
+
     // Check storage quota
     const quotaCheck = await checkStorageQuota();
     if (!quotaCheck.ok) {
@@ -323,11 +342,31 @@ export class RecordingService {
     });
 
     const context = this.actor.getSnapshot().context;
+    if (!context.recordingId) {
+      this.actor.send({ type: 'RESET' });
+      return { ok: false, error: 'Failed to initialize recording session' };
+    }
 
     // Inject overlay
     let overlayInjected = false;
     if (this.overlayTabId) {
       overlayInjected = await this.injectOverlay(this.overlayTabId);
+    }
+
+    try {
+      if (context.strategy === 'offscreen') {
+        await this.ensureOffscreenDocument(mode, includeSystemAudio, context.recordingId, this.overlayTabId);
+      } else {
+        await this.openRecorderTab(mode, includeMic, includeSystemAudio, context.recordingId);
+      }
+    } catch (e) {
+      this.actor.send({ type: 'RESET' });
+      this.clearTimers();
+      if (this.overlayTabId) {
+        await this.removeOverlay(this.overlayTabId);
+        this.overlayTabId = null;
+      }
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
 
     // Set confirmation timeout
@@ -344,11 +383,35 @@ export class RecordingService {
   async stopRecording(): Promise<{ ok: boolean; error?: string }> {
     const state = this.actor.getSnapshot().value;
 
-    if (state !== 'recording') {
+    // The machine handles STOP from `starting` (cancels start) and idempotently
+    // from `stopping`. Only reject when there's nothing to stop.
+    if (state !== 'recording' && state !== 'starting' && state !== 'stopping') {
       return { ok: false, error: `Cannot stop: invalid state ${state}` };
     }
 
-    // Send STOP event
+    // If user cancels during `starting`, just return to idle and skip the
+    // save-timeout / outbound stop messages (there's nothing recording yet).
+    if (state === 'starting') {
+      this.actor.send({ type: 'STOP' });
+      this.clearTimers();
+      if (this.overlayTabId) {
+        try {
+          await this.chrome.tabs.sendMessage(this.overlayTabId, { type: 'OVERLAY_REMOVE' });
+        } catch (e) {
+          // Non-critical
+        }
+        await this.removeOverlay(this.overlayTabId);
+        this.overlayTabId = null;
+      }
+      return { ok: true };
+    }
+
+    // Idempotent stop while already stopping.
+    if (state === 'stopping') {
+      return { ok: true };
+    }
+
+    // state === 'recording' — proceed with normal stop flow.
     this.actor.send({ type: 'STOP' });
 
     // Set save timeout
@@ -356,12 +419,13 @@ export class RecordingService {
       this.actor.send({ type: 'SAVE_TIMEOUT' });
     }, TIMEOUTS.SAVE);
 
-    // Send stop message to offscreen/recorder
-    const context = this.actor.getSnapshot().context;
-    if (context.strategy === 'offscreen') {
-      await this.chrome.runtime.sendMessage({ type: 'OFFSCREEN_STOP' });
-    } else {
-      await this.chrome.runtime.sendMessage({ type: 'RECORDER_STOP' });
+    try {
+      await this.sendStopCommand(this.actor.getSnapshot().context.strategy);
+    } catch (e) {
+      this.actor.send({ type: 'SAVE_TIMEOUT' });
+      await this.clearActiveSessionArtifacts();
+      await this.cleanup();
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
 
     // Best-effort overlay removal
@@ -397,9 +461,8 @@ export class RecordingService {
     this.actor.send({ type: 'RECORDER_STARTED' });
 
     // Focus original tab
-    const context = this.actor.getSnapshot().context;
-    if (context.overlayTabId) {
-      this.focusTab(context.overlayTabId);
+    if (this.overlayTabId) {
+      this.focusTab(this.overlayTabId);
     }
   }
 
@@ -408,10 +471,15 @@ export class RecordingService {
       console.error('[RecordingService] Invalid recording ID:', recordingId);
       return;
     }
+    if (!this.isCurrentRecording(recordingId)) {
+      console.warn('[RecordingService] Ignoring OFFSCREEN_DATA for non-active recording:', recordingId);
+      return;
+    }
 
     this.clearTimers();
 
     this.actor.send({ type: 'OFFSCREEN_DATA', recordingId, mimeType });
+    await this.clearActiveSessionArtifacts();
 
     // Open preview page
     const url = this.chrome.runtime.getURL(`preview.html?id=${encodeURIComponent(recordingId)}`);
@@ -426,10 +494,15 @@ export class RecordingService {
       console.error('[RecordingService] Invalid recording ID:', recordingId);
       return;
     }
+    if (!this.isCurrentRecording(recordingId)) {
+      console.warn('[RecordingService] Ignoring RECORDER_DATA for non-active recording:', recordingId);
+      return;
+    }
 
     this.clearTimers();
 
     this.actor.send({ type: 'RECORDER_DATA', recordingId, mimeType });
+    await this.clearActiveSessionArtifacts();
 
     // Open preview page
     const url = this.chrome.runtime.getURL(`preview.html?id=${encodeURIComponent(recordingId)}`);
@@ -439,14 +512,26 @@ export class RecordingService {
     await this.cleanup();
   }
 
-  handleOffscreenError(error: string, code?: string): void {
+  async handleOffscreenError(error: string, code?: string, recordingId?: string): Promise<void> {
+    if (recordingId && !this.isCurrentRecording(recordingId)) {
+      console.warn('[RecordingService] Ignoring OFFSCREEN_ERROR for non-active recording:', recordingId);
+      return;
+    }
     this.clearTimers();
     this.actor.send({ type: 'OFFSCREEN_ERROR', error, code: code || undefined });
+    await this.clearActiveSessionArtifacts();
+    await this.cleanup();
   }
 
-  handleRecorderError(error: string): void {
+  async handleRecorderError(error: string, recordingId?: string): Promise<void> {
+    if (recordingId && !this.isCurrentRecording(recordingId)) {
+      console.warn('[RecordingService] Ignoring RECORDER_ERROR for non-active recording:', recordingId);
+      return;
+    }
     this.clearTimers();
     this.actor.send({ type: 'RECORDER_ERROR', error });
+    await this.clearActiveSessionArtifacts();
+    await this.cleanup();
   }
 
   handleTabClosing(tabId: number): void {
@@ -483,13 +568,33 @@ export class RecordingService {
       lastActivityAt: context.lastActivityAt,
       options: { ...context.options },
       strategy: context.strategy,
-      recording: context.strategy !== null && context.strategy !== undefined,
+      recording: snapshot.matches('starting') || snapshot.matches('recording') || snapshot.matches('stopping'),
     };
   }
 
   reset(): void {
     this.clearTimers();
     this.actor.send({ type: 'RESET' });
+  }
+
+  /**
+   * Re-hydrate the state machine from a persisted session snapshot, e.g. when
+   * the service worker restarts mid-recording. The machine transitions
+   * idle → recording with the snapshot's recordingId/strategy/options/etc.
+   */
+  reconcile(snapshot: {
+    recordingId: string;
+    status: string;
+    startedAt: number;
+    lastActivityAt: number;
+    options: { mode: 'tab' | 'window' | 'screen' | null; includeMic: boolean; includeSystemAudio: boolean };
+    strategy: 'offscreen' | 'page' | null;
+    correlationId: string;
+  }): void {
+    if (this.actor.getSnapshot().value !== 'idle') {
+      return; // already running; don't clobber
+    }
+    this.actor.send({ type: 'RECONCILE', snapshot });
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -506,6 +611,29 @@ export class RecordingService {
     } catch (e) {
       console.warn('[RecordingService] Tab focus failed:', e);
     }
+  }
+
+  private async sendStopCommand(strategy: RecordingContext['strategy']): Promise<void> {
+    if (strategy === 'offscreen') {
+      await this.chrome.runtime.sendMessage({ type: 'OFFSCREEN_STOP' });
+      return;
+    }
+    if (strategy === 'page' && this.recorderTabId) {
+      await this.chrome.tabs.sendMessage(this.recorderTabId, { type: 'RECORDER_STOP' });
+      return;
+    }
+    throw new Error('Recorder tab is not available');
+  }
+
+  private isCurrentRecording(recordingId: string): boolean {
+    const snapshot = this.actor.getSnapshot();
+    return (
+      (snapshot.matches('starting') ||
+        snapshot.matches('recording') ||
+        snapshot.matches('stopping') ||
+        snapshot.matches('recoverable')) &&
+      snapshot.context.recordingId === recordingId
+    );
   }
 
   private async cleanup(): Promise<void> {
@@ -538,31 +666,11 @@ export class RecordingService {
 
   async handleMessage(
     message: Record<string, unknown>,
-    sender: { id: string }
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    _sender: { id: string }
   ): Promise<{ ok: boolean; error?: string } | null> {
-    // Validate sender
-    if (sender.id !== this.chrome.runtime.id) {
-      console.warn('[RecordingService] Unauthorized message sender');
-      return { ok: false, error: 'Unauthorized sender' };
-    }
-
-    // Rate limiting
-    if (!checkRateLimit(sender.id)) {
-      return { ok: false, error: 'Rate limited' };
-    }
-
-    // Validate message against schema
-    const schema = schemas[message.type as keyof typeof schemas];
-    if (!schema) {
-      console.warn('[RecordingService] Unknown message type:', message.type);
-      return { ok: false, error: 'Unknown message type' };
-    }
-
-    const validation = validateMessageStrict(message as any, schema);
-    if (!validation.valid) {
-      console.warn('[RecordingService] Validation failed:', validation.errors);
-      return { ok: false, error: `Validation failed: ${validation.errors.join(', ')}` };
-    }
+    // Sender validation, schema validation, and rate limiting are performed
+    // in src/background.ts before this is called. Do not duplicate them here.
 
     // Route to appropriate handler
     switch (message.type) {
@@ -599,14 +707,18 @@ export class RecordingService {
         return { ok: true };
 
       case 'OFFSCREEN_ERROR':
-        this.handleOffscreenError(
+        await this.handleOffscreenError(
           message.error as string,
-          message.code as string | undefined
+          message.code as string | undefined,
+          message.recordingId as string | undefined
         );
         return { ok: true };
 
       case 'RECORDER_ERROR':
-        this.handleRecorderError(message.error as string);
+        await this.handleRecorderError(
+          message.error as string,
+          message.recordingId as string | undefined
+        );
         return { ok: true };
 
       case 'GET_STATE':
@@ -626,6 +738,16 @@ export class RecordingService {
 
       case MSG_RECOVERY_DISCARD:
         await this.handleRecoveryDiscard(message.recordingId as string);
+        return { ok: true };
+
+      // These are messages the background itself broadcasts via
+      // chrome.runtime.sendMessage to other extension contexts (offscreen
+      // document, recorder tab). The background's own onMessage listener
+      // also receives them; treat as no-ops here.
+      case 'OFFSCREEN_START':
+      case 'OFFSCREEN_STOP':
+      case 'RECORDER_STOP':
+      case 'OFFSCREEN_TEST':
         return { ok: true };
 
       default:
@@ -650,4 +772,13 @@ export function createRecordingService(chrome: ChromeAPI): RecordingService {
 
 export function getRecordingService(): RecordingService | null {
   return service;
+}
+
+/**
+ * Reset the module-level singleton. Tests only — never call from production
+ * code. Background.ts treats the service as a global; resetting between
+ * `createRecordingService` calls in production would discard state.
+ */
+export function __resetRecordingServiceForTests(): void {
+  service = null;
 }

@@ -2,7 +2,7 @@
   "name": "screencast-e2e",
   "type": "module",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.2.1",
   "description": "Playwright E2E tests for CaptureCast stop feature",
   "scripts": {
     "build": "node esbuild.config.js",
@@ -20,6 +20,8 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.55.0",
+    "@swc/core": "^1.15.33",
+    "@swc/jest": "^0.2.39",
     "esbuild": "^0.28.0",
     "eslint": "^8.45.0",
     "eslint-config-prettier": "^8.8.0",

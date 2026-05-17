@@ -2,11 +2,57 @@
 
 These instructions show how to load this project as an unpacked browser extension in Chromium-based browsers (Chrome, Edge, Brave, Opera, Vivaldi).
 
-The folder you will select is the one that contains `manifest.json`.
+The folder you will select is the one that contains `manifest.json` — the **root of this repository**.
 
-For this repository, that folder is the root directory containing `manifest.json`
+## Build Prerequisite
 
-If your build process outputs a different folder (e.g., `dist/` or `build/`), select that output folder instead.
+All JavaScript that ships with the extension is bundled by [esbuild](https://esbuild.github.io/) from sources under `src/` into the `build/` directory. You must build before loading unpacked, and re-build after any change in `src/`.
+
+```bash
+pnpm install
+pnpm run build       # bundles into build/
+# or, for active development:
+pnpm run dev         # watch mode
+```
+
+For a release zip, run `pnpm run build && ./scripts/package.sh`. The packager only includes `manifest.json`, the HTML pages at the root, `icons/`, and `build/*.js` (no sourcemaps, no source).
+
+## Repository Layout
+
+```
+manifest.json              # Extension manifest
+*.html                     # 8 page entry points (popup, consent, recorder,
+                           #   offscreen, preview, recordings, recovery,
+                           #   diagnostics) — must live at root so chrome-
+                           #   extension:// URLs resolve.
+icons/                     # Extension icons
+build/                     # esbuild output (gitignored). Referenced from
+                           #   manifest.service_worker, the <script> tags in
+                           #   each HTML page, and chrome.scripting for
+                           #   overlay injection.
+src/
+  background.ts            # Service worker entry
+  ChromeAPI.ts             # Thin Chrome-API wrapper used by services
+  messages.js              # Shared message schemas + validation
+  error-codes.js           # Canonical error codes + createError helper
+  logger.js                # Logger (diagnostics-aware)
+  diagnostics.js           # IndexedDB-backed diagnostics store
+  feedback.js              # User-facing alert/toast helpers
+  entries/                 # Bundle entry points (one per HTML page +
+                           #   overlay content script)
+  lib/                     # Shared utilities (db, chunkStorage, recording,
+                           #   cleanup, storage-utils, media-recorder-utils,
+                           #   constants, db-shared)
+  machines/                # XState v5 state machines
+  services/                # Service classes (RecordingService, …)
+tests/
+  unit/                    # Jest unit tests (jsdom)
+  e2e/                     # Playwright end-to-end tests
+docs/                      # Long-form docs (architecture deep-dives,
+                           #   migration guides, permissions rationale)
+scripts/                   # Build/release scripts
+store-assets/              # Screenshots etc. for the web store listing
+```
 
 ## Quick Start (All Chromium Browsers)
 
@@ -80,8 +126,8 @@ If your build process outputs a different folder (e.g., `dist/` or `build/`), se
 
 - Background script/service worker not running
 
-  - Manifest V3: ensure `background.service_worker` points to a valid path and that the file exists.
-  - Manifest V2: ensure the background page/script paths are correct (if you are using MV2).
+  - Manifest V3: ensure `background.service_worker` points to `build/background.js` and that you have run `pnpm run build`.
+  - If you see a service-worker registration failure, check the DevTools console under chrome://extensions → "Service worker" → "Inspect".
 
 - Changes aren’t taking effect
 

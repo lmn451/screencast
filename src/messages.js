@@ -15,16 +15,21 @@ export const MSG_RECORDER_STOP = 'RECORDER_STOP';
 export const MSG_TAB_CLOSING = 'TAB_CLOSING';
 export const MSG_PREVIEW_READY = 'PREVIEW_READY';
 export const MSG_OFFSCREEN_ERROR = 'OFFSCREEN_ERROR';
+export const MSG_RECORDER_ERROR = 'RECORDER_ERROR';
 export const MSG_OFFSCREEN_TEST = 'OFFSCREEN_TEST';
 export const MSG_RECOVERY_RESUME = 'RECOVERY_RESUME';
 export const MSG_RECOVERY_DISCARD = 'RECOVERY_DISCARD';
 
+const RECORDING_MODES = ['tab', 'window', 'screen'];
+
 // Message schemas: required + optional fields per type (typed for strict validation)
 export const schemas = {
   [MSG_START]: {
-    required: [['type', 'string']],
+    required: [
+      ['type', 'string'],
+      ['mode', 'string', RECORDING_MODES],
+    ],
     optional: [
-      ['mode', 'string'],
       ['mic', 'boolean'],
       ['systemAudio', 'boolean'],
     ],
@@ -48,6 +53,7 @@ export const schemas = {
     required: [
       ['type', 'string'],
       ['recordingId', 'string'],
+      ['mimeType', 'string'],
     ],
     optional: [],
   },
@@ -55,6 +61,7 @@ export const schemas = {
     required: [
       ['type', 'string'],
       ['recordingId', 'string'],
+      ['mimeType', 'string'],
     ],
     optional: [],
   },
@@ -66,13 +73,13 @@ export const schemas = {
     ],
   },
   [MSG_OFFSCREEN_START]: {
-    required: [['type', 'string']],
-    optional: [
-      ['mode', 'string'],
+    required: [
+      ['type', 'string'],
+      ['mode', 'string', RECORDING_MODES],
       ['recordingId', 'string'],
-      ['mic', 'boolean'],
-      ['systemAudio', 'boolean'],
+      ['includeAudio', 'boolean'],
     ],
+    optional: [['targetTabId', 'number']],
   },
   [MSG_OFFSCREEN_STOP]: {
     required: [['type', 'string']],
@@ -83,8 +90,11 @@ export const schemas = {
     optional: [],
   },
   [MSG_TAB_CLOSING]: {
-    required: [['type', 'string']],
-    optional: [['tabId', 'number']],
+    required: [
+      ['type', 'string'],
+      ['tabId', 'number'],
+    ],
+    optional: [],
   },
   [MSG_PREVIEW_READY]: {
     required: [['type', 'string']],
@@ -93,7 +103,17 @@ export const schemas = {
   [MSG_OFFSCREEN_ERROR]: {
     required: [['type', 'string']],
     optional: [
-      ['error', 'string'],
+      // `error` may be a plain string or a structured error object — accept any type.
+      ['error', undefined],
+      ['code', 'string'],
+      ['recordingId', 'string'],
+    ],
+  },
+  [MSG_RECORDER_ERROR]: {
+    required: [['type', 'string']],
+    optional: [
+      ['error', undefined],
+      ['code', 'string'],
       ['recordingId', 'string'],
     ],
   },
@@ -102,12 +122,18 @@ export const schemas = {
     optional: [],
   },
   [MSG_RECOVERY_RESUME]: {
-    required: [['type', 'string']],
-    optional: [['recordingId', 'string']],
+    required: [
+      ['type', 'string'],
+      ['recordingId', 'string'],
+    ],
+    optional: [],
   },
   [MSG_RECOVERY_DISCARD]: {
-    required: [['type', 'string']],
-    optional: [['recordingId', 'string']],
+    required: [
+      ['type', 'string'],
+      ['recordingId', 'string'],
+    ],
+    optional: [],
   },
   // Catch-all entry for unknown types with '*' field wildcard
   UNKNOWN: {
@@ -116,29 +142,54 @@ export const schemas = {
   },
 };
 
-// State constants
-export const STATE_IDLE = 'IDLE';
-export const STATE_STARTING = 'STARTING';
-export const STATE_PROMPTING = 'PROMPTING';
-export const STATE_RECORDING = 'RECORDING';
-export const STATE_STOPPING = 'STOPPING';
-export const STATE_SAVING = 'SAVING';
-export const STATE_SAVED = 'SAVED';
-export const STATE_FAILED = 'FAILED';
-export const STATE_RECOVERABLE = 'RECOVERABLE';
+function validateFieldValue(message, field, expectedType, allowedValues, label) {
+  const errors = [];
+  if (expectedType !== undefined && typeof message[field] !== expectedType) {
+    errors.push(
+      `${label} '${field}' must be type '${expectedType}', got '${typeof message[field]}'`
+    );
+  } else if (allowedValues && !allowedValues.includes(message[field])) {
+    errors.push(`${label} '${field}' must be one of: ${allowedValues.join(', ')}`);
+  }
+  return errors;
+}
 
-// Valid state transitions
-export const VALID_TRANSITIONS = {
-  [STATE_IDLE]: [STATE_STARTING],
-  [STATE_STARTING]: [STATE_PROMPTING, STATE_RECORDING, STATE_IDLE],
-  [STATE_PROMPTING]: [STATE_RECORDING, STATE_IDLE],
-  [STATE_RECORDING]: [STATE_STOPPING],
-  [STATE_STOPPING]: [STATE_SAVING, STATE_IDLE],
-  [STATE_SAVING]: [STATE_SAVED, STATE_FAILED, STATE_RECOVERABLE, STATE_IDLE],
-  [STATE_SAVED]: [STATE_IDLE],
-  [STATE_FAILED]: [STATE_IDLE, STATE_RECOVERABLE],
-  [STATE_RECOVERABLE]: [STATE_IDLE],
-};
+function validateRequiredFields(message, requiredFields) {
+  const errors = [];
+  for (const [field, expectedType, allowedValues] of requiredFields) {
+    if (!(field in message) || message[field] === undefined) {
+      errors.push(`Missing required field: ${field}`);
+      continue;
+    }
+    errors.push(...validateFieldValue(message, field, expectedType, allowedValues, 'Field'));
+  }
+  return errors;
+}
+
+function validateUnknownFields(message, schema) {
+  const hasCatchAll = schema.optional?.some(([key]) => key === '*');
+  if (hasCatchAll) return [];
+
+  const allowedFields = new Set([
+    ...schema.required.map(([field]) => field),
+    ...(schema.optional?.map(([field]) => field).filter((field) => field !== '*') || []),
+  ]);
+
+  return Object.keys(message)
+    .filter((key) => !allowedFields.has(key))
+    .map((key) => `Unknown field: ${key}`);
+}
+
+function validateOptionalFields(message, optionalFields = []) {
+  const errors = [];
+  for (const [field, expectedType, allowedValues] of optionalFields) {
+    if (field === '*' || !(field in message) || message[field] === undefined) continue;
+    errors.push(
+      ...validateFieldValue(message, field, expectedType, allowedValues, 'Optional field')
+    );
+  }
+  return errors;
+}
 
 /**
  * Validate a message against its schema (strict mode - Phase 6).
@@ -147,8 +198,6 @@ export const VALID_TRANSITIONS = {
  * Types: 'string', 'boolean', 'number', 'object', 'array', 'undefined'
  */
 export function validateMessageStrict(message, schema) {
-  const errors = [];
-
   if (!message || typeof message !== 'object') {
     return { valid: false, errors: ['Message is not an object'] };
   }
@@ -161,44 +210,11 @@ export function validateMessageStrict(message, schema) {
     return { valid: false, errors: [`Unknown message type: ${message.type}`] };
   }
 
-  const hasCatchAll = schema.optional?.some(([key]) => key === '*');
-
-  // Check required fields with type validation
-  for (const [field, expectedType] of schema.required) {
-    if (!(field in message) || message[field] === undefined) {
-      errors.push(`Missing required field: ${field}`);
-    } else if (expectedType !== undefined && typeof message[field] !== expectedType) {
-      errors.push(
-        `Field '${field}' must be type '${expectedType}', got '${typeof message[field]}'`
-      );
-    }
-  }
-
-  // Check for unknown fields (strict mode - reject extras unless catch-all exists)
-  if (!hasCatchAll) {
-    const allowedFields = new Set([
-      ...schema.required.map(([f]) => f),
-      ...(schema.optional?.map(([f]) => f).filter((f) => f !== '*') || []),
-    ]);
-
-    for (const key of Object.keys(message)) {
-      if (!allowedFields.has(key)) {
-        errors.push(`Unknown field: ${key}`);
-      }
-    }
-  }
-
-  // Validate optional field types
-  for (const [field, expectedType] of schema.optional || []) {
-    if (field === '*') continue; // Skip catch-all
-    if (field in message && message[field] !== undefined && expectedType !== undefined) {
-      if (typeof message[field] !== expectedType) {
-        errors.push(
-          `Optional field '${field}' must be type '${expectedType}', got '${typeof message[field]}'`
-        );
-      }
-    }
-  }
+  const errors = [
+    ...validateRequiredFields(message, schema.required),
+    ...validateUnknownFields(message, schema),
+    ...validateOptionalFields(message, schema.optional),
+  ];
 
   return { valid: errors.length === 0, errors };
 }
@@ -222,24 +238,4 @@ export function validateMessage(message, schema) {
   }
 
   return validateMessageStrict(message, schema);
-}
-
-/**
- * Validate a state transition.
- * Returns {valid: boolean, error: string}
- */
-export function validateStateTransition(current, next) {
-  if (!VALID_TRANSITIONS[current]) {
-    return { valid: false, error: `Unknown current state: ${current}` };
-  }
-
-  const allowed = VALID_TRANSITIONS[current];
-  if (!allowed.includes(next)) {
-    return {
-      valid: false,
-      error: `Invalid transition: ${current} → ${next}. Allowed: ${allowed.join(', ') || 'none'}`,
-    };
-  }
-
-  return { valid: true, error: null };
 }

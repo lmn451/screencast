@@ -1,0 +1,477 @@
+From aae718486bd13fb44754bfb19b6630ba3fedb199 Mon Sep 17 00:00:00 2001
+From: Michael Lerman <mlerman@ironscales.com>
+Date: Sat, 16 May 2026 22:32:05 +0300
+Subject: [PATCH] fix: cover recording lifecycle exits
+
+Ensure recording state reflects the actual capture lifecycle so stopped, discarded, failed, and auto-ended sessions do not leave the popup stuck active.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>
+---
+ manifest.json                       |  2 +-
+ src/entries/offscreen.js            | 12 +++--
+ src/entries/recorder.js             | 12 +++--
+ src/machines/recordingMachine.ts    |  7 +++
+ src/messages.js                     |  8 +--
+ src/services/recordingService.ts    | 70 ++++++++++++++++++------
+ tests/unit/messages.test.js         | 18 ++++++-
+ tests/unit/recordingMachine.test.js | 37 +++++++++++++
+ tests/unit/recordingService.test.js | 83 +++++++++++++++++++++++++++++
+ 9 files changed, 218 insertions(+), 31 deletions(-)
+
+diff --git a/manifest.json b/manifest.json
+index 6c45953..1d33328 100644
+--- a/manifest.json
++++ b/manifest.json
+@@ -19,7 +19,7 @@
+       "128": "icons/icon-128.png"
+     }
+   },
+-  "permissions": ["activeTab", "scripting", "offscreen", "tabCapture"],
++  "permissions": ["activeTab", "scripting", "offscreen", "storage", "tabCapture"],
+   "optional_permissions": ["notifications"],
+   "background": {
+     "service_worker": "build/background.js",
+diff --git a/src/entries/offscreen.js b/src/entries/offscreen.js
+index 1b70ef6..b0589a1 100644
+--- a/src/entries/offscreen.js
++++ b/src/entries/offscreen.js
+@@ -56,12 +56,14 @@ let currentId = null;
+ function attemptPartialSave() {
+   if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+     logger.log('Attempting partial save before unload');
+-    if (mediaRecorder.state === 'recording') {
+-      mediaRecorder.requestData();
+-    }
+-    mediaRecorder.stop().catch((err) => {
++    try {
++      if (mediaRecorder.state === 'recording') {
++        mediaRecorder.requestData();
++      }
++      mediaRecorder.stop();
++    } catch (err) {
+       logger.warn('Partial save failed:', err);
+-    });
++    }
+   }
+ }
+ 
+diff --git a/src/entries/recorder.js b/src/entries/recorder.js
+index 1d7b804..c41090d 100644
+--- a/src/entries/recorder.js
++++ b/src/entries/recorder.js
+@@ -39,12 +39,14 @@ let recordingId = null;
+ function attemptPartialSave() {
+   if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+     logger.log('Attempting partial save before unload');
+-    if (mediaRecorder.state === 'recording') {
+-      mediaRecorder.requestData();
+-    }
+-    mediaRecorder.stop().catch((err) => {
++    try {
++      if (mediaRecorder.state === 'recording') {
++        mediaRecorder.requestData();
++      }
++      mediaRecorder.stop();
++    } catch (err) {
+       logger.warn('Partial save failed:', err);
+-    });
++    }
+   }
+ }
+ 
+diff --git a/src/machines/recordingMachine.ts b/src/machines/recordingMachine.ts
+index c122d40..6422e4e 100644
+--- a/src/machines/recordingMachine.ts
++++ b/src/machines/recordingMachine.ts
+@@ -189,6 +189,12 @@ export const recordingMachine = setup({
+       entry: 'updateLastActivity',
+       on: {
+         STOP: { target: 'stopping' },
++        OFFSCREEN_DATA: {
++          target: 'saved',
++        },
++        RECORDER_DATA: {
++          target: 'saved',
++        },
+         OFFSCREEN_ERROR: {
+           target: 'failed',
+           actions: 'setError',
+@@ -280,6 +286,7 @@ export const recordingMachine = setup({
+   // ───────────────────────────────────────────────────────────────────────────
+   on: {
+     RESET: '.idle',
++    RECOVERY_DISCARD: '.idle',
+   },
+ });
+ 
+diff --git a/src/messages.js b/src/messages.js
+index 1a830b5..d9fb94d 100644
+--- a/src/messages.js
++++ b/src/messages.js
+@@ -67,13 +67,13 @@ export const schemas = {
+     ],
+   },
+   [MSG_OFFSCREEN_START]: {
+-    required: [['type', 'string']],
+-    optional: [
++    required: [
++      ['type', 'string'],
+       ['mode', 'string'],
+       ['recordingId', 'string'],
+-      ['mic', 'boolean'],
+-      ['systemAudio', 'boolean'],
++      ['includeAudio', 'boolean'],
+     ],
++    optional: [['targetTabId', 'number']],
+   },
+   [MSG_OFFSCREEN_STOP]: {
+     required: [['type', 'string']],
+diff --git a/src/services/recordingService.ts b/src/services/recordingService.ts
+index a07f282..c0cd94d 100644
+--- a/src/services/recordingService.ts
++++ b/src/services/recordingService.ts
+@@ -203,13 +203,13 @@ export class RecordingService {
+   private async ensureOffscreenDocument(mode: string, includeSystemAudio: boolean, recordingId: string, targetTabId: number | null): Promise<void> {
+     try {
+       const existing = await this.chrome.offscreen.hasDocument();
+-      if (existing) return;
+-
+-      await this.chrome.offscreen.createDocument({
+-        url: this.chrome.runtime.getURL('offscreen.html'),
+-        reasons: ['USER_MEDIA', 'BLOBS'],
+-        justification: 'Record a screen capture stream using MediaRecorder in an offscreen document.',
+-      });
++      if (!existing) {
++        await this.chrome.offscreen.createDocument({
++          url: this.chrome.runtime.getURL('offscreen.html'),
++          reasons: ['USER_MEDIA', 'BLOBS'],
++          justification: 'Record a screen capture stream using MediaRecorder in an offscreen document.',
++        });
++      }
+ 
+       // Send start message to offscreen
+       await this.chrome.runtime.sendMessage({
+@@ -225,6 +225,25 @@ export class RecordingService {
+     }
+   }
+ 
++  private async openRecorderTab(
++    mode: 'tab' | 'window' | 'screen',
++    includeMic: boolean,
++    includeSystemAudio: boolean,
++    recordingId: string
++  ): Promise<void> {
++    const params = new URLSearchParams({
++      id: recordingId,
++      mode,
++      mic: includeMic ? '1' : '0',
++      sys: includeSystemAudio ? '1' : '0',
++    });
++    const tab = await this.chrome.tabs.create({
++      url: this.chrome.runtime.getURL(`recorder.html?${params.toString()}`),
++      active: true,
++    });
++    this.recorderTabId = tab.id ?? null;
++  }
++
+   private async closeOffscreenDocumentIfIdle(): Promise<void> {
+     try {
+       const existing = await this.chrome.offscreen.hasDocument();
+@@ -303,6 +322,10 @@ export class RecordingService {
+     });
+ 
+     const context = this.actor.getSnapshot().context;
++    if (!context.recordingId) {
++      this.actor.send({ type: 'RESET' });
++      return { ok: false, error: 'Failed to initialize recording session' };
++    }
+ 
+     // Inject overlay
+     let overlayInjected = false;
+@@ -310,6 +333,22 @@ export class RecordingService {
+       overlayInjected = await this.injectOverlay(this.overlayTabId);
+     }
+ 
++    try {
++      if (context.strategy === 'offscreen') {
++        await this.ensureOffscreenDocument(mode, includeSystemAudio, context.recordingId, this.overlayTabId);
++      } else {
++        await this.openRecorderTab(mode, includeMic, includeSystemAudio, context.recordingId);
++      }
++    } catch (e) {
++      this.actor.send({ type: 'RESET' });
++      this.clearTimers();
++      if (this.overlayTabId) {
++        await this.removeOverlay(this.overlayTabId);
++        this.overlayTabId = null;
++      }
++      return { ok: false, error: e instanceof Error ? e.message : String(e) };
++    }
++
+     // Set confirmation timeout
+     this.confirmationTimeout = setTimeout(() => {
+       this.actor.send({ type: 'CONFIRMATION_TIMEOUT' });
+@@ -401,9 +440,8 @@ export class RecordingService {
+     this.actor.send({ type: 'RECORDER_STARTED' });
+ 
+     // Focus original tab
+-    const context = this.actor.getSnapshot().context;
+-    if (context.overlayTabId) {
+-      this.focusTab(context.overlayTabId);
++    if (this.overlayTabId) {
++      this.focusTab(this.overlayTabId);
+     }
+   }
+ 
+@@ -443,14 +481,16 @@ export class RecordingService {
+     await this.cleanup();
+   }
+ 
+-  handleOffscreenError(error: string, code?: string): void {
++  async handleOffscreenError(error: string, code?: string): Promise<void> {
+     this.clearTimers();
+     this.actor.send({ type: 'OFFSCREEN_ERROR', error, code: code || undefined });
++    await this.cleanup();
+   }
+ 
+-  handleRecorderError(error: string): void {
++  async handleRecorderError(error: string): Promise<void> {
+     this.clearTimers();
+     this.actor.send({ type: 'RECORDER_ERROR', error });
++    await this.cleanup();
+   }
+ 
+   handleTabClosing(tabId: number): void {
+@@ -487,7 +527,7 @@ export class RecordingService {
+       lastActivityAt: context.lastActivityAt,
+       options: { ...context.options },
+       strategy: context.strategy,
+-      recording: context.strategy !== null && context.strategy !== undefined,
++      recording: snapshot.matches('starting') || snapshot.matches('recording') || snapshot.matches('stopping'),
+     };
+   }
+ 
+@@ -603,14 +643,14 @@ export class RecordingService {
+         return { ok: true };
+ 
+       case 'OFFSCREEN_ERROR':
+-        this.handleOffscreenError(
++        await this.handleOffscreenError(
+           message.error as string,
+           message.code as string | undefined
+         );
+         return { ok: true };
+ 
+       case 'RECORDER_ERROR':
+-        this.handleRecorderError(message.error as string);
++        await this.handleRecorderError(message.error as string);
+         return { ok: true };
+ 
+       case 'GET_STATE':
+diff --git a/tests/unit/messages.test.js b/tests/unit/messages.test.js
+index d0908b2..32328d5 100644
+--- a/tests/unit/messages.test.js
++++ b/tests/unit/messages.test.js
+@@ -79,6 +79,20 @@ describe('messages.js', () => {
+       const result = validateMessage(msg, schema);
+       expect(result.valid).toBe(true);
+     });
++
++    it('should validate the real OFFSCREEN_START payload', () => {
++      const msg = {
++        type: MSG_OFFSCREEN_START,
++        mode: 'tab',
++        recordingId: '550e8400-e29b-41d4-a716-446655440000',
++        includeAudio: false,
++        targetTabId: 42,
++      };
++      const schema = schemas[MSG_OFFSCREEN_START];
++      const result = validateMessage(msg, schema);
++      expect(result.valid).toBe(true);
++      expect(result.errors).toHaveLength(0);
++    });
+   });
+ 
+   describe('All message schemas', () => {
+@@ -125,7 +139,9 @@ describe('messages.js', () => {
+ 
+     it('should have OFFSCREEN_START schema', () => {
+       expect(schemas[MSG_OFFSCREEN_START]).toBeDefined();
+-      expect(schemas[MSG_OFFSCREEN_START].required.map(([f]) => f)).toContain('type');
++      const requiredFields = schemas[MSG_OFFSCREEN_START].required.map(([f]) => f);
++      expect(requiredFields).toEqual(['type', 'mode', 'recordingId', 'includeAudio']);
++      expect(schemas[MSG_OFFSCREEN_START].optional.map(([f]) => f)).toContain('targetTabId');
+     });
+ 
+     it('should have OFFSCREEN_STOP schema', () => {
+diff --git a/tests/unit/recordingMachine.test.js b/tests/unit/recordingMachine.test.js
+index 59fc991..2cee925 100644
+--- a/tests/unit/recordingMachine.test.js
++++ b/tests/unit/recordingMachine.test.js
+@@ -92,6 +92,30 @@ describe('recordingMachine — happy path (idle → starting → recording → s
+     expect(actor.getSnapshot().value).toBe('saved');
+     actor.stop();
+   });
++
++  it('OFFSCREEN_DATA from recording → saved for browser auto-stop', () => {
++    const actor = startActor();
++    actor.send({ type: 'START', mode: 'tab', mic: false });
++    actor.send({ type: 'OFFSCREEN_STARTED' });
++    expect(actor.getSnapshot().value).toBe('recording');
++
++    actor.send({ type: 'OFFSCREEN_DATA', recordingId: VALID_UUID, mimeType: 'video/webm' });
++
++    expect(actor.getSnapshot().value).toBe('saved');
++    actor.stop();
++  });
++
++  it('RECORDER_DATA from recording → saved for browser auto-stop', () => {
++    const actor = startActor();
++    actor.send({ type: 'START', mode: 'tab', mic: true });
++    actor.send({ type: 'RECORDER_STARTED' });
++    expect(actor.getSnapshot().value).toBe('recording');
++
++    actor.send({ type: 'RECORDER_DATA', recordingId: VALID_UUID, mimeType: 'video/webm' });
++
++    expect(actor.getSnapshot().value).toBe('saved');
++    actor.stop();
++  });
+ });
+ 
+ describe('recordingMachine — starting state', () => {
+@@ -320,4 +344,17 @@ describe('recordingMachine — global RESET', () => {
+       actor.stop();
+     }
+   });
++
++  it('RECOVERY_DISCARD from active recording returns to idle', () => {
++    const actor = startActor();
++    actor.send({ type: 'START', mode: 'tab' });
++    actor.send({ type: 'OFFSCREEN_STARTED' });
++    expect(actor.getSnapshot().value).toBe('recording');
++
++    actor.send({ type: 'RECOVERY_DISCARD', recordingId: VALID_UUID });
++
++    expect(actor.getSnapshot().value).toBe('idle');
++    expect(actor.getSnapshot().context.recordingId).toBeNull();
++    actor.stop();
++  });
+ });
+diff --git a/tests/unit/recordingService.test.js b/tests/unit/recordingService.test.js
+index 621e4e3..a8771ca 100644
+--- a/tests/unit/recordingService.test.js
++++ b/tests/unit/recordingService.test.js
+@@ -106,6 +106,18 @@ describe('startRecording', () => {
+     expect(chrome.tabs.query).toHaveBeenCalledWith({ active: true, currentWindow: true });
+     expect(svc.getState().status).toBe('starting');
+     expect(svc.getState().options.mode).toBe('tab');
++    expect(chrome.offscreen.createDocument).toHaveBeenCalledWith({
++      url: 'chrome-extension://test/offscreen.html',
++      reasons: ['USER_MEDIA', 'BLOBS'],
++      justification: 'Record a screen capture stream using MediaRecorder in an offscreen document.',
++    });
++    expect(chrome.runtime.sendMessage).toHaveBeenCalledWith({
++      type: 'OFFSCREEN_START',
++      mode: 'tab',
++      includeAudio: false,
++      recordingId: expect.stringMatching(/^[0-9a-f-]{36}$/i),
++      targetTabId: 42,
++    });
+   });
+ 
+   it('refuses to start when storage quota is exhausted', async () => {
+@@ -136,6 +148,23 @@ describe('startRecording', () => {
+     jest.advanceTimersByTime(5000);
+     expect(svc.getState().status).toBe('recording');
+   });
++
++  it('opens the recorder tab for page strategy when microphone is enabled', async () => {
++    const chrome = makeStubChrome();
++    const svc = createRecordingService(chrome);
++
++    const result = await svc.startRecording('screen', true, true);
++
++    expect(result.ok).toBe(true);
++    expect(chrome.offscreen.createDocument).not.toHaveBeenCalled();
++    expect(chrome.tabs.create).toHaveBeenCalledWith({
++      url: expect.stringMatching(
++        /^chrome-extension:\/\/test\/recorder\.html\?id=[0-9a-f-]{36}&mode=screen&mic=1&sys=1$/i
++      ),
++      active: true,
++    });
++    expect(svc.getState().status).toBe('starting');
++  });
+ });
+ 
+ describe('stopRecording', () => {
+@@ -262,6 +291,7 @@ describe('handleMessage routing', () => {
+     const result = await svc.handleMessage({ type: 'GET_STATE' }, { id: chrome.runtime.id });
+     expect(result.ok).toBe(true);
+     expect(result.status).toBe('idle');
++    expect(result.recording).toBe(false);
+   });
+ 
+   it('returns ok for echoed outbound message types (OFFSCREEN_STOP, RECORDER_STOP, etc.)', async () => {
+@@ -283,6 +313,59 @@ describe('handleMessage routing', () => {
+   });
+ });
+ 
++describe('state projection and recovery exits', () => {
++  it('does not report recording=true after saved data arrives', async () => {
++    const chrome = makeStubChrome();
++    const svc = createRecordingService(chrome);
++    await svc.startRecording('tab', false, false);
++    svc.handleOffscreenStarted();
++
++    await svc.handleOffscreenData(VALID_UUID, 'video/webm');
++
++    expect(svc.getState().status).toBe('saved');
++    expect(svc.getState().recording).toBe(false);
++  });
++
++  it('recovery discard clears an active reconciled recording', async () => {
++    const chrome = makeStubChrome();
++    const svc = createRecordingService(chrome);
++    svc.reconcile({
++      recordingId: VALID_UUID,
++      status: 'recording',
++      startedAt: 1,
++      lastActivityAt: 2,
++      options: { mode: 'tab', includeMic: false, includeSystemAudio: false },
++      strategy: 'offscreen',
++      correlationId: VALID_UUID,
++    });
++
++    await svc.handleRecoveryDiscard(VALID_UUID);
++
++    expect(svc.getState().status).toBe('idle');
++    expect(svc.getState().recording).toBe(false);
++    expect(chrome.storage.remove).toHaveBeenCalledWith('sessionSnapshot');
++  });
++
++  it('cleans up and reports inactive after offscreen errors', async () => {
++    const chrome = makeStubChrome({
++      offscreen: {
++        createDocument: jest.fn(async () => undefined),
++        closeDocument: jest.fn(async () => undefined),
++        hasDocument: jest.fn(async () => true),
++      },
++    });
++    const svc = createRecordingService(chrome);
++    await svc.startRecording('tab', false, false);
++    svc.handleOffscreenStarted();
++
++    await svc.handleOffscreenError('Permission denied', 'PERMISSION_DENIED');
++
++    expect(svc.getState().status).toBe('failed');
++    expect(svc.getState().recording).toBe(false);
++    expect(chrome.offscreen.closeDocument).toHaveBeenCalled();
++  });
++});
++
+ describe('reconcile', () => {
+   it('hydrates the machine from a snapshot when idle', () => {
+     const chrome = makeStubChrome();
+-- 
+2.54.0
+

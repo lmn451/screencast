@@ -6,7 +6,7 @@ import {
   AUTO_DELETE_AGE_MS,
   SEEK_POSITION_LARGE,
   ERROR_DISPLAY_DURATION_MS,
-} from '../../constants.js';
+} from '../../src/lib/constants.js';
 
 describe('constants.js', () => {
   describe('timeout constants', () => {

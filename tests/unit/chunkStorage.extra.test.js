@@ -1,5 +1,5 @@
 import { jest } from '@jest/globals';
-import { DB_NAME } from '../../db-shared.js';
+import { DB_NAME } from '../../src/lib/db-shared.js';
 
 describe('chunkStorage.js additional tests', () => {
   beforeEach(async () => {
@@ -44,7 +44,7 @@ describe('chunkStorage.js additional tests', () => {
       return req;
     };
 
-    const { saveChunk } = await import('../../chunkStorage.js');
+    const { saveChunk } = await import('../../src/lib/chunkStorage.js');
     const blob = new Blob(['hello']);
     await expect(saveChunk('r-chunk', blob, 0)).resolves.toBeUndefined();
 
@@ -61,7 +61,7 @@ describe('chunkStorage.js additional tests', () => {
       return req;
     };
 
-    const { saveChunk } = await import('../../chunkStorage.js');
+    const { saveChunk } = await import('../../src/lib/chunkStorage.js');
     await expect(saveChunk('x', {}, 0)).rejects.toThrow('Failed to open database');
 
     // restore

@@ -1,6 +1,6 @@
 // Unit tests for logger.js
 
-import { createLogger, log, warn, error } from '../../logger.js';
+import { createLogger, log, warn, error } from '../../src/logger.js';
 
 describe('logger.js', () => {
   describe('createLogger', () => {

@@ -62,6 +62,14 @@
   <body>
     <h1>CaptureCast</h1>
     <div id="idle-ui" class="mode">
+      <label class="option">
+        <input type="checkbox" id="opt-mic" />
+        Include microphone audio
+      </label>
+      <label class="option">
+        <input type="checkbox" id="opt-sys" />
+        Include system / tab audio
+      </label>
       <button id="btn-record" class="primary">Record</button>
       <div style="margin-top: 10px; border-top: 1px solid #eee; padding-top: 10px">
         <button
@@ -79,6 +87,6 @@
       </button>
     </div>
     <div id="status"></div>
-    <script type="module" src="popup.js"></script>
+    <script type="module" src="build/popup.js"></script>
   </body>
 </html>

@@ -7,10 +7,10 @@
  */
 
 import { createRecordingService } from './services/recordingService.js';
-import { cleanupOldRecordings } from '../db.js';
-import { createLogger } from '../logger.js';
-import { STOP_TIMEOUT_MS, AUTO_DELETE_AGE_MS } from '../constants.js';
-import { hasChunks, markRecordingRecoverable } from '../chunkStorage.js';
+import { cleanupOldRecordings } from './lib/db.js';
+import { createLogger } from './logger.js';
+import { STOP_TIMEOUT_MS, AUTO_DELETE_AGE_MS } from './lib/constants.js';
+import { hasChunks, markRecordingRecoverable } from './lib/chunkStorage.js';
 import { SESSION_SNAPSHOT_KEY } from './machines/types.js';
 import { validateMessageStrict, schemas } from './messages.js';
 
@@ -24,6 +24,12 @@ const logger = createLogger('Background');
 const rateLimitMap = new Map<string, { count: number; windowStart: number }>();
 const RATE_LIMIT_WINDOW_MS = 1000;
 const RATE_LIMIT_MAX = 50;
+const OUTBOUND_CONTROL_MESSAGES = new Set([
+  'OFFSCREEN_START',
+  'OFFSCREEN_STOP',
+  'RECORDER_STOP',
+  'OFFSCREEN_TEST',
+]);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CHROME API WRAPPER
@@ -96,14 +102,6 @@ function checkRateLimit(senderId: string): boolean {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// UUID VALIDATION
-// ═══════════════════════════════════════════════════════════════════════════════
-
-function isValidUUID(str: string): boolean {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
 // SESSION RECONCILIATION
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -130,10 +128,16 @@ async function reconcileUnfinishedSessions(): Promise<void> {
         }
       }
     } else {
-      // Active session — show recovery prompt
-      logger.log('Found active session, showing recovery prompt', { age, status: snapshot.status });
+      // Active session — hydrate the machine and show the recovery prompt
+      logger.log('Found active session, hydrating machine and showing recovery prompt', {
+        age,
+        status: snapshot.status,
+      });
       if (snapshot.status === 'recording' || snapshot.status === 'stopping') {
-        await showRecoveryPrompt(snapshot);
+        // Bring the XState actor back into sync with the persisted state. Without
+        // this the UI would say "active recording" while the machine sat in idle.
+        service.reconcile(snapshot);
+        await showRecoveryPrompt();
       }
     }
   } catch (e) {
@@ -141,9 +145,8 @@ async function reconcileUnfinishedSessions(): Promise<void> {
   }
 }
 
-async function showRecoveryPrompt(snapshot: { recordingId: string; status: string }): Promise<void> {
+async function showRecoveryPrompt(): Promise<void> {
   try {
-    await chrome.storage.local.set({ [SESSION_SNAPSHOT_KEY]: snapshot });
     await chrome.tabs.create({ url: chrome.runtime.getURL('recovery.html') });
   } catch (e) {
     logger.error('Failed to show recovery prompt:', e);
@@ -167,6 +170,13 @@ globalThis.addEventListener('error', (event) => {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // These messages are broadcast by the background to offscreen/recorder
+  // contexts. The background must not respond to them, otherwise it can win the
+  // sendResponse race and mask the target context's real acknowledgement.
+  if (OUTBOUND_CONTROL_MESSAGES.has(message?.type)) {
+    return false;
+  }
+
   // Validate sender
   if (sender.id !== chrome.runtime.id) {
     logger.warn('Ignoring message from unauthorized sender:', sender.id);

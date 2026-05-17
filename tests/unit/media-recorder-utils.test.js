@@ -7,7 +7,7 @@ import {
   combineStreams,
   setupAutoStop,
   CHUNK_INTERVAL_MS,
-} from '../../media-recorder-utils.js';
+} from '../../src/lib/media-recorder-utils.js';
 
 describe('media-recorder-utils.js', () => {
   beforeEach(() => {

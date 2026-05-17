@@ -1,5 +1,5 @@
 import { jest } from '@jest/globals';
-import { DB_NAME } from '../../db-shared.js';
+import { DB_NAME } from '../../src/lib/db-shared.js';
 
 describe('recording.js additional tests', () => {
   beforeEach(async () => {
@@ -95,7 +95,7 @@ describe('recording.js additional tests', () => {
   });
 
   it('finishRecording then getRecording returns metadata and blob', async () => {
-    const { finishRecording, getRecording } = await import('../../recording.js');
+    const { finishRecording, getRecording } = await import('../../src/lib/recording.js');
 
     await finishRecording('rec-1', 'video/webm', 1500, 2048);
 
@@ -109,13 +109,13 @@ describe('recording.js additional tests', () => {
   });
 
   it('getRecording returns null when metadata missing', async () => {
-    const { getRecording } = await import('../../recording.js');
+    const { getRecording } = await import('../../src/lib/recording.js');
     const res = await getRecording('no-such');
     expect(res).toBeNull();
   });
 
   it('updateRecordingName rejects when recording not found', async () => {
-    const { updateRecordingName } = await import('../../recording.js');
+    const { updateRecordingName } = await import('../../src/lib/recording.js');
     await expect(updateRecordingName('missing', 'new name')).rejects.toThrow('Recording not found');
   });
 });

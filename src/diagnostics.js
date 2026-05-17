@@ -1,13 +1,13 @@
 // Persistent diagnostics for CaptureCast
 // Stores structured diagnostic entries in IndexedDB for debugging
 
-import { DB_NAME, DB_VERSION } from '../db-shared.js';
+import { DIAG_STORE, openDB } from './lib/db-shared.js';
+
+// Re-export for backwards compat with existing tests/callers.
+export { DIAG_STORE };
 
 // Ring buffer limit
 export const MAX_DIAGNOSTIC_ENTRIES = 500;
-
-// IndexedDB store name
-export const DIAG_STORE = 'diagnostics';
 
 /** @type {Record<string, string>} Diagnostic level enum */
 export const DiagLevel = {
@@ -56,20 +56,9 @@ export function createDiagnosticEntry(level, eventCode, userMessage, opts = {}) 
   };
 }
 
-function openDiagDB() {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
-    request.onerror = () => reject(request.error);
-    request.onsuccess = () => resolve(request.result);
-    request.onupgradeneeded = (event) => {
-      const db = event.target.result;
-      if (!db.objectStoreNames.contains(DIAG_STORE)) {
-        db.createObjectStore(DIAG_STORE, { keyPath: 'id' });
-      }
-    };
-  });
-}
-
+// Use the canonical openDB() from db-shared. Re-export under the legacy name
+// for any code that still imports openDiagDB.
+const openDiagDB = openDB;
 /** @deprecated Internal use only */
 export { openDiagDB };
 
@@ -118,11 +107,9 @@ export async function saveDiagnostic(entry) {
  * @returns {Promise<object[]>} Diagnostic entries
  */
 export async function getDiagnostics(limit = MAX_DIAGNOSTIC_ENTRIES) {
+  const db = await openDB();
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
-    request.onerror = () => reject(request.error);
-    request.onsuccess = () => {
-      const db = request.result;
+    try {
       const tx = db.transaction(DIAG_STORE, 'readonly');
       const store = tx.objectStore(DIAG_STORE);
       const entries = [];
@@ -137,7 +124,14 @@ export async function getDiagnostics(limit = MAX_DIAGNOSTIC_ENTRIES) {
           resolve(entries);
         }
       };
-    };
+      cursorReq.onerror = () => {
+        db.close();
+        reject(cursorReq.error);
+      };
+    } catch (err) {
+      db.close();
+      reject(err);
+    }
   });
 }
 

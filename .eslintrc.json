@@ -1,7 +1,7 @@
 {
   "root": true,
   "env": {
-    "es2021": true,
+    "es2022": true,
     "node": true,
     "browser": true,
     "jest": true
@@ -10,13 +10,13 @@
     "chrome": "readonly"
   },
   "parserOptions": {
-    "ecmaVersion": 2021,
+    "ecmaVersion": 2022,
     "sourceType": "module"
   },
   "extends": ["eslint:recommended", "plugin:prettier/recommended"],
   "rules": {
     "no-console": "off",
-    "no-unused-vars": ["warn", { "argsIgnorePattern": "^_" }],
+    "no-unused-vars": ["warn", { "argsIgnorePattern": "^_", "varsIgnorePattern": "^_" }],
     "no-empty": "warn"
   }
 }

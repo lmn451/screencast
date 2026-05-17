@@ -13,7 +13,7 @@ describe('media-recorder-utils (additional)', () => {
   it.skip('createMediaRecorder: records chunks and calls callbacks', async () => {
     const saveChunkMock = jest.fn(() => Promise.resolve());
 
-    await jest.unstable_mockModule('../../db.js', () => ({
+    await jest.unstable_mockModule('../../src/lib/db.js', () => ({
       saveChunk: saveChunkMock,
     }));
 
@@ -50,7 +50,7 @@ describe('media-recorder-utils (additional)', () => {
 
     global.MediaRecorder = FakeMediaRecorder;
 
-    const mod = await import('../../media-recorder-utils.js');
+    const mod = await import('../../src/lib/media-recorder-utils.js');
     const { createMediaRecorder } = mod;
 
     const stream = {}; // not inspected by our fake
@@ -84,7 +84,7 @@ describe('media-recorder-utils (additional)', () => {
   it.skip('createMediaRecorder: continues when saveChunk fails', async () => {
     const saveChunkMock = jest.fn(() => Promise.reject(new Error('DB fail')));
 
-    await jest.unstable_mockModule('../../db.js', () => ({
+    await jest.unstable_mockModule('../../src/lib/db.js', () => ({
       saveChunk: saveChunkMock,
     }));
 
@@ -113,7 +113,7 @@ describe('media-recorder-utils (additional)', () => {
 
     global.MediaRecorder = FakeMediaRecorder2;
 
-    const mod = await import('../../media-recorder-utils.js');
+    const mod = await import('../../src/lib/media-recorder-utils.js');
     const { createMediaRecorder } = mod;
 
     const onStop = jest.fn(() => Promise.resolve());
@@ -133,7 +133,7 @@ describe('media-recorder-utils (additional)', () => {
   });
 
   it.skip('createMediaRecorder: throws when no codec supported', async () => {
-    await jest.unstable_mockModule('../../db.js', () => ({ saveChunk: jest.fn() }));
+    await jest.unstable_mockModule('../../src/lib/db.js', () => ({ saveChunk: jest.fn() }));
 
     class NoCodecRecorder {
       static isTypeSupported() {
@@ -143,7 +143,7 @@ describe('media-recorder-utils (additional)', () => {
 
     global.MediaRecorder = NoCodecRecorder;
 
-    const mod = await import('../../media-recorder-utils.js');
+    const mod = await import('../../src/lib/media-recorder-utils.js');
     const { createMediaRecorder } = mod;
 
     expect(() => createMediaRecorder({}, 'x')).toThrow('No supported video codec');
