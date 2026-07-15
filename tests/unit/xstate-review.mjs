@@ -29,7 +29,9 @@ function assertEqual(actual, expected, desc) {
     console.log(`  ✓ ${desc}`);
   } else {
     failed++;
-    console.log(`  ✕ ${desc} (expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)})`);
+    console.log(
+      `  ✕ ${desc} (expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)})`
+    );
   }
 }
 
@@ -127,7 +129,11 @@ async function main() {
     actor.send({ type: 'START', mode: 'tab' });
     actor.send({ type: 'CONFIRMATION_TIMEOUT' });
     actor.send({ type: 'STOP' });
-    actor.send({ type: 'OFFSCREEN_DATA', recordingId: '550e8400-e29b-41d4-a716-446655440000', mimeType: 'video/webm' });
+    actor.send({
+      type: 'OFFSCREEN_DATA',
+      recordingId: '550e8400-e29b-41d4-a716-446655440000',
+      mimeType: 'video/webm',
+    });
     assertEqual(actor.getSnapshot().value, 'saved', '→ saved');
     actor.stop();
   }
@@ -139,7 +145,11 @@ async function main() {
     actor.send({ type: 'START', mode: 'tab' });
     actor.send({ type: 'CONFIRMATION_TIMEOUT' });
     actor.send({ type: 'STOP' });
-    actor.send({ type: 'RECORDER_DATA', recordingId: '550e8400-e29b-41d4-a716-446655440000', mimeType: 'video/webm' });
+    actor.send({
+      type: 'RECORDER_DATA',
+      recordingId: '550e8400-e29b-41d4-a716-446655440000',
+      mimeType: 'video/webm',
+    });
     assertEqual(actor.getSnapshot().value, 'saved', '→ saved');
     actor.stop();
   }
@@ -156,9 +166,9 @@ async function main() {
     actor.stop();
   }
 
-  // ── Test 11: SAVE_TIMEOUT → recoverable → RECOVERY_RESUME → recording ──
+  // ── Test 11: SAVE_TIMEOUT → recoverable; RECOVERY_RESUME is deleted (no-op); RECOVERY_DISCARD → idle ──
   {
-    console.log('\n── recoverable flow ──');
+    console.log('\n── recoverable flow (save-partial/discard, resume deleted) ──');
     const actor = createActor(recordingMachine).start();
     actor.send({ type: 'START', mode: 'tab' });
     actor.send({ type: 'CONFIRMATION_TIMEOUT' });
@@ -166,8 +176,19 @@ async function main() {
     actor.send({ type: 'SAVE_TIMEOUT' });
     assertEqual(actor.getSnapshot().value, 'recoverable', '→ recoverable');
 
+    // Resume is infeasible in MV3 (dead MediaStream, no user gesture, null tab
+    // ids) so RECOVERY_RESUME → recording was deleted. Sending it must be a
+    // no-op; the only supported recovery actions are Save-partial (a plain
+    // preview open outside the machine) and RECOVERY_DISCARD.
     actor.send({ type: 'RECOVERY_RESUME', recordingId: '550e8400-e29b-41d4-a716-446655440000' });
-    assertEqual(actor.getSnapshot().value, 'recording', 'RECOVERY_RESUME → recording');
+    assertEqual(
+      actor.getSnapshot().value,
+      'recoverable',
+      'RECOVERY_RESUME is a no-op (deleted transition)'
+    );
+
+    actor.send({ type: 'RECOVERY_DISCARD', recordingId: '550e8400-e29b-41d4-a716-446655440000' });
+    assertEqual(actor.getSnapshot().value, 'idle', 'RECOVERY_DISCARD → idle');
     actor.stop();
   }
 
@@ -236,7 +257,7 @@ async function main() {
     actor.stop();
   }
 
-  // ── Test 17: RECONCILE from idle → recording ──
+  // ── Test 17: RECONCILE from idle → recoverable (never recording — resume is infeasible in MV3) ──
   {
     console.log('\n── RECONCILE ──');
     const actor = createActor(recordingMachine).start();
@@ -251,8 +272,16 @@ async function main() {
         correlationId: '550e8400-e29b-41d4-a716-446655440001',
       },
     });
-    assertEqual(actor.getSnapshot().value, 'recording', '→ recording');
-    assertEqual(actor.getSnapshot().context.recordingId, '550e8400-e29b-41d4-a716-446655440000', 'recordingId restored');
+    assertEqual(
+      actor.getSnapshot().value,
+      'recoverable',
+      '→ recoverable (not a resurrected recording)'
+    );
+    assertEqual(
+      actor.getSnapshot().context.recordingId,
+      '550e8400-e29b-41d4-a716-446655440000',
+      'recordingId restored'
+    );
     actor.stop();
   }
 

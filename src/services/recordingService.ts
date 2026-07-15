@@ -11,7 +11,7 @@
 
 import { createActor } from 'xstate';
 import { recordingMachine, type RecordingContext } from '../machines/recordingMachine.js';
-import { MSG_RECOVERY_RESUME, MSG_RECOVERY_DISCARD } from '../messages.js';
+import { MSG_RECOVERY_DISCARD } from '../messages.js';
 import { checkStorageQuota } from '../lib/storage-utils.js';
 import { TIMEOUTS, STORAGE_KEYS, isValidUUID } from '../machines/types.js';
 
@@ -94,6 +94,9 @@ export class RecordingService {
   private saveTimeout: ReturnType<typeof setTimeout> | null = null;
   private overlayTabId: number | null = null;
   private recorderTabId: number | null = null;
+  // Serializes onStateChange so persist/clear/close/badge side effects cannot
+  // interleave across rapid transitions (notably saved→idle).
+  private stateChangeQueue: Promise<void> = Promise.resolve();
 
   constructor(chrome: ChromeAPI) {
     this.chrome = chrome;
@@ -101,9 +104,15 @@ export class RecordingService {
     // Create XState actor
     this.actor = createActor(recordingMachine);
 
-    // Subscribe to state changes for side effects (badge, persistence, overlay)
+    // Subscribe to state changes for side effects (badge, persistence, overlay).
+    // Chained through a promise queue so each onStateChange fully settles before
+    // the next runs, preventing interleaved storage/offscreen operations.
     this.actor.subscribe((snapshot) => {
-      this.onStateChange(snapshot);
+      this.stateChangeQueue = this.stateChangeQueue
+        .then(() => this.onStateChange(snapshot))
+        .catch((e) => {
+          console.warn('[RecordingService] onStateChange failed:', e);
+        });
     });
 
     this.actor.start();
@@ -427,7 +436,9 @@ export class RecordingService {
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
 
-    // Set confirmation timeout
+    // Set confirmation timeout. Kept as setTimeout (not an alarm): the offscreen/
+    // recorder start handshake keeps the SW alive through this short window, and
+    // the alarm-based periodic reconcile is the backstop for a hung `starting`.
     this.confirmationTimeout = setTimeout(() => {
       this.actor.send({ type: 'CONFIRMATION_TIMEOUT' });
     }, TIMEOUTS.CONFIRMATION);
@@ -472,7 +483,9 @@ export class RecordingService {
     // state === 'recording' — proceed with normal stop flow.
     this.actor.send({ type: 'STOP' });
 
-    // Set save timeout
+    // Set save timeout. Kept as setTimeout (not an alarm): the stop→data message
+    // traffic keeps the SW alive through this short window, and the alarm-based
+    // periodic reconcile is the backstop for a hung `stopping`.
     this.saveTimeout = setTimeout(() => {
       this.actor.send({ type: 'SAVE_TIMEOUT' });
     }, TIMEOUTS.SAVE);
@@ -616,10 +629,6 @@ export class RecordingService {
     this.clearTimers();
     this.actor.send({ type: 'RECOVERY_DISCARD', recordingId });
     await this.cleanup();
-  }
-
-  async handleRecoveryResume(recordingId: string): Promise<void> {
-    this.actor.send({ type: 'RECOVERY_RESUME', recordingId });
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -801,10 +810,6 @@ export class RecordingService {
 
       case 'PREVIEW_READY':
         // Preview is ready - no state change needed
-        return { ok: true };
-
-      case MSG_RECOVERY_RESUME:
-        await this.handleRecoveryResume(message.recordingId as string);
         return { ok: true };
 
       case MSG_RECOVERY_DISCARD:

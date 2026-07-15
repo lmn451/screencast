@@ -8,8 +8,9 @@
 
 import { createRecordingService, CHECKPOINT_ALARM_NAME } from './services/recordingService.js';
 import { cleanupOldRecordings } from './lib/db.js';
+import { getAllRecordings } from './lib/recording.js';
 import { createLogger } from './logger.js';
-import { STOP_TIMEOUT_MS, AUTO_DELETE_AGE_MS } from './lib/constants.js';
+import { AUTO_DELETE_AGE_MS } from './lib/constants.js';
 import { hasChunks, markRecordingRecoverable } from './lib/chunkStorage.js';
 import { SESSION_SNAPSHOT_KEY } from './machines/types.js';
 import { validateMessageStrict, schemas } from './messages.js';
@@ -116,19 +117,35 @@ function checkRateLimit(senderId: string): boolean {
 
 async function reconcileUnfinishedSessions(): Promise<void> {
   try {
+    // Snapshot-independent orphan sweep: any recording left in the in-progress
+    // `active` state (crashed before finishRecording, so no session snapshot may
+    // exist) is flipped to `partial` so its persisted chunks stay recoverable.
+    try {
+      const recordings = await getAllRecordings();
+      for (const rec of recordings) {
+        if (rec.status === 'active') {
+          await markRecordingRecoverable(rec.id);
+          logger.log('Swept orphaned active recording to partial', { recordingId: rec.id });
+        }
+      }
+    } catch (e) {
+      logger.error('Orphan-active sweep failed:', e);
+    }
+
     const result = await chrome.storage.local.get(SESSION_SNAPSHOT_KEY);
     const snapshot = result[SESSION_SNAPSHOT_KEY];
     if (!snapshot) return;
 
-    logger.log('Found session snapshot, checking age…', { snapshot });
-    const age = Date.now() - snapshot.lastActivityAt;
-
-    if (age > STOP_TIMEOUT_MS) {
-      // Stale session — clean up
-      logger.warn('Found stale recording session, cleaning up', { age, snapshot });
+    // A recording is NOT resumable after a service-worker/browser restart (dead
+    // MediaStream, no user gesture, null tab ids). For ANY non-idle snapshot we
+    // mark the persisted chunks recoverable and prompt the user to
+    // save-partial/discard — we never resurrect a live recording session.
+    if (snapshot.status && snapshot.status !== 'idle') {
+      logger.log('Found non-idle session snapshot, marking recoverable', {
+        status: snapshot.status,
+      });
       await chrome.storage.local.remove(SESSION_SNAPSHOT_KEY);
 
-      // Check for partial recordings
       if (snapshot.recordingId) {
         const hasChunksResult = await hasChunks(snapshot.recordingId);
         if (hasChunksResult) {
@@ -136,18 +153,7 @@ async function reconcileUnfinishedSessions(): Promise<void> {
           logger.log('Marked recording as recoverable', { recordingId: snapshot.recordingId });
         }
       }
-    } else {
-      // Active session — hydrate the machine and show the recovery prompt
-      logger.log('Found active session, hydrating machine and showing recovery prompt', {
-        age,
-        status: snapshot.status,
-      });
-      if (snapshot.status === 'recording' || snapshot.status === 'stopping') {
-        // Bring the XState actor back into sync with the persisted state. Without
-        // this the UI would say "active recording" while the machine sat in idle.
-        service.reconcile(snapshot);
-        await showRecoveryPrompt();
-      }
+      await showRecoveryPrompt();
     }
   } catch (e) {
     logger.error('Session reconciliation failed:', e);

@@ -21,7 +21,7 @@ export default {
     // Strip the .js so swc-jest can resolve them to .ts on disk.
     '^(\\.{1,2}/.*)\\.js$': '$1',
   },
-  testMatch: ['**/tests/unit/**/*.test.js'],
+  testMatch: ['**/tests/unit/**/*.test.js', '**/tests/integration/**/*.test.js'],
   collectCoverageFrom: [
     'src/**/*.{js,ts}',
     '!src/entries/**', // Entry points require chrome APIs / DOM

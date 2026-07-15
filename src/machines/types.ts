@@ -53,10 +53,6 @@ export interface RecordingContext {
   };
   error: string | null;
   failedChunkCount: number;
-  overlayInjected: boolean;
-  confirmationTimeoutId: ReturnType<typeof setTimeout> | null;
-  saveTimeoutId: ReturnType<typeof setTimeout> | null;
-  checkpointIntervalId: ReturnType<typeof setInterval> | null;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
