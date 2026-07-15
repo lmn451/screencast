@@ -80,7 +80,10 @@ async function requestDisplayStream(wantSys, status, startBtn) {
 }
 
 /**
- * Attempt to save partial recording data before unload
+ * Attempt to save partial recording data before unload.
+ * Best-effort only: `beforeunload` is not guaranteed to run/complete before the
+ * document is torn down. Real durability comes from the 1s periodic chunk saves,
+ * not from this handler.
  */
 function attemptPartialSave() {
   if (mediaRecorder && mediaRecorder.state !== 'inactive') {
@@ -100,6 +103,8 @@ function attemptPartialSave() {
 globalThis.addEventListener('beforeunload', attemptPartialSave);
 
 async function start() {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') return;
+
   const _mode = getQueryParam('mode') || 'tab';
   void _mode;
   recordingId = getQueryParam('id');
@@ -117,6 +122,9 @@ async function start() {
     return;
   }
 
+  let displayStream = null;
+  let micStream = null;
+
   try {
     // Validate recording ID
     if (!recordingId || !isValidUUID(recordingId)) {
@@ -126,14 +134,13 @@ async function start() {
     status.textContent = 'Requesting screen capture…';
     startBtn.classList.add('hidden');
     // 1. Request screen share (requires user gesture, if auto-start fails this needs a button click)
-    const displayStream = await requestDisplayStream(wantSys, status, startBtn);
+    displayStream = await requestDisplayStream(wantSys, status, startBtn);
     if (!displayStream) return;
 
     // Apply content hints to screen stream
     applyContentHints(displayStream, { hasSystemAudio: wantSys });
 
     // 2. Request microphone separately if needed
-    let micStream = null;
     if (wantMic) {
       status.textContent = 'Requesting microphone…';
       try {
@@ -239,6 +246,20 @@ async function start() {
       message: e?.message,
       toString: e?.toString?.(),
     });
+    // Stop any acquired capture tracks so a failure in recorder creation/start
+    // doesn't leak the screen-share/mic indicator.
+    try {
+      displayStream?.getTracks().forEach((t) => t.stop());
+    } catch (stopErr) {
+      logger.log('Error stopping display stream tracks after failed start (non-fatal):', stopErr);
+    }
+    try {
+      micStream?.getTracks().forEach((t) => t.stop());
+    } catch (stopErr) {
+      logger.log('Error stopping mic stream tracks after failed start (non-fatal):', stopErr);
+    }
+    mediaStream = null;
+    mediaRecorder = null;
     alert('CaptureCast: Recording failed to start — ' + details);
     startBtn.classList.remove('hidden');
   }
@@ -267,6 +288,7 @@ window.addEventListener('DOMContentLoaded', () => {
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (sender.id !== chrome.runtime.id) return false;
   if (message.type !== 'RECORDER_STOP') {
     return false;
   }

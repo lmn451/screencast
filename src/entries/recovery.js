@@ -30,6 +30,8 @@ async function getRecoverableRecordings() {
       resolve(recordings);
     };
     req.onerror = () => reject(req.error);
+    tx.oncomplete = () => db.close();
+    tx.onerror = () => db.close();
   });
 }
 
@@ -42,6 +44,8 @@ async function countChunks(recordingId) {
     const req = index.getAllKeys(IDBKeyRange.only(recordingId));
     req.onsuccess = () => resolve(req.result.length);
     req.onerror = () => reject(req.error);
+    tx.oncomplete = () => db.close();
+    tx.onerror = () => db.close();
   });
 }
 
@@ -64,8 +68,14 @@ async function deleteRecording(recordingId) {
   };
 
   return new Promise((resolve, reject) => {
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
+    tx.oncomplete = () => {
+      db.close();
+      resolve();
+    };
+    tx.onerror = () => {
+      db.close();
+      reject(tx.error);
+    };
   });
 }
 

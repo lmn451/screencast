@@ -50,10 +50,21 @@ export async function finishRecording(
       name: null,
       status,
     });
-    request.onsuccess = () => resolve();
+    // Resolve on tx.oncomplete (commit), not request.onsuccess, so an
+    // acknowledged save always means the IndexedDB transaction committed.
     request.onerror = () => reject(request.error);
-    tx.oncomplete = () => db.close();
-    tx.onerror = () => db.close();
+    tx.oncomplete = () => {
+      db.close();
+      resolve();
+    };
+    tx.onerror = () => {
+      db.close();
+      reject(tx.error);
+    };
+    tx.onabort = () => {
+      db.close();
+      reject(tx.error);
+    };
   });
 }
 
