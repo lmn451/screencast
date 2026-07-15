@@ -13,13 +13,7 @@ import { createActor } from 'xstate';
 import { recordingMachine, type RecordingContext } from '../machines/recordingMachine.js';
 import { MSG_RECOVERY_RESUME, MSG_RECOVERY_DISCARD } from '../messages.js';
 import { checkStorageQuota } from '../lib/storage-utils.js';
-import {
-  TIMEOUTS,
-  STORAGE_KEYS,
-  isValidUUID,
-  RecordingStatus,
-  type StructuredErrorPayload,
-} from '../machines/types.js';
+import { TIMEOUTS, STORAGE_KEYS, isValidUUID } from '../machines/types.js';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CHROME API TYPES
@@ -38,16 +32,12 @@ interface ChromeAPI {
     }) => Promise<Array<{ id?: number; windowId?: number }>>;
     create: (options: { url: string; active?: boolean }) => Promise<{ id?: number }>;
     remove: (tabId: number) => Promise<void>;
-    update: (tabId: number, options: { active: boolean }) => Promise<unknown>;
+    update: (tabId: number, options: { active: boolean }) => Promise<void>;
     get: (tabId: number) => Promise<{ windowId: number }>;
     sendMessage: (tabId: number, message: Record<string, unknown>) => Promise<void>;
   };
   scripting: {
-    executeScript: (options: {
-      target: { tabId: number };
-      files?: string[];
-      func?: () => void;
-    }) => Promise<unknown>;
+    executeScript: (options: { target: { tabId: number }; files: string[] }) => Promise<void>;
   };
   offscreen: {
     createDocument: (options: {
@@ -68,9 +58,25 @@ interface ChromeAPI {
     id: string;
   };
   windows: {
-    update: (windowId: number, options: { focused: boolean }) => Promise<unknown>;
+    update: (windowId: number, options: { focused: boolean }) => Promise<void>;
+  };
+  // Optional so existing test doubles that omit it stay valid; the production
+  // wrapper in background.ts always supplies it. MV3 checkpoint scheduling.
+  alarms?: {
+    create: (
+      name: string,
+      alarmInfo: { periodInMinutes?: number; delayInMinutes?: number }
+    ) => void;
+    clear: (name: string) => Promise<boolean>;
   };
 }
+
+/**
+ * Name of the self-rescheduling checkpoint alarm. Shared with background.ts,
+ * which owns the chrome.alarms.onAlarm listener and dispatches to
+ * RecordingService.handleCheckpointAlarm.
+ */
+export const CHECKPOINT_ALARM_NAME = 'capturecast-checkpoint';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // RECORDING SERVICE
@@ -86,14 +92,8 @@ export class RecordingService {
   private readonly actor: ReturnType<typeof createActor<typeof recordingMachine>>;
   private confirmationTimeout: ReturnType<typeof setTimeout> | null = null;
   private saveTimeout: ReturnType<typeof setTimeout> | null = null;
-  private checkpointInterval: ReturnType<typeof setInterval> | null = null;
   private overlayTabId: number | null = null;
   private recorderTabId: number | null = null;
-  private readonly expectedClosedTabs = new Set<number>();
-  private stateEffectQueue: Promise<void> = Promise.resolve();
-  private stateEffectSequence = 0;
-
-  private static readonly SESSION_SNAPSHOT_KEY = STORAGE_KEYS.SESSION_SNAPSHOT;
 
   constructor(chrome: ChromeAPI) {
     this.chrome = chrome;
@@ -103,7 +103,7 @@ export class RecordingService {
 
     // Subscribe to state changes for side effects (badge, persistence, overlay)
     this.actor.subscribe((snapshot) => {
-      this.enqueueStateTransition(snapshot);
+      this.onStateChange(snapshot);
     });
 
     this.actor.start();
@@ -113,38 +113,12 @@ export class RecordingService {
   // STATE CHANGE HANDLER (Chrome API side effects)
   // ═══════════════════════════════════════════════════════════════════════════
 
-  private enqueueStateTransition(snapshot: { value: string; context: RecordingContext }): void {
-    const effectId = ++this.stateEffectSequence;
-    const payload = {
-      id: effectId,
-      state: snapshot.value,
-      context: { ...snapshot.context },
-      overlayTabId: this.overlayTabId,
-    };
-
-    this.stateEffectQueue = this.stateEffectQueue
-      .then(() => this.applyStateTransitionEffects(payload))
-      .catch((error) => {
-        console.error('[RecordingService] Failed to process serialized state effects:', {
-          effectId,
-          state: payload.state,
-          recordingId: payload.context.recordingId,
-          error,
-        });
-      });
-  }
-
-  public async drainStateEffects(): Promise<void> {
-    await this.stateEffectQueue;
-  }
-
-  private async applyStateTransitionEffects(snapshot: {
-    id: number;
-    state: string;
+  private async onStateChange(snapshot: {
+    value: string;
     context: RecordingContext;
-    overlayTabId: number | null;
   }): Promise<void> {
-    const { state, context, overlayTabId } = snapshot;
+    const state = snapshot.value;
+    const context = snapshot.context;
 
     // Badge management
     await this.updateBadge(state);
@@ -158,24 +132,22 @@ export class RecordingService {
       state === 'failed' ||
       state === 'recoverable'
     ) {
-      await this.clearSessionSnapshot(context.recordingId);
+      await this.clearSessionSnapshot();
     }
 
     // Overlay removal on transition back to idle.
     // (Injection is driven explicitly from startRecording, not from state changes,
     // since overlayTabId is owned by the service instance, not the machine context.)
-    if (state === 'idle' && overlayTabId) {
-      await this.removeOverlayIfCurrentRecording(overlayTabId, context.recordingId);
-      if (this.overlayTabId === overlayTabId) {
-        this.overlayTabId = null;
-      }
+    if (state === 'idle' && this.overlayTabId) {
+      await this.removeOverlay(this.overlayTabId);
+      this.overlayTabId = null;
     }
 
     // Offscreen document lifecycle
     if (state === 'idle') {
-      await this.closeOffscreenDocumentIfIdle(context.recordingId);
+      await this.closeOffscreenDocumentIfIdle();
     } else if (state === 'recoverable') {
-      await this.cleanup(context.recordingId);
+      await this.cleanup();
     }
   }
 
@@ -203,8 +175,8 @@ export class RecordingService {
     if (!context.recordingId) return;
     const current = this.actor.getSnapshot();
     if (
-      current.context.recordingId !== context.recordingId ||
-      !(current.matches('recording') || current.matches('stopping'))
+      !(current.matches('recording') || current.matches('stopping')) ||
+      current.context.recordingId !== context.recordingId
     ) {
       return;
     }
@@ -219,39 +191,22 @@ export class RecordingService {
         strategy: context.strategy,
         correlationId: context.correlationId,
       };
-      await this.chrome.storage.set({ [RecordingService.SESSION_SNAPSHOT_KEY]: snapshot });
+      await this.chrome.storage.set({ [STORAGE_KEYS.SESSION_SNAPSHOT]: snapshot });
     } catch (e) {
       console.warn('[RecordingService] Failed to persist session snapshot:', e);
     }
   }
 
-  private async clearSessionSnapshot(recordingId: string | null): Promise<void> {
-    const current = this.actor.getSnapshot();
-    if (current.context.recordingId !== recordingId) {
-      return;
-    }
-
+  private async clearSessionSnapshot(): Promise<void> {
     try {
-      await this.chrome.storage.remove(RecordingService.SESSION_SNAPSHOT_KEY);
+      await this.chrome.storage.remove(STORAGE_KEYS.SESSION_SNAPSHOT);
     } catch (e) {
       console.warn('[RecordingService] Failed to clear session snapshot:', e);
     }
   }
 
-  private async removeOverlayIfCurrentRecording(
-    tabId: number,
-    expectedRecordingId: string | null
-  ): Promise<void> {
-    const current = this.actor.getSnapshot();
-    if (current.context.recordingId !== expectedRecordingId) {
-      return;
-    }
-
-    await this.removeOverlay(tabId);
-  }
-
   private async clearActiveSessionArtifacts(): Promise<void> {
-    await this.clearSessionSnapshot(this.actor.getSnapshot().context.recordingId);
+    await this.clearSessionSnapshot();
     await this.updateBadge('idle');
   }
 
@@ -340,16 +295,14 @@ export class RecordingService {
     this.recorderTabId = tab.id ?? null;
   }
 
-  private async closeOffscreenDocumentIfIdle(expectedRecordingId: string | null): Promise<void> {
-    const current = this.actor.getSnapshot();
-    if (current.context.recordingId !== expectedRecordingId || !current.matches('idle')) {
-      return;
-    }
-
+  private async closeOffscreenDocumentIfIdle(): Promise<void> {
     try {
       const existing = await this.chrome.offscreen.hasDocument();
       if (existing) {
-        await this.chrome.offscreen.closeDocument();
+        const state = this.actor.getSnapshot().value;
+        if (state === 'idle') {
+          await this.chrome.offscreen.closeDocument();
+        }
       }
     } catch (e) {
       console.warn('[RecordingService] Failed to close offscreen document:', e);
@@ -362,21 +315,38 @@ export class RecordingService {
 
   private startCheckpointTimer(): void {
     this.stopCheckpointTimer();
-    this.checkpointInterval = setInterval(async () => {
-      const state = this.actor.getSnapshot().value;
-      if (state === 'recording' || state === 'stopping') {
-        const context = this.actor.getSnapshot().context;
-        if (context.recordingId) {
-          await this.persistSessionSnapshot(context);
-        }
-      }
-    }, TIMEOUTS.CHECKPOINT);
+    // MV3: setInterval does not survive service-worker suspension. Use a
+    // chrome.alarms-backed checkpoint instead. TIMEOUTS.CHECKPOINT (30s) sits
+    // AT the ~30s alarms floor, so we schedule a one-shot alarm and re-arm it
+    // on each fire (handleCheckpointAlarm) rather than relying on a sub-floor
+    // periodic alarm. background.ts owns the onAlarm listener.
+    this.chrome.alarms?.create(CHECKPOINT_ALARM_NAME, {
+      delayInMinutes: TIMEOUTS.CHECKPOINT / 60000,
+    });
   }
 
   private stopCheckpointTimer(): void {
-    if (this.checkpointInterval) {
-      clearInterval(this.checkpointInterval);
-      this.checkpointInterval = null;
+    // Fire-and-forget clear; keeps this method synchronous for callers.
+    void this.chrome.alarms?.clear(CHECKPOINT_ALARM_NAME);
+  }
+
+  /**
+   * Handle a checkpoint alarm fire (dispatched from background.ts's onAlarm
+   * listener). Persists the session snapshot while recording/stopping and
+   * re-arms the one-shot alarm; stops re-arming once the machine leaves an
+   * active state.
+   */
+  async handleCheckpointAlarm(): Promise<void> {
+    const snapshot = this.actor.getSnapshot();
+    const state = snapshot.value;
+    if (state === 'recording' || state === 'stopping') {
+      if (snapshot.context.recordingId) {
+        await this.persistSessionSnapshot(snapshot.context);
+      }
+      // Re-arm for the next checkpoint.
+      this.chrome.alarms?.create(CHECKPOINT_ALARM_NAME, {
+        delayInMinutes: TIMEOUTS.CHECKPOINT / 60000,
+      });
     }
   }
 
@@ -606,103 +576,36 @@ export class RecordingService {
     await this.cleanup();
   }
 
-  async handleOffscreenError(
-    error: unknown,
-    code?: string,
-    recordingId?: string
-  ): Promise<boolean> {
-    if (!recordingId) {
-      console.error('[RecordingService] Ignoring malformed OFFSCREEN_ERROR: missing recordingId');
-      return false;
-    }
-
-    const normalized = this.normalizeErrorPayload(error);
-    if (!normalized) {
-      console.error('[RecordingService] Ignoring malformed OFFSCREEN_ERROR payload:', error);
-      return false;
-    }
-
+  async handleOffscreenError(error: string, code?: string, recordingId?: string): Promise<void> {
     if (recordingId && !this.isCurrentRecording(recordingId)) {
       console.warn(
         '[RecordingService] Ignoring OFFSCREEN_ERROR for non-active recording:',
         recordingId
       );
-      return true;
+      return;
     }
     this.clearTimers();
-    this.actor.send({
-      type: 'OFFSCREEN_ERROR',
-      recordingId: recordingId as string,
-      error: normalized,
-      code: code || normalized.code,
-    });
+    this.actor.send({ type: 'OFFSCREEN_ERROR', error, code: code || undefined });
     await this.clearActiveSessionArtifacts();
     await this.cleanup();
-
-    return true;
   }
 
-  async handleRecorderError(error: unknown, recordingId?: string): Promise<boolean> {
-    if (!recordingId) {
-      console.error('[RecordingService] Ignoring malformed RECORDER_ERROR: missing recordingId');
-      return false;
-    }
-
-    const normalized = this.normalizeErrorPayload(error);
-    if (!normalized) {
-      console.error('[RecordingService] Ignoring malformed RECORDER_ERROR payload:', error);
-      return false;
-    }
-
+  async handleRecorderError(error: string, recordingId?: string): Promise<void> {
     if (recordingId && !this.isCurrentRecording(recordingId)) {
       console.warn(
         '[RecordingService] Ignoring RECORDER_ERROR for non-active recording:',
         recordingId
       );
-      return true;
+      return;
     }
     this.clearTimers();
-    this.actor.send({
-      type: 'RECORDER_ERROR',
-      recordingId: recordingId as string,
-      error: normalized,
-      code: normalized.code,
-    });
+    this.actor.send({ type: 'RECORDER_ERROR', error });
     await this.clearActiveSessionArtifacts();
     await this.cleanup();
-
-    return true;
   }
 
-  private normalizeErrorPayload(error: unknown): StructuredErrorPayload | null {
-    if (!error || typeof error !== 'object') {
-      return null;
-    }
-
-    const candidate = error as Record<string, unknown>;
-    const code = candidate.code;
-    const userMessage = candidate.userMessage;
-
-    if (typeof code !== 'string' || typeof userMessage !== 'string') {
-      return null;
-    }
-
-    return {
-      ok: candidate.ok === false || candidate.ok === true ? (candidate.ok as boolean) : false,
-      code,
-      userMessage,
-      technicalMessage:
-        typeof candidate.technicalMessage === 'string'
-          ? (candidate.technicalMessage as string)
-          : '',
-      retryable:
-        typeof candidate.retryable === 'boolean' ? (candidate.retryable as boolean) : undefined,
-      correlationId:
-        typeof candidate.correlationId === 'string' || candidate.correlationId === null
-          ? (candidate.correlationId as string | null)
-          : undefined,
-      ...candidate,
-    };
+  handleTabClosing(tabId: number): void {
+    this.actor.send({ type: 'TAB_CLOSING', tabId });
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -754,7 +657,7 @@ export class RecordingService {
    */
   reconcile(snapshot: {
     recordingId: string;
-    status: RecordingStatus;
+    status: string;
     startedAt: number;
     lastActivityAt: number;
     options: {
@@ -810,14 +713,7 @@ export class RecordingService {
     );
   }
 
-  private async cleanup(
-    expectedRecordingId: string | null = this.actor.getSnapshot().context.recordingId
-  ): Promise<void> {
-    const current = this.actor.getSnapshot();
-    if (current.context.recordingId !== expectedRecordingId) {
-      return;
-    }
-
+  private async cleanup(): Promise<void> {
     // Remove overlay
     if (this.overlayTabId) {
       await this.removeOverlay(this.overlayTabId);
@@ -826,14 +722,7 @@ export class RecordingService {
 
     // Close recorder tab
     if (this.recorderTabId) {
-      const recorderTabId = this.recorderTabId;
-      this.expectedClosedTabs.add(recorderTabId);
-      try {
-        await this.chrome.tabs.remove(recorderTabId);
-      } catch (e) {
-        console.warn('[RecordingService] Recorder tab removal failed:', e);
-        this.expectedClosedTabs.delete(recorderTabId);
-      }
+      await this.chrome.tabs.remove(this.recorderTabId);
       this.recorderTabId = null;
     }
 
@@ -855,7 +744,7 @@ export class RecordingService {
   async handleMessage(
     message: Record<string, unknown>,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    _sender?: { id?: string }
+    _sender: { id: string }
   ): Promise<{ ok: boolean; error?: string } | null> {
     // Sender validation, schema validation, and rate limiting are performed
     // in src/background.ts before this is called. Do not duplicate them here.
@@ -889,33 +778,25 @@ export class RecordingService {
         return { ok: true };
 
       case 'OFFSCREEN_ERROR':
-        if (
-          !(await this.handleOffscreenError(
-            message.error,
-            message.code as string | undefined,
-            message.recordingId as string | undefined
-          ))
-        ) {
-          return { ok: false, error: 'Malformed OFFSCREEN_ERROR payload' };
-        }
+        await this.handleOffscreenError(
+          message.error as string,
+          message.code as string | undefined,
+          message.recordingId as string | undefined
+        );
         return { ok: true };
 
       case 'RECORDER_ERROR':
-        if (
-          !(await this.handleRecorderError(
-            message.error,
-            message.recordingId as string | undefined
-          ))
-        ) {
-          return { ok: false, error: 'Malformed RECORDER_ERROR payload' };
-        }
+        await this.handleRecorderError(
+          message.error as string,
+          message.recordingId as string | undefined
+        );
         return { ok: true };
 
       case 'GET_STATE':
         return { ok: true, ...this.getState() };
 
       case 'TAB_CLOSING':
-        await this.handleTabClosing(message.tabId as number);
+        this.handleTabClosing(message.tabId as number);
         return { ok: true };
 
       case 'PREVIEW_READY':
@@ -942,39 +823,6 @@ export class RecordingService {
 
       default:
         return { ok: false, error: 'Unhandled message type' };
-    }
-  }
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // TAB CLOSE FILTERING
-  // ═══════════════════════════════════════════════════════════════════════════
-
-  private consumeExpectedClosedTab(tabId: number): boolean {
-    return this.expectedClosedTabs.delete(tabId);
-  }
-
-  async handleTabClosing(tabId: number): Promise<void> {
-    if (!tabId || this.consumeExpectedClosedTab(tabId)) {
-      return;
-    }
-
-    // Only treat these as terminal failures while actively recording.
-    const state = this.actor.getSnapshot().value;
-    if (state !== 'recording') {
-      return;
-    }
-
-    if (this.overlayTabId === tabId) {
-      this.clearTimers();
-      this.actor.send({ type: 'OVERLAY_TAB_CLOSED' });
-      await this.cleanup();
-      return;
-    }
-
-    if (this.recorderTabId === tabId) {
-      this.clearTimers();
-      this.actor.send({ type: 'RECORDER_TAB_CLOSED' });
-      await this.cleanup();
     }
   }
 }

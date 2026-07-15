@@ -6,15 +6,13 @@
  * All Chrome API side effects live in RecordingService.
  */
 
-import { createRecordingService } from './services/recordingService.js';
+import { createRecordingService, CHECKPOINT_ALARM_NAME } from './services/recordingService.js';
 import { cleanupOldRecordings } from './lib/db.js';
 import { createLogger } from './logger.js';
 import { STOP_TIMEOUT_MS, AUTO_DELETE_AGE_MS } from './lib/constants.js';
 import { hasChunks, markRecordingRecoverable } from './lib/chunkStorage.js';
 import { SESSION_SNAPSHOT_KEY } from './machines/types.js';
 import { validateMessageStrict, schemas } from './messages.js';
-
-declare const chrome: any;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CONSTANTS & GLOBALS
@@ -75,6 +73,12 @@ const chromeAPI = {
   windows: {
     update: (windowId: number, options: { focused: boolean }) =>
       chrome.windows.update(windowId, options),
+  },
+  alarms: {
+    create: (name: string, alarmInfo: { periodInMinutes?: number; delayInMinutes?: number }) => {
+      chrome.alarms.create(name, alarmInfo);
+    },
+    clear: (name: string) => chrome.alarms.clear(name),
   },
 };
 
@@ -226,11 +230,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true; // Keep channel open for async response
 });
 
-// Keep the service informed about tab lifecycle changes for hard ownership checks.
-chrome.tabs.onRemoved.addListener((tabId) => {
-  void service.handleTabClosing(tabId);
-});
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // LIFECYCLE HANDLERS
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -256,10 +255,24 @@ chrome.runtime.onStartup.addListener(async () => {
   }
 });
 
-// Periodic reconciliation (every 5 minutes while SW is active)
-setInterval(async () => {
-  await reconcileUnfinishedSessions();
-}, 5 * 60 * 1000);
+// Periodic reconciliation via chrome.alarms (setInterval does not survive MV3
+// service-worker suspension). A named periodic alarm fires every 5 minutes.
+const RECONCILE_ALARM_NAME = 'capturecast-reconcile';
+chrome.alarms.create(RECONCILE_ALARM_NAME, { periodInMinutes: 5 });
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === RECONCILE_ALARM_NAME) {
+    reconcileUnfinishedSessions().catch((e) => {
+      logger.error('Periodic reconciliation failed:', e);
+    });
+  } else if (alarm.name === CHECKPOINT_ALARM_NAME) {
+    // Self-rescheduling checkpoint owned by RecordingService; re-arms itself
+    // while recording/stopping (see RecordingService.handleCheckpointAlarm).
+    service.handleCheckpointAlarm().catch((e) => {
+      logger.error('Checkpoint alarm handling failed:', e);
+    });
+  }
+});
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // EXPORTS (for testing)
