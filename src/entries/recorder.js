@@ -1,4 +1,4 @@
-import { finishRecording, RECORDING_STATUS } from '../lib/recording.js';
+import { finishRecording, createRecordingStub, RECORDING_STATUS } from '../lib/recording.js';
 import { createLogger } from '../logger.js';
 import {
   createMediaRecorder,
@@ -82,8 +82,8 @@ async function requestDisplayStream(wantSys, status, startBtn) {
 /**
  * Attempt to save partial recording data before unload.
  * Best-effort only: `beforeunload` is not guaranteed to run/complete before the
- * document is torn down. Real durability comes from the 1s periodic chunk saves,
- * not from this handler.
+ * document is torn down. Real durability comes from the 1s periodic chunk saves
+ * and the start-time metadata stub, not from this handler.
  */
 function attemptPartialSave() {
   if (mediaRecorder && mediaRecorder.state !== 'inactive') {
@@ -224,6 +224,14 @@ async function start() {
     });
 
     mediaRecorder = recorder;
+
+    // Write the start-time metadata stub now that the mimeType/codec is known,
+    // so a mid-recording crash still leaves a recoverable row. Non-fatal on failure.
+    try {
+      await createRecordingStub(recordingId, recorder.mimeType);
+    } catch (stubErr) {
+      logger.warn('Failed to write recording stub (non-fatal):', stubErr);
+    }
 
     // Auto-stop when screen sharing ends
     setupAutoStop(mediaStream, mediaRecorder);

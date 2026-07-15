@@ -118,4 +118,44 @@ describe('recording.js additional tests', () => {
     const { updateRecordingName } = await import('../../src/lib/recording.js');
     await expect(updateRecordingName('missing', 'new name')).rejects.toThrow('Recording not found');
   });
+
+  // ── AC1 (finding #1): finishRecording must REJECT when the transaction
+  // fails to commit, not just when the initial request errors. Before the
+  // fix, resolving on request.onsuccess meant a commit-time abort (quota
+  // exceeded, disk full) was invisible to the caller — a "SAVED" outcome
+  // could be reported for data that never actually landed in IndexedDB.
+  it('finishRecording REJECTS when the transaction aborts at commit time', async () => {
+    const commitError = new Error('QuotaExceededError');
+    commitError.name = 'QuotaExceededError';
+
+    const origOpen = global.indexedDB.open;
+    global.indexedDB.open = () => {
+      const db = {
+        transaction: () => {
+          const store = {
+            put: () => {
+              const req = {};
+              setTimeout(() => req.onsuccess && req.onsuccess(), 0);
+              return req;
+            },
+          };
+          const tx = { objectStore: () => store, oncomplete: null, onerror: null, onabort: null };
+          setTimeout(() => {
+            tx.error = commitError;
+            tx.onabort && tx.onabort();
+          }, 0);
+          return tx;
+        },
+        close: jest.fn(),
+      };
+      const req = { onsuccess: null, onerror: null, result: db };
+      setTimeout(() => req.onsuccess && req.onsuccess({ target: req }), 0);
+      return req;
+    };
+
+    const { finishRecording } = await import('../../src/lib/recording.js');
+    await expect(finishRecording('rec-abort', 'video/webm', 1000, 500)).rejects.toBe(commitError);
+
+    global.indexedDB.open = origOpen;
+  });
 });

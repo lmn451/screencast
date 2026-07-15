@@ -2,6 +2,7 @@
 // Exports structured diagnostic logs from IndexedDB
 
 import { DIAG_STORE, openDB } from '../lib/db-shared.js';
+import { redactDiagnosticsEntry } from '../diagnostics.js';
 
 async function getAllDiagnostics() {
   const db = await openDB();
@@ -47,8 +48,10 @@ function renderEntries(entries) {
       (e) => `
       <div class="log-entry">
         <div class="log-meta">
-          <span class="log-level ${e.level}">${e.level.toUpperCase()}</span>
-          <span class="log-code">${e.eventCode || '—'}</span>
+          <span class="log-level ${escapeHtml(e.level)}">${escapeHtml(
+        String(e.level).toUpperCase()
+      )}</span>
+          <span class="log-code">${escapeHtml(e.eventCode || '—')}</span>
           <span class="log-ts">${formatTimestamp(e.ts)}</span>
         </div>
         <div class="log-user">${escapeHtml(e.userMessage || '')}</div>
@@ -94,11 +97,11 @@ async function clearDiagnostics() {
 document.addEventListener('DOMContentLoaded', async () => {
   try {
     const entries = await getAllDiagnostics();
-    renderEntries(entries);
+    renderEntries(entries.map(redactDiagnosticsEntry));
 
     document.getElementById('btn-export').addEventListener('click', async () => {
       try {
-        const entries = await getAllDiagnostics();
+        const entries = (await getAllDiagnostics()).map(redactDiagnosticsEntry);
         downloadJSON({
           exportedAt: new Date().toISOString(),
           count: entries.length,

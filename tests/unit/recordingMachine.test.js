@@ -302,21 +302,25 @@ describe('recordingMachine — recoverable state guards', () => {
     return actor;
   }
 
-  it('RECOVERY_RESUME with a valid UUID transitions to recording', () => {
+  it('RECOVERY_RESUME is a no-op — the transition was deleted (resume is infeasible in MV3)', () => {
+    // "Resume" is not reachable in production: the MediaStream is dead and
+    // getDisplayMedia needs a fresh user gesture. The only supported recovery
+    // actions are Save-partial (a plain preview open, no machine event) and
+    // RECOVERY_DISCARD. RECOVERY_RESUME must not move the machine at all.
     const actor = toRecoverable();
     actor.send({ type: 'RECOVERY_RESUME', recordingId: VALID_UUID });
-    expect(actor.getSnapshot().value).toBe('recording');
+    expect(actor.getSnapshot().value).toBe('recoverable');
     actor.stop();
   });
 
-  it('RECOVERY_RESUME with an invalid UUID is rejected by guard', () => {
+  it('RECOVERY_RESUME with an invalid UUID is still a no-op (unhandled event)', () => {
     const actor = toRecoverable();
     actor.send({ type: 'RECOVERY_RESUME', recordingId: 'not-a-uuid' });
     expect(actor.getSnapshot().value).toBe('recoverable');
     actor.stop();
   });
 
-  it('RECOVERY_RESUME without recordingId is rejected by guard', () => {
+  it('RECOVERY_RESUME without a recordingId is still a no-op (unhandled event)', () => {
     const actor = toRecoverable();
     actor.send({ type: 'RECOVERY_RESUME' });
     expect(actor.getSnapshot().value).toBe('recoverable');
@@ -374,7 +378,11 @@ describe('recordingMachine — failed state', () => {
 });
 
 describe('recordingMachine — RECONCILE from idle', () => {
-  it('hydrates the machine from a persisted snapshot and lands in recording', () => {
+  it('hydrates the machine from a persisted snapshot and lands in recoverable (never resurrects a live recording)', () => {
+    // A recording is not resumable after a service-worker/browser restart (dead
+    // MediaStream, no user gesture, null tab ids). RECONCILE must never land the
+    // machine in `recording` — it always parks a non-idle snapshot in
+    // `recoverable` so the UI can offer Save-partial/Discard.
     const actor = startActor();
     const snapshot = {
       recordingId: ANOTHER_UUID,
@@ -387,12 +395,34 @@ describe('recordingMachine — RECONCILE from idle', () => {
     };
     actor.send({ type: 'RECONCILE', snapshot });
 
-    expect(actor.getSnapshot().value).toBe('recording');
+    expect(actor.getSnapshot().value).toBe('recoverable');
     const ctx = actor.getSnapshot().context;
     expect(ctx.recordingId).toBe(ANOTHER_UUID);
     expect(ctx.strategy).toBe('page');
     expect(ctx.options.mode).toBe('screen');
     expect(ctx.correlationId).toBe(VALID_UUID);
+    actor.stop();
+  });
+
+  it('a reconciled recoverable session can still be discarded', () => {
+    const actor = startActor();
+    actor.send({
+      type: 'RECONCILE',
+      snapshot: {
+        recordingId: ANOTHER_UUID,
+        status: 'stopping',
+        startedAt: 1,
+        lastActivityAt: 2,
+        options: { mode: 'tab', includeMic: false, includeSystemAudio: false },
+        strategy: 'offscreen',
+        correlationId: VALID_UUID,
+      },
+    });
+    expect(actor.getSnapshot().value).toBe('recoverable');
+
+    actor.send({ type: 'RECOVERY_DISCARD', recordingId: ANOTHER_UUID });
+    expect(actor.getSnapshot().value).toBe('idle');
+    expect(actor.getSnapshot().context.recordingId).toBeNull();
     actor.stop();
   });
 });
