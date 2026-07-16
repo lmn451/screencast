@@ -117,3 +117,31 @@ it('stops every acquired capture track when createMediaRecorder throws (no suppo
     expect.objectContaining({ type: 'OFFSCREEN_ERROR', recordingId: RECORDING_ID })
   );
 });
+
+it('rejects recording commands from an unauthorized sender', async () => {
+  const getDisplayMedia = jest.fn();
+  Object.defineProperty(global.navigator, 'mediaDevices', {
+    value: { getDisplayMedia },
+    configurable: true,
+  });
+  await jest.unstable_mockModule('../../src/lib/media-recorder-utils.js', () => ({
+    createMediaRecorder: jest.fn(),
+    applyContentHints: jest.fn(),
+    setupAutoStop: jest.fn(),
+    CHUNK_INTERVAL_MS: 1000,
+  }));
+
+  await import('../../src/entries/offscreen.js');
+  await flush();
+
+  const sendResponse = jest.fn();
+  const result = capturedListener(
+    { type: 'OFFSCREEN_START', mode: 'tab', recordingId: RECORDING_ID, includeAudio: false },
+    { id: 'rogue-extension' },
+    sendResponse
+  );
+
+  expect(result).toBe(false);
+  expect(getDisplayMedia).not.toHaveBeenCalled();
+  expect(sendResponse).not.toHaveBeenCalled();
+});

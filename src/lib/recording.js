@@ -43,18 +43,26 @@ export async function finishRecording(
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_RECORDINGS, 'readwrite');
     const store = tx.objectStore(STORE_RECORDINGS);
-    const request = store.put({
-      id,
-      mimeType,
-      duration,
-      size,
-      createdAt: Date.now(),
-      name: null,
-      status,
-    });
+    const getRequest = store.get(id);
+    let putRequest;
+
+    getRequest.onsuccess = () => {
+      const existing = getRequest.result;
+      putRequest = store.put({
+        id,
+        mimeType,
+        duration,
+        size,
+        createdAt: existing?.createdAt ?? Date.now(),
+        name: existing?.name ?? null,
+        status,
+      });
+      putRequest.onerror = () => reject(putRequest.error);
+    };
+    getRequest.onerror = () => reject(getRequest.error);
+
     // Resolve on tx.oncomplete (commit), not request.onsuccess, so an
     // acknowledged save always means the IndexedDB transaction committed.
-    request.onerror = () => reject(request.error);
     tx.oncomplete = () => {
       db.close();
       resolve();

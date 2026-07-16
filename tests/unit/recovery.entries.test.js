@@ -41,6 +41,7 @@ beforeEach(async () => {
 afterEach(() => {
   teardownIndexedDB();
   delete global.chrome;
+  delete global.confirm;
 });
 
 describe('src/entries/recovery.js — DB connection hygiene', () => {
@@ -98,5 +99,30 @@ describe('src/entries/recovery.js — DB connection hygiene', () => {
 
     const { getRecording } = await import('../../src/lib/recording.js');
     expect(await getRecording('rec-to-discard')).toBeNull();
+  });
+
+  it('delegates active-session discard without redundantly clearing storage', async () => {
+    chrome.storage.local.get.mockResolvedValue({
+      sessionSnapshot: {
+        recordingId: 'active-recording',
+        status: 'recoverable',
+        startedAt: 1,
+      },
+    });
+    global.confirm = jest.fn(() => true);
+
+    await import('../../src/entries/recovery.js');
+    document.dispatchEvent(new Event('DOMContentLoaded'));
+    await flushMacrotasks();
+
+    const discardBtn = document.querySelector('button[data-action="discard"]');
+    discardBtn.click();
+    await flushMacrotasks();
+
+    expect(chrome.runtime.sendMessage).toHaveBeenCalledWith({
+      type: 'RECOVERY_DISCARD',
+      recordingId: 'active-recording',
+    });
+    expect(chrome.storage.local.remove).not.toHaveBeenCalled();
   });
 });

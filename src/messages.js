@@ -17,7 +17,6 @@ export const MSG_PREVIEW_READY = 'PREVIEW_READY';
 export const MSG_OFFSCREEN_ERROR = 'OFFSCREEN_ERROR';
 export const MSG_RECORDER_ERROR = 'RECORDER_ERROR';
 export const MSG_OFFSCREEN_TEST = 'OFFSCREEN_TEST';
-export const MSG_RECOVERY_RESUME = 'RECOVERY_RESUME';
 export const MSG_RECOVERY_DISCARD = 'RECOVERY_DISCARD';
 
 const RECORDING_MODES = ['tab', 'window', 'screen'];
@@ -118,13 +117,6 @@ export const schemas = {
   },
   [MSG_OFFSCREEN_TEST]: {
     required: [['type', 'string']],
-    optional: [],
-  },
-  [MSG_RECOVERY_RESUME]: {
-    required: [
-      ['type', 'string'],
-      ['recordingId', 'string'],
-    ],
     optional: [],
   },
   [MSG_RECOVERY_DISCARD]: {

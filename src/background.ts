@@ -56,7 +56,11 @@ const chromeAPI = {
       chrome.scripting.executeScript(options),
   },
   offscreen: {
-    createDocument: (options: { url: string; reasons: string[]; justification: string }) =>
+    createDocument: (options: {
+      url: string;
+      reasons: chrome.offscreen.CreateParameters['reasons'];
+      justification: string;
+    }) =>
       chrome.offscreen.createDocument(options),
     closeDocument: () => chrome.offscreen.closeDocument(),
     hasDocument: () => chrome.offscreen.hasDocument(),
@@ -115,44 +119,58 @@ function checkRateLimit(senderId: string): boolean {
 // SESSION RECONCILIATION
 // ═══════════════════════════════════════════════════════════════════════════════
 
-async function reconcileUnfinishedSessions(): Promise<void> {
+async function recoverOrphanedRecordings(): Promise<number> {
+  let recoveredCount = 0;
   try {
-    // Snapshot-independent orphan sweep: any recording left in the in-progress
-    // `active` state (crashed before finishRecording, so no session snapshot may
-    // exist) is flipped to `partial` so its persisted chunks stay recoverable.
-    try {
-      const recordings = await getAllRecordings();
-      for (const rec of recordings) {
-        if (rec.status === 'active') {
-          await markRecordingRecoverable(rec.id);
-          logger.log('Swept orphaned active recording to partial', { recordingId: rec.id });
-        }
+    const recordings = await getAllRecordings();
+    for (const recording of recordings) {
+      if (recording.status === 'active') {
+        await markRecordingRecoverable(recording.id);
+        recoveredCount++;
+        logger.log('Swept orphaned active recording to partial', {
+          recordingId: recording.id,
+        });
       }
-    } catch (e) {
-      logger.error('Orphan-active sweep failed:', e);
     }
+  } catch (e) {
+    logger.error('Orphan-active sweep failed:', e);
+  }
+  return recoveredCount;
+}
 
-    const result = await chrome.storage.local.get(SESSION_SNAPSHOT_KEY);
-    const snapshot = result[SESSION_SNAPSHOT_KEY];
-    if (!snapshot) return;
+async function reconcileUnfinishedSessions(): Promise<void> {
+  const currentState = service.getState();
+  let recoveredOrphanCount = 0;
+  let result: Record<string, unknown>;
+  let snapshot: { status?: string; recordingId?: string } | undefined;
 
-    // A recording is NOT resumable after a service-worker/browser restart (dead
-    // MediaStream, no user gesture, null tab ids). For ANY non-idle snapshot we
-    // mark the persisted chunks recoverable and prompt the user to
-    // save-partial/discard — we never resurrect a live recording session.
-    if (snapshot.status && snapshot.status !== 'idle') {
-      logger.log('Found non-idle session snapshot, marking recoverable', {
+  // Periodic reconciliation also runs while this service worker is alive. Do
+  // not mistake the current in-memory recording for an interrupted session.
+  if (currentState.recording) {
+    return;
+  }
+
+  try {
+    recoveredOrphanCount = await recoverOrphanedRecordings();
+    result = await chrome.storage.local.get(SESSION_SNAPSHOT_KEY);
+    snapshot = result[SESSION_SNAPSHOT_KEY] as
+      | { status?: string; recordingId?: string }
+      | undefined;
+
+    if (snapshot?.status && snapshot.status !== 'idle') {
+      logger.log('Found interrupted session snapshot, marking recoverable', {
         status: snapshot.status,
       });
       await chrome.storage.local.remove(SESSION_SNAPSHOT_KEY);
 
-      if (snapshot.recordingId) {
-        const hasChunksResult = await hasChunks(snapshot.recordingId);
-        if (hasChunksResult) {
-          await markRecordingRecoverable(snapshot.recordingId);
-          logger.log('Marked recording as recoverable', { recordingId: snapshot.recordingId });
-        }
+      if (snapshot.recordingId && (await hasChunks(snapshot.recordingId))) {
+        await markRecordingRecoverable(snapshot.recordingId);
+        logger.log('Marked recording as recoverable', { recordingId: snapshot.recordingId });
       }
+      await showRecoveryPrompt();
+    } else if (recoveredOrphanCount > 0) {
+      // A crash can happen before the first session snapshot is persisted.
+      // The metadata stub still makes the chunks recoverable, so notify the user.
       await showRecoveryPrompt();
     }
   } catch (e) {

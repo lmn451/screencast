@@ -30,6 +30,11 @@ describe('commit-time durability (transaction abort rejects)', () => {
     const fakeDB = {
       transaction: () => {
         const store = {
+          get: () => {
+            const req = { result: undefined };
+            setTimeout(() => req.onsuccess && req.onsuccess(), 0);
+            return req;
+          },
           put: () => {
             const req = {};
             // Individual write "succeeds"…

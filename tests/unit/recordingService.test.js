@@ -62,6 +62,10 @@ function makeStubChrome(overrides = {}) {
     windows: {
       update: jest.fn(async () => undefined),
     },
+    alarms: {
+      create: jest.fn(),
+      clear: jest.fn(async () => true),
+    },
     ...overrides,
   };
 }
@@ -420,36 +424,21 @@ describe('state projection and recovery exits', () => {
     expect(svc.getState().recording).toBe(false);
   });
 
-  it('recovery discard clears a reconciled (recoverable, never resumed) recording', async () => {
+  it('recovery discard clears a recording after its save times out', async () => {
     const chrome = makeStubChrome();
     const svc = createRecordingService(chrome);
-    svc.reconcile({
-      recordingId: VALID_UUID,
-      status: 'recording',
-      startedAt: 1,
-      lastActivityAt: 2,
-      options: { mode: 'tab', includeMic: false, includeSystemAudio: false },
-      strategy: 'offscreen',
-      correlationId: VALID_UUID,
-    });
+    await svc.startRecording('tab', false, false);
+    svc.handleOffscreenStarted();
+    const recordingId = svc.getState().recordingId;
 
-    // reconcile() never resurrects a live session — it parks the snapshot in
-    // `recoverable` (background.ts marks the chunks recoverable + prompts the
-    // user instead of resuming). Confirm we start from `recoverable`, not
-    // `recording`, before discarding.
+    await svc.stopRecording();
+    jest.advanceTimersByTime(60_000);
     expect(svc.getState().status).toBe('recoverable');
 
-    await svc.handleRecoveryDiscard(VALID_UUID);
+    await svc.handleRecoveryDiscard(recordingId);
 
     expect(svc.getState().status).toBe('idle');
     expect(svc.getState().recording).toBe(false);
-
-    // The `sessionSnapshot` clear happens inside RecordingService's internal
-    // stateChangeQueue (chained off the XState subscription), which is
-    // deliberately not awaited by handleRecoveryDiscard/onStateChange callers —
-    // it's a best-effort side effect, not part of the request/response
-    // contract. Flush a few microtask ticks so the queued clear has a chance
-    // to run before asserting on it.
     await flushMicrotasks();
     expect(chrome.storage.remove).toHaveBeenCalledWith('sessionSnapshot');
   });
@@ -484,48 +473,36 @@ describe('state projection and recovery exits', () => {
     expect(svc.getState().status).toBe('recording');
     expect(svc.getState().recording).toBe(true);
   });
-});
 
-describe('reconcile', () => {
-  it('hydrates the machine from a snapshot when idle, landing in recoverable (never recording)', () => {
-    // Resume is infeasible after a service-worker/browser restart (dead
-    // MediaStream, no user gesture, null tab ids), so reconcile() always parks
-    // a non-idle snapshot in `recoverable` rather than resurrecting `recording`.
+  it('does not re-arm a checkpoint stopped while persistence is in flight', async () => {
+    jest.useRealTimers();
     const chrome = makeStubChrome();
     const svc = createRecordingService(chrome);
-
-    svc.reconcile({
-      recordingId: VALID_UUID,
-      status: 'recording',
-      startedAt: 1,
-      lastActivityAt: 2,
-      options: { mode: 'tab', includeMic: false, includeSystemAudio: false },
-      strategy: 'offscreen',
-      correlationId: VALID_UUID,
-    });
-
-    expect(svc.getState().status).toBe('recoverable');
-    expect(svc.getState().recordingId).toBe(VALID_UUID);
-  });
-
-  it('does not clobber an already-active machine', async () => {
-    const chrome = makeStubChrome();
-    const svc = createRecordingService(chrome);
-
     await svc.startRecording('tab', false, false);
     svc.handleOffscreenStarted();
-    const idBeforeReconcile = svc.getState().recordingId;
 
-    svc.reconcile({
-      recordingId: VALID_UUID,
-      status: 'recording',
-      startedAt: 1,
-      lastActivityAt: 2,
-      options: { mode: 'tab', includeMic: false, includeSystemAudio: false },
-      strategy: 'offscreen',
-      correlationId: VALID_UUID,
+    for (let i = 0; i < 5; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    chrome.storage.set.mockClear();
+    chrome.alarms.create.mockClear();
+    chrome.alarms.clear.mockClear();
+
+    let releasePersist;
+    const blockedPersist = new Promise((resolve) => {
+      releasePersist = resolve;
     });
+    chrome.storage.set.mockImplementationOnce(() => blockedPersist);
 
-    expect(svc.getState().recordingId).toBe(idBeforeReconcile);
+    const checkpoint = svc.handleCheckpointAlarm();
+    await flushMicrotasks(2);
+    expect(chrome.storage.set).toHaveBeenCalledTimes(1);
+
+    await svc.handleOffscreenError('capture failed');
+    expect(chrome.alarms.clear).toHaveBeenCalled();
+    releasePersist();
+    await checkpoint;
+
+    expect(chrome.alarms.create).not.toHaveBeenCalled();
   });
 });

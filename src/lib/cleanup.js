@@ -6,7 +6,6 @@ const logger = createLogger('Cleanup');
 // Thresholds for cleanup (in milliseconds)
 const PARTIAL_RECORDING_THRESHOLD_MS = 60 * 60 * 1000; // 1 hour
 const FAILED_RECORDING_THRESHOLD_MS = 30 * 60 * 1000; // 30 minutes
-const ACTIVE_RECORDING_THRESHOLD_MS = 60 * 60 * 1000; // 1 hour
 
 export async function deleteRecording(id) {
   const db = await openDB();
@@ -237,81 +236,6 @@ export async function cleanupFailedRecordings(thresholdMs = FAILED_RECORDING_THR
     tx.oncomplete = () => {
       if (idsToDelete.length > 0) {
         logger.log(`Failed recordings cleanup: Deleted ${idsToDelete.length} recordings`);
-      }
-      resolve({ deleted: idsToDelete.length });
-    };
-    tx.onerror = () => {
-      db.close();
-      reject(tx.error);
-    };
-  });
-}
-
-/**
- * Clean up stale orphaned `active` (stub) recordings older than threshold.
- * An `active` row is written at recording start; a clean stop or reconcile
- * flips it away from `active`. A row still `active` past the threshold is an
- * orphan from an abnormally-ended session and is reclaimed here.
- * @param {number} [thresholdMs=ACTIVE_RECORDING_THRESHOLD_MS] - Age threshold in milliseconds
- * @returns {Promise<{deleted: number}>}
- */
-export async function cleanupActiveRecordings(thresholdMs = ACTIVE_RECORDING_THRESHOLD_MS) {
-  const db = await openDB();
-  const cutoff = Date.now() - thresholdMs;
-
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction([STORE_RECORDINGS, STORE_CHUNKS], 'readwrite');
-    const store = tx.objectStore(STORE_RECORDINGS);
-    const req = store.openCursor();
-
-    const idsToDelete = [];
-
-    req.onsuccess = (event) => {
-      const cursor = event.target.result;
-      if (cursor) {
-        const recording = cursor.value;
-        // Delete active (stub) recordings older than threshold
-        if (recording.status === 'active' && recording.createdAt < cutoff) {
-          idsToDelete.push(recording.id);
-          cursor.delete();
-        }
-        cursor.continue();
-      } else {
-        if (idsToDelete.length === 0) {
-          db.close();
-          resolve({ deleted: 0 });
-          return;
-        }
-
-        const chunkStore = tx.objectStore(STORE_CHUNKS);
-        const chunkIndex = chunkStore.index('recordingId');
-
-        let completed = 0;
-        const checkDone = () => {
-          completed++;
-          if (completed === idsToDelete.length) {
-            db.close();
-          }
-        };
-
-        idsToDelete.forEach((id) => {
-          const chunkReq = chunkIndex.openKeyCursor(IDBKeyRange.only(id));
-          chunkReq.onsuccess = (e) => {
-            const c = e.target.result;
-            if (c) {
-              chunkStore.delete(c.primaryKey);
-              c.continue();
-            } else {
-              checkDone();
-            }
-          };
-        });
-      }
-    };
-
-    tx.oncomplete = () => {
-      if (idsToDelete.length > 0) {
-        logger.log(`Active recordings cleanup: Deleted ${idsToDelete.length} recordings`);
       }
       resolve({ deleted: idsToDelete.length });
     };

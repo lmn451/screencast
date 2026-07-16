@@ -55,7 +55,6 @@ Recording states also support:
 | `CONFIRMATION_TIMEOUT` | Internal | 5s timeout fallback |
 | `SAVE_TIMEOUT` | Internal | 60s timeout for saving |
 | `RESET` | User/Recovery | Return to idle |
-| `RECONCILE` | On startup | Restore from session snapshot |
 
 ### Context
 
