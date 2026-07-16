@@ -12,12 +12,7 @@
  */
 
 import { setup, assign } from 'xstate';
-import type {
-  RecordingContext,
-  RecordingEvent,
-  RecordingMode,
-  RecordingStrategy,
-} from './types.js';
+import type { RecordingContext, RecordingEvent, RecordingMode } from './types.js';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // INITIAL CONTEXT
@@ -91,7 +86,10 @@ export const recordingMachine = setup({
     }),
 
     setError: assign({
-      error: ({ event }) => (event as { type: 'OFFSCREEN_ERROR' | 'RECORDER_ERROR' }).error,
+      error: ({ event }) =>
+        (event as { type: 'OFFSCREEN_ERROR'; error: string }).error ||
+        (event as { type: 'RECORDER_ERROR'; error: string }).error ||
+        'Recording failed',
     }),
 
     setTabClosedError: assign({
@@ -128,26 +126,6 @@ export const recordingMachine = setup({
             }),
             error: () => null,
             failedChunkCount: () => 0,
-          }),
-        },
-        RECONCILE: {
-          target: 'recoverable',
-          actions: assign({
-            recordingId: ({ event }) =>
-              (event as { type: 'RECONCILE'; snapshot: { recordingId: string } }).snapshot
-                .recordingId,
-            strategy: ({ event }) =>
-              (event as { type: 'RECONCILE'; snapshot: { strategy: RecordingStrategy } }).snapshot
-                .strategy,
-            startedAt: ({ event }) =>
-              (event as { type: 'RECONCILE'; snapshot: { startedAt: number } }).snapshot.startedAt,
-            lastActivityAt: () => Date.now(),
-            options: ({ event }) =>
-              (event as { type: 'RECONCILE'; snapshot: { options: RecordingContext['options'] } })
-                .snapshot.options,
-            correlationId: ({ event }) =>
-              (event as { type: 'RECONCILE'; snapshot: { correlationId: string } }).snapshot
-                .correlationId,
           }),
         },
       },

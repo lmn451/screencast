@@ -32,12 +32,16 @@ interface ChromeAPI {
     }) => Promise<Array<{ id?: number; windowId?: number }>>;
     create: (options: { url: string; active?: boolean }) => Promise<{ id?: number }>;
     remove: (tabId: number) => Promise<void>;
-    update: (tabId: number, options: { active: boolean }) => Promise<void>;
+    update: (tabId: number, options: { active: boolean }) => Promise<unknown>;
     get: (tabId: number) => Promise<{ windowId: number }>;
     sendMessage: (tabId: number, message: Record<string, unknown>) => Promise<void>;
   };
   scripting: {
-    executeScript: (options: { target: { tabId: number }; files: string[] }) => Promise<void>;
+    executeScript: (options: {
+      target: { tabId: number };
+      files?: string[];
+      func?: () => void;
+    }) => Promise<unknown>;
   };
   offscreen: {
     createDocument: (options: {
@@ -58,7 +62,7 @@ interface ChromeAPI {
     id: string;
   };
   windows: {
-    update: (windowId: number, options: { focused: boolean }) => Promise<void>;
+    update: (windowId: number, options: { focused: boolean }) => Promise<unknown>;
   };
   // Optional so existing test doubles that omit it stay valid; the production
   // wrapper in background.ts always supplies it. MV3 checkpoint scheduling.
@@ -97,6 +101,7 @@ export class RecordingService {
   // Serializes onStateChange so persist/clear/close/badge side effects cannot
   // interleave across rapid transitions (notably saved→idle).
   private stateChangeQueue: Promise<void> = Promise.resolve();
+  private checkpointActive = false;
 
   constructor(chrome: ChromeAPI) {
     this.chrome = chrome;
@@ -324,6 +329,7 @@ export class RecordingService {
 
   private startCheckpointTimer(): void {
     this.stopCheckpointTimer();
+    this.checkpointActive = true;
     // MV3: setInterval does not survive service-worker suspension. Use a
     // chrome.alarms-backed checkpoint instead. TIMEOUTS.CHECKPOINT (30s) sits
     // AT the ~30s alarms floor, so we schedule a one-shot alarm and re-arm it
@@ -335,6 +341,7 @@ export class RecordingService {
   }
 
   private stopCheckpointTimer(): void {
+    this.checkpointActive = false;
     // Fire-and-forget clear; keeps this method synchronous for callers.
     void this.chrome.alarms?.clear(CHECKPOINT_ALARM_NAME);
   }
@@ -348,14 +355,19 @@ export class RecordingService {
   async handleCheckpointAlarm(): Promise<void> {
     const snapshot = this.actor.getSnapshot();
     const state = snapshot.value;
-    if (state === 'recording' || state === 'stopping') {
+    const isActiveState = state === 'recording' || state === 'stopping';
+
+    if (this.checkpointActive && isActiveState) {
       if (snapshot.context.recordingId) {
         await this.persistSessionSnapshot(snapshot.context);
       }
-      // Re-arm for the next checkpoint.
-      this.chrome.alarms?.create(CHECKPOINT_ALARM_NAME, {
-        delayInMinutes: TIMEOUTS.CHECKPOINT / 60000,
-      });
+
+      const currentState = this.actor.getSnapshot().value;
+      if (this.checkpointActive && (currentState === 'recording' || currentState === 'stopping')) {
+        this.chrome.alarms?.create(CHECKPOINT_ALARM_NAME, {
+          delayInMinutes: TIMEOUTS.CHECKPOINT / 60000,
+        });
+      }
     }
   }
 
@@ -659,30 +671,6 @@ export class RecordingService {
     this.actor.send({ type: 'RESET' });
   }
 
-  /**
-   * Re-hydrate the state machine from a persisted session snapshot, e.g. when
-   * the service worker restarts mid-recording. The machine transitions
-   * idle → recording with the snapshot's recordingId/strategy/options/etc.
-   */
-  reconcile(snapshot: {
-    recordingId: string;
-    status: string;
-    startedAt: number;
-    lastActivityAt: number;
-    options: {
-      mode: 'tab' | 'window' | 'screen' | null;
-      includeMic: boolean;
-      includeSystemAudio: boolean;
-    };
-    strategy: 'offscreen' | 'page' | null;
-    correlationId: string;
-  }): void {
-    if (this.actor.getSnapshot().value !== 'idle') {
-      return; // already running; don't clobber
-    }
-    this.actor.send({ type: 'RECONCILE', snapshot });
-  }
-
   // ═══════════════════════════════════════════════════════════════════════════
   // HELPER METHODS
   // ═══════════════════════════════════════════════════════════════════════════
@@ -753,7 +741,7 @@ export class RecordingService {
   async handleMessage(
     message: Record<string, unknown>,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    _sender: { id: string }
+    _sender: { id?: string }
   ): Promise<{ ok: boolean; error?: string } | null> {
     // Sender validation, schema validation, and rate limiting are performed
     // in src/background.ts before this is called. Do not duplicate them here.

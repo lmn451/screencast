@@ -172,10 +172,8 @@ async function render() {
               try {
                 const snapshot = await chrome.storage.local.get('sessionSnapshot');
                 if (snapshot.sessionSnapshot && snapshot.sessionSnapshot.recordingId === id) {
-                  // Active session: clear via background message
+                  // Background owns the machine transition and snapshot cleanup.
                   await chrome.runtime.sendMessage({ type: 'RECOVERY_DISCARD', recordingId: id });
-                  // Also clear from storage
-                  await chrome.storage.local.remove('sessionSnapshot');
                 } else {
                   await deleteRecording(id);
                 }

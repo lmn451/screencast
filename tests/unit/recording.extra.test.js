@@ -133,6 +133,11 @@ describe('recording.js additional tests', () => {
       const db = {
         transaction: () => {
           const store = {
+            get: () => {
+              const req = { result: undefined };
+              setTimeout(() => req.onsuccess && req.onsuccess(), 0);
+              return req;
+            },
             put: () => {
               const req = {};
               setTimeout(() => req.onsuccess && req.onsuccess(), 0);
