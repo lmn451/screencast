@@ -10,10 +10,10 @@ describe('media-recorder-utils (additional)', () => {
     jest.clearAllMocks();
   });
 
-  it.skip('createMediaRecorder: records chunks and calls callbacks', async () => {
+  it('createMediaRecorder: records chunks and calls callbacks', async () => {
     const saveChunkMock = jest.fn(() => Promise.resolve());
 
-    await jest.unstable_mockModule('../../src/lib/db.js', () => ({
+    await jest.unstable_mockModule('../../src/lib/chunkStorage.js', () => ({
       saveChunk: saveChunkMock,
     }));
 
@@ -43,7 +43,7 @@ describe('media-recorder-utils (additional)', () => {
       stop() {
         if (this.state !== 'inactive') {
           this.state = 'inactive';
-          this.onstop?.();
+          return this.onstop?.();
         }
       }
     }
@@ -67,10 +67,7 @@ describe('media-recorder-utils (additional)', () => {
     // wait a tick for async saveChunk
     await Promise.resolve();
 
-    recorder.stop();
-
-    // wait for onstop async handler
-    await Promise.resolve();
+    await recorder.stop();
 
     expect(onStart).toHaveBeenCalled();
     expect(saveChunkMock).toHaveBeenCalledWith('r1', expect.objectContaining({ size: 256 }), 0);
@@ -81,10 +78,10 @@ describe('media-recorder-utils (additional)', () => {
     expect(stats.totalSize).toBeGreaterThanOrEqual(256);
   });
 
-  it.skip('createMediaRecorder: continues when saveChunk fails', async () => {
+  it('createMediaRecorder: continues when saveChunk fails', async () => {
     const saveChunkMock = jest.fn(() => Promise.reject(new Error('DB fail')));
 
-    await jest.unstable_mockModule('../../src/lib/db.js', () => ({
+    await jest.unstable_mockModule('../../src/lib/chunkStorage.js', () => ({
       saveChunk: saveChunkMock,
     }));
 
@@ -107,7 +104,7 @@ describe('media-recorder-utils (additional)', () => {
       }
       stop() {
         this.state = 'inactive';
-        this.onstop?.();
+        return this.onstop?.();
       }
     }
 
@@ -122,18 +119,14 @@ describe('media-recorder-utils (additional)', () => {
     recorder.start();
     recorder.requestData();
 
-    // allow promise rejection to be observed inside handler
-    await Promise.resolve();
-
-    recorder.stop();
-    await Promise.resolve();
+    await recorder.stop();
 
     expect(onStop).toHaveBeenCalled();
     expect(saveChunkMock).toHaveBeenCalled();
   });
 
-  it.skip('createMediaRecorder: throws when no codec supported', async () => {
-    await jest.unstable_mockModule('../../src/lib/db.js', () => ({ saveChunk: jest.fn() }));
+  it('createMediaRecorder: throws when no codec supported', async () => {
+    await jest.unstable_mockModule('../../src/lib/chunkStorage.js', () => ({ saveChunk: jest.fn() }));
 
     class NoCodecRecorder {
       static isTypeSupported() {
