@@ -79,6 +79,10 @@ export class RecordingService {
   private overlayTabId: number | null = null;
   private recorderTabId: number | null = null;
   private readonly expectedClosedTabs = new Set<number>();
+  private stateEffectQueue: Promise<void> = Promise.resolve();
+  private stateEffectSequence = 0;
+
+  private static readonly SESSION_SNAPSHOT_KEY = STORAGE_KEYS.SESSION_SNAPSHOT;
 
   constructor(chrome: ChromeAPI) {
     this.chrome = chrome;
@@ -88,7 +92,7 @@ export class RecordingService {
 
     // Subscribe to state changes for side effects (badge, persistence, overlay)
     this.actor.subscribe((snapshot) => {
-      this.onStateChange(snapshot);
+      this.enqueueStateTransition(snapshot);
     });
 
     this.actor.start();
@@ -98,9 +102,38 @@ export class RecordingService {
   // STATE CHANGE HANDLER (Chrome API side effects)
   // ═══════════════════════════════════════════════════════════════════════════
 
-  private async onStateChange(snapshot: { value: string; context: RecordingContext }): Promise<void> {
-    const state = snapshot.value;
-    const context = snapshot.context;
+  private enqueueStateTransition(snapshot: { value: string; context: RecordingContext }): void {
+    const effectId = ++this.stateEffectSequence;
+    const payload = {
+      id: effectId,
+      state: snapshot.value,
+      context: { ...snapshot.context },
+      overlayTabId: this.overlayTabId,
+    };
+
+    this.stateEffectQueue = this.stateEffectQueue
+      .then(() => this.applyStateTransitionEffects(payload))
+      .catch((error) => {
+        console.error('[RecordingService] Failed to process serialized state effects:', {
+          effectId,
+          state: payload.state,
+          recordingId: payload.context.recordingId,
+          error,
+        });
+      });
+  }
+
+  public async drainStateEffects(): Promise<void> {
+    await this.stateEffectQueue;
+  }
+
+  private async applyStateTransitionEffects(snapshot: {
+    id: number;
+    state: string;
+    context: RecordingContext;
+    overlayTabId: number | null;
+  }): Promise<void> {
+    const { state, context, overlayTabId } = snapshot;
 
     // Badge management
     await this.updateBadge(state);
@@ -109,22 +142,24 @@ export class RecordingService {
     if (state === 'recording' || state === 'stopping') {
       await this.persistSessionSnapshot(context);
     } else if (state === 'idle' || state === 'saved' || state === 'failed' || state === 'recoverable') {
-      await this.clearSessionSnapshot();
+      await this.clearSessionSnapshot(context.recordingId);
     }
 
     // Overlay removal on transition back to idle.
     // (Injection is driven explicitly from startRecording, not from state changes,
     // since overlayTabId is owned by the service instance, not the machine context.)
-    if (state === 'idle' && this.overlayTabId) {
-      await this.removeOverlay(this.overlayTabId);
-      this.overlayTabId = null;
+    if (state === 'idle' && overlayTabId) {
+      await this.removeOverlayIfCurrentRecording(overlayTabId, context.recordingId);
+      if (this.overlayTabId === overlayTabId) {
+        this.overlayTabId = null;
+      }
     }
 
     // Offscreen document lifecycle
     if (state === 'idle') {
-      await this.closeOffscreenDocumentIfIdle();
+      await this.closeOffscreenDocumentIfIdle(context.recordingId);
     } else if (state === 'recoverable') {
-      await this.cleanup();
+      await this.cleanup(context.recordingId);
     }
   }
 
@@ -152,8 +187,8 @@ export class RecordingService {
     if (!context.recordingId) return;
     const current = this.actor.getSnapshot();
     if (
-      !(current.matches('recording') || current.matches('stopping')) ||
-      current.context.recordingId !== context.recordingId
+      current.context.recordingId !== context.recordingId ||
+      !(current.matches('recording') || current.matches('stopping'))
     ) {
       return;
     }
@@ -168,22 +203,39 @@ export class RecordingService {
         strategy: context.strategy,
         correlationId: context.correlationId,
       };
-      await this.chrome.storage.set({ [STORAGE_KEYS.SESSION_SNAPSHOT]: snapshot });
+      await this.chrome.storage.set({ [RecordingService.SESSION_SNAPSHOT_KEY]: snapshot });
     } catch (e) {
       console.warn('[RecordingService] Failed to persist session snapshot:', e);
     }
   }
 
-  private async clearSessionSnapshot(): Promise<void> {
+  private async clearSessionSnapshot(recordingId: string | null): Promise<void> {
+    const current = this.actor.getSnapshot();
+    if (current.context.recordingId !== recordingId) {
+      return;
+    }
+
     try {
-      await this.chrome.storage.remove(STORAGE_KEYS.SESSION_SNAPSHOT);
+      await this.chrome.storage.remove(RecordingService.SESSION_SNAPSHOT_KEY);
     } catch (e) {
       console.warn('[RecordingService] Failed to clear session snapshot:', e);
     }
   }
 
+  private async removeOverlayIfCurrentRecording(
+    tabId: number,
+    expectedRecordingId: string | null
+  ): Promise<void> {
+    const current = this.actor.getSnapshot();
+    if (current.context.recordingId !== expectedRecordingId) {
+      return;
+    }
+
+    await this.removeOverlay(tabId);
+  }
+
   private async clearActiveSessionArtifacts(): Promise<void> {
-    await this.clearSessionSnapshot();
+    await this.clearSessionSnapshot(this.actor.getSnapshot().context.recordingId);
     await this.updateBadge('idle');
   }
 
@@ -266,14 +318,16 @@ export class RecordingService {
     this.recorderTabId = tab.id ?? null;
   }
 
-  private async closeOffscreenDocumentIfIdle(): Promise<void> {
+  private async closeOffscreenDocumentIfIdle(expectedRecordingId: string | null): Promise<void> {
+    const current = this.actor.getSnapshot();
+    if (current.context.recordingId !== expectedRecordingId || !current.matches('idle')) {
+      return;
+    }
+
     try {
       const existing = await this.chrome.offscreen.hasDocument();
       if (existing) {
-        const state = this.actor.getSnapshot().value;
-        if (state === 'idle') {
-          await this.chrome.offscreen.closeDocument();
-        }
+        await this.chrome.offscreen.closeDocument();
       }
     } catch (e) {
       console.warn('[RecordingService] Failed to close offscreen document:', e);
@@ -703,7 +757,12 @@ export class RecordingService {
     );
   }
 
-  private async cleanup(): Promise<void> {
+  private async cleanup(expectedRecordingId: string | null = this.actor.getSnapshot().context.recordingId): Promise<void> {
+    const current = this.actor.getSnapshot();
+    if (current.context.recordingId !== expectedRecordingId) {
+      return;
+    }
+
     // Remove overlay
     if (this.overlayTabId) {
       await this.removeOverlay(this.overlayTabId);

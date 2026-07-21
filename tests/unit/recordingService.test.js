@@ -8,8 +8,17 @@
  */
 
 import { jest } from '@jest/globals';
+import { STORAGE_KEYS } from '../../src/machines/types.js';
 
 const VALID_UUID = '550e8400-e29b-41d4-a716-446655440000';
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
 
 // Mock checkStorageQuota so the service doesn't try to read real IndexedDB.
 jest.unstable_mockModule('../../src/lib/storage-utils.js', () => ({
@@ -545,7 +554,7 @@ describe('handleMessage routing', () => {
   });
 });
 
-describe('reconcile', () => {
+  describe('reconcile', () => {
   it('hydrates the machine from a snapshot when idle', () => {
     const chrome = makeStubChrome();
     const svc = createRecordingService(chrome);
@@ -562,6 +571,131 @@ describe('reconcile', () => {
 
     expect(svc.getState().status).toBe('recording');
     expect(svc.getState().recordingId).toBe(VALID_UUID);
+  });
+
+  describe('state effect queue', () => {
+    it('serializes state effects so later transitions do not overtake earlier async effects', async () => {
+      const callOrder = [];
+      const gate = deferred();
+
+      const chrome = makeStubChrome({
+        storage: {
+          get: jest.fn(async () => ({})),
+          set: jest.fn(async () => {
+            callOrder.push('persist-start');
+            await gate.promise;
+            callOrder.push('persist-end');
+          }),
+          remove: jest.fn(async () => {
+            callOrder.push('clear-start');
+          }),
+        },
+      });
+      const svc = createRecordingService(chrome);
+
+      await svc.startRecording('tab', false, false);
+      svc.handleOffscreenStarted();
+
+      const actor = svc.actor;
+      const recordingId = svc.getState().recordingId;
+      actor.send({
+        type: 'OFFSCREEN_ERROR',
+        recordingId,
+        error: {
+          ok: false,
+          code: 'screen-permission-denied',
+          userMessage: 'Permission denied',
+        },
+      });
+
+      await Promise.resolve();
+      expect(callOrder).toEqual(['persist-start']);
+
+      gate.resolve();
+      await svc.drainStateEffects();
+
+      expect(callOrder).toEqual(['persist-start', 'persist-end', 'clear-start']);
+    });
+
+    it('logs rejected state effects and continues processing subsequent transitions', async () => {
+      const chrome = makeStubChrome();
+      const svc = createRecordingService(chrome);
+
+      await svc.startRecording('tab', false, false);
+      svc.handleOffscreenStarted();
+
+      const actor = svc.actor;
+      const persistSpy = jest.fn(async () => {
+        throw new Error('persist failed');
+      });
+      // @ts-expect-error -- private method override for deterministic test behavior.
+      svc.persistSessionSnapshot = persistSpy;
+
+      const consoleSpy = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+
+      actor.send({ type: 'STOP' });
+      actor.send({ type: 'SAVE_TIMEOUT' });
+
+      await svc.drainStateEffects();
+
+      expect(consoleSpy).toHaveBeenCalledWith(
+        '[RecordingService] Failed to process serialized state effects:',
+        expect.objectContaining({
+          state: 'stopping',
+          error: expect.any(Error),
+        })
+      );
+      expect(svc.getState().status).toBe('recoverable');
+      consoleSpy.mockRestore();
+    });
+
+    it('does not allow stale snapshot clearing to affect a newer session', async () => {
+      const snapshotStore = { value: null };
+
+      const chrome = makeStubChrome({
+        storage: {
+          get: jest.fn(async () => ({ [STORAGE_KEYS.SESSION_SNAPSHOT]: snapshotStore.value })),
+          set: jest.fn(async (items) => {
+            snapshotStore.value = items[STORAGE_KEYS.SESSION_SNAPSHOT];
+          }),
+          remove: jest.fn(async () => {
+            snapshotStore.value = null;
+          }),
+        },
+      });
+
+      const svc = createRecordingService(chrome);
+
+      await svc.startRecording('tab', false, false);
+      svc.handleOffscreenStarted();
+      const firstRecordingId = svc.getState().recordingId;
+
+      const actor = svc.actor;
+      actor.send({
+        type: 'OFFSCREEN_ERROR',
+        recordingId: firstRecordingId,
+        error: {
+          ok: false,
+          code: 'screen-disconnected',
+          userMessage: 'Session lost',
+        },
+      });
+      actor.send({
+        type: 'RECOVERY_DISCARD',
+        recordingId: firstRecordingId,
+      });
+
+      await svc.startRecording('tab', true, false);
+      svc.handleOffscreenStarted();
+
+      await svc.drainStateEffects();
+
+      const secondRecordingId = svc.getState().recordingId;
+      expect(chrome.storage.remove).toHaveBeenCalledTimes(0);
+      expect(secondRecordingId).not.toBe(firstRecordingId);
+      expect(snapshotStore.value).not.toBeNull();
+      expect(snapshotStore.value.recordingId).toBe(secondRecordingId);
+    });
   });
 
   it('does not clobber an already-active machine', async () => {
