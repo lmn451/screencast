@@ -228,7 +228,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // Keep the service informed about tab lifecycle changes for hard ownership checks.
 chrome.tabs.onRemoved.addListener((tabId) => {
-  service.handleTabClosing(tabId);
+  void service.handleTabClosing(tabId);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
