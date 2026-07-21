@@ -915,7 +915,7 @@ export class RecordingService {
         return { ok: true, ...this.getState() };
 
       case 'TAB_CLOSING':
-        this.handleTabClosing(message.tabId as number);
+        await this.handleTabClosing(message.tabId as number);
         return { ok: true };
 
       case 'PREVIEW_READY':
@@ -953,7 +953,7 @@ export class RecordingService {
     return this.expectedClosedTabs.delete(tabId);
   }
 
-  handleTabClosing(tabId: number): void {
+  async handleTabClosing(tabId: number): Promise<void> {
     if (!tabId || this.consumeExpectedClosedTab(tabId)) {
       return;
     }
@@ -967,14 +967,14 @@ export class RecordingService {
     if (this.overlayTabId === tabId) {
       this.clearTimers();
       this.actor.send({ type: 'OVERLAY_TAB_CLOSED' });
-      void this.cleanup();
+      await this.cleanup();
       return;
     }
 
     if (this.recorderTabId === tabId) {
       this.clearTimers();
       this.actor.send({ type: 'RECORDER_TAB_CLOSED' });
-      void this.cleanup();
+      await this.cleanup();
     }
   }
 }

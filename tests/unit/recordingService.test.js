@@ -226,11 +226,10 @@ describe('tab closing handling', () => {
 
     svc.recorderTabId = 99;
 
-    svc.handleTabClosing(99); // recorder tab id
-    await Promise.resolve();
+    await svc.handleTabClosing(99); // recorder tab id
 
     expect(svc.getState().status).toBe('failed');
-    expect(chrome.tabs.remove).toHaveBeenCalledWith(99);
+    expect(svc.expectedClosedTabs.has(99)).toBe(true);
   });
 
   it('does not transition to failed for tab closes already tracked as service-owned cleanup', async () => {
@@ -583,24 +582,34 @@ describe('reconcile', () => {
     it('serializes state effects so later transitions do not overtake earlier async effects', async () => {
       const callOrder = [];
       const gate = deferred();
+      const persistStarted = deferred();
 
       const chrome = makeStubChrome({
         storage: {
           get: jest.fn(async () => ({})),
-          set: jest.fn(async () => {
-            callOrder.push('persist-start');
-            await gate.promise;
-            callOrder.push('persist-end');
-          }),
-          remove: jest.fn(async () => {
-            callOrder.push('clear-start');
-          }),
+          set: jest.fn(async () => undefined),
+          remove: jest.fn(async () => undefined),
         },
       });
       const svc = createRecordingService(chrome);
+      await svc.drainStateEffects();
+
+      // @ts-expect-error -- private method override for deterministic test behavior.
+      svc.persistSessionSnapshot = async () => {
+        callOrder.push('persist-start');
+        persistStarted.resolve();
+        await gate.promise;
+        callOrder.push('persist-end');
+      };
+
+      // @ts-expect-error -- private method override for deterministic test behavior.
+      svc.clearSessionSnapshot = async () => {
+        callOrder.push('clear-start');
+      };
 
       await svc.startRecording('tab', false, false);
       svc.handleOffscreenStarted();
+      await persistStarted.promise;
 
       const actor = svc.actor;
       const recordingId = svc.getState().recordingId;
@@ -614,10 +623,6 @@ describe('reconcile', () => {
         },
       });
 
-      await Promise.resolve();
-      // Let state-effect queue flush start transition work before resolving persistence.
-      await Promise.resolve();
-      await Promise.resolve();
       expect(callOrder).toEqual(['persist-start']);
 
       gate.resolve();
