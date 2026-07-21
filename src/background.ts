@@ -14,6 +14,8 @@ import { hasChunks, markRecordingRecoverable } from './lib/chunkStorage.js';
 import { SESSION_SNAPSHOT_KEY } from './machines/types.js';
 import { validateMessageStrict, schemas } from './messages.js';
 
+declare const chrome: any;
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // CONSTANTS & GLOBALS
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -47,7 +49,8 @@ const chromeAPI = {
     remove: (tabId: number) => chrome.tabs.remove(tabId),
     update: (tabId: number, options: { active: boolean }) => chrome.tabs.update(tabId, options),
     get: (tabId: number) => chrome.tabs.get(tabId),
-    sendMessage: (tabId: number, message: Record<string, unknown>) => chrome.tabs.sendMessage(tabId, message),
+    sendMessage: (tabId: number, message: Record<string, unknown>) =>
+      chrome.tabs.sendMessage(tabId, message),
   },
   scripting: {
     executeScript: (options: { target: { tabId: number }; files: string[] }) =>
@@ -60,7 +63,8 @@ const chromeAPI = {
     hasDocument: () => chrome.offscreen.hasDocument(),
   },
   action: {
-    setBadgeBackgroundColor: (options: { color: string }) => chrome.action.setBadgeBackgroundColor(options),
+    setBadgeBackgroundColor: (options: { color: string }) =>
+      chrome.action.setBadgeBackgroundColor(options),
     setBadgeText: (options: { text: string }) => chrome.action.setBadgeText(options),
   },
   runtime: {
@@ -69,7 +73,8 @@ const chromeAPI = {
     id: chrome.runtime.id,
   },
   windows: {
-    update: (windowId: number, options: { focused: boolean }) => chrome.windows.update(windowId, options),
+    update: (windowId: number, options: { focused: boolean }) =>
+      chrome.windows.update(windowId, options),
   },
 };
 
@@ -219,6 +224,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   })();
 
   return true; // Keep channel open for async response
+});
+
+// Keep the service informed about tab lifecycle changes for hard ownership checks.
+chrome.tabs.onRemoved.addListener((tabId) => {
+  void service.handleTabClosing(tabId);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════

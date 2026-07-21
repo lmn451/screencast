@@ -13,6 +13,10 @@ import { recordingMachine } from '../../src/machines/recordingMachine.ts';
 const VALID_UUID = '550e8400-e29b-41d4-a716-446655440000';
 const ANOTHER_UUID = '11111111-2222-3333-4444-555555555555';
 
+function structuredError(userMessage) {
+  return { ok: false, code: 'test-error', userMessage };
+}
+
 function startActor() {
   const actor = createActor(recordingMachine);
   actor.start();
@@ -139,7 +143,11 @@ describe('recordingMachine — starting state', () => {
   it('OFFSCREEN_ERROR from starting transitions to failed and sets error', () => {
     const actor = startActor();
     actor.send({ type: 'START', mode: 'tab' });
-    actor.send({ type: 'OFFSCREEN_ERROR', error: 'Permission denied' });
+    actor.send({
+      type: 'OFFSCREEN_ERROR',
+      recordingId: VALID_UUID,
+      error: structuredError('Permission denied'),
+    });
     expect(actor.getSnapshot().value).toBe('failed');
     expect(actor.getSnapshot().context.error).toBe('Permission denied');
     actor.stop();
@@ -148,7 +156,11 @@ describe('recordingMachine — starting state', () => {
   it('RECORDER_ERROR from starting transitions to failed', () => {
     const actor = startActor();
     actor.send({ type: 'START', mode: 'tab' });
-    actor.send({ type: 'RECORDER_ERROR', error: 'Tab closed' });
+    actor.send({
+      type: 'RECORDER_ERROR',
+      recordingId: VALID_UUID,
+      error: structuredError('Tab closed'),
+    });
     expect(actor.getSnapshot().value).toBe('failed');
     expect(actor.getSnapshot().context.error).toBe('Tab closed');
     actor.stop();
@@ -190,24 +202,31 @@ describe('recordingMachine — recording state', () => {
     actor.stop();
   });
 
-  it('OFFSCREEN_ERROR transitions recording → failed', () => {
+  it('OVERLAY_TAB_CLOSED transitions recording to failed', () => {
     const actor = toRecording();
-    actor.send({ type: 'OFFSCREEN_ERROR', error: 'GUM crashed' });
+    actor.send({ type: 'OVERLAY_TAB_CLOSED' });
     expect(actor.getSnapshot().value).toBe('failed');
-    expect(actor.getSnapshot().context.error).toBe('GUM crashed');
+    expect(actor.getSnapshot().context.error).toBe('Tab closed during recording');
     actor.stop();
   });
 
-  it('TAB_CLOSING with matching recorderTabId transitions to failed', () => {
-    const actor = startActor();
-    actor.send({ type: 'START', mode: 'tab', mic: true }); // page strategy → would set recorderTabId
-    actor.send({ type: 'RECORDER_STARTED' });
-    // The service layer is the only writer of recorderTabId, so for this guard
-    // test we drive recording directly and verify the guard logic by sending a
-    // mismatched tabId first (should be ignored), then a matching one.
-    // recorderTabId is null in the initial context, so 123 doesn't match.
-    actor.send({ type: 'TAB_CLOSING', tabId: 123 });
-    expect(actor.getSnapshot().value).toBe('recording'); // guard rejected
+  it('RECORDER_TAB_CLOSED transitions recording to failed', () => {
+    const actor = toRecording();
+    actor.send({ type: 'RECORDER_TAB_CLOSED' });
+    expect(actor.getSnapshot().value).toBe('failed');
+    expect(actor.getSnapshot().context.error).toBe('Tab closed during recording');
+    actor.stop();
+  });
+
+  it('OFFSCREEN_ERROR transitions recording → failed', () => {
+    const actor = toRecording();
+    actor.send({
+      type: 'OFFSCREEN_ERROR',
+      recordingId: VALID_UUID,
+      error: structuredError('GUM crashed'),
+    });
+    expect(actor.getSnapshot().value).toBe('failed');
+    expect(actor.getSnapshot().context.error).toBe('GUM crashed');
     actor.stop();
   });
 
@@ -250,7 +269,11 @@ describe('recordingMachine — stopping state', () => {
 
   it('OFFSCREEN_ERROR transitions stopping → failed', () => {
     const actor = toStopping();
-    actor.send({ type: 'OFFSCREEN_ERROR', error: 'stop failed' });
+    actor.send({
+      type: 'OFFSCREEN_ERROR',
+      recordingId: VALID_UUID,
+      error: structuredError('stop failed'),
+    });
     expect(actor.getSnapshot().value).toBe('failed');
     expect(actor.getSnapshot().context.error).toBe('stop failed');
     actor.stop();
@@ -258,7 +281,11 @@ describe('recordingMachine — stopping state', () => {
 
   it('RECORDER_ERROR transitions stopping → failed', () => {
     const actor = toStopping();
-    actor.send({ type: 'RECORDER_ERROR', error: 'recorder failed' });
+    actor.send({
+      type: 'RECORDER_ERROR',
+      recordingId: VALID_UUID,
+      error: structuredError('recorder failed'),
+    });
     expect(actor.getSnapshot().value).toBe('failed');
     expect(actor.getSnapshot().context.error).toBe('recorder failed');
     actor.stop();
@@ -323,7 +350,11 @@ describe('recordingMachine — failed state', () => {
     const actor = startActor();
     actor.send({ type: 'START', mode: 'tab' });
     actor.send({ type: 'OFFSCREEN_STARTED' });
-    actor.send({ type: 'OFFSCREEN_ERROR', error: 'boom' });
+    actor.send({
+      type: 'OFFSCREEN_ERROR',
+      recordingId: VALID_UUID,
+      error: structuredError('boom'),
+    });
     return actor;
   }
 
