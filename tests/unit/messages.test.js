@@ -16,7 +16,6 @@ import {
   MSG_PREVIEW_READY,
   MSG_OFFSCREEN_ERROR,
   MSG_OFFSCREEN_TEST,
-  MSG_RECOVERY_RESUME,
   MSG_RECOVERY_DISCARD,
   schemas,
   validateMessage,
@@ -93,8 +92,8 @@ describe('messages.js', () => {
       expect(result.errors).toContain("Field 'mode' must be one of: tab, window, screen");
     });
 
-    it('should reject recovery messages without recordingId', () => {
-      const result = validateMessage({ type: MSG_RECOVERY_RESUME }, schemas[MSG_RECOVERY_RESUME]);
+    it('should reject recovery discard without recordingId', () => {
+      const result = validateMessage({ type: MSG_RECOVERY_DISCARD }, schemas[MSG_RECOVERY_DISCARD]);
       expect(result.valid).toBe(false);
       expect(result.errors).toContain('Missing required field: recordingId');
     });
@@ -259,12 +258,10 @@ describe('messages.js', () => {
       expect(schemas[MSG_OFFSCREEN_TEST].required.map(([f]) => f)).toContain('type');
     });
 
-    it('should have recovery schemas with required recordingId', () => {
-      for (const type of [MSG_RECOVERY_RESUME, MSG_RECOVERY_DISCARD]) {
-        const requiredFields = schemas[type].required.map(([f]) => f);
-        expect(requiredFields).toContain('type');
-        expect(requiredFields).toContain('recordingId');
-      }
+    it('should have a recovery discard schema with required recordingId', () => {
+      const requiredFields = schemas[MSG_RECOVERY_DISCARD].required.map(([field]) => field);
+      expect(requiredFields).toContain('type');
+      expect(requiredFields).toContain('recordingId');
     });
   });
 });

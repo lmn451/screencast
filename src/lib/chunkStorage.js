@@ -25,10 +25,18 @@ export async function saveChunk(recordingId, chunk, index) {
     const tx = db.transaction(STORE_CHUNKS, 'readwrite');
     const store = tx.objectStore(STORE_CHUNKS);
     const request = store.put({ recordingId, index, chunk });
-    request.onsuccess = () => resolve();
+    // Resolve on tx.oncomplete (commit), not request.onsuccess, so a
+    // commit-time QuotaExceededError propagates and saveChunkWithRetry fires.
     request.onerror = () => reject(request.error);
-    tx.oncomplete = () => db.close();
+    tx.oncomplete = () => {
+      db.close();
+      resolve();
+    };
     tx.onerror = () => {
+      db.close();
+      reject(tx.error);
+    };
+    tx.onabort = () => {
       db.close();
       reject(tx.error);
     };
@@ -210,6 +218,13 @@ export async function markRecordingRecoverable(recordingId) {
     };
     req.onerror = () => reject(req.error);
     tx.oncomplete = () => db.close();
-    tx.onerror = () => db.close();
+    tx.onerror = () => {
+      db.close();
+      reject(tx.error);
+    };
+    tx.onabort = () => {
+      db.close();
+      reject(tx.error);
+    };
   });
 }

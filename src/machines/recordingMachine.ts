@@ -12,13 +12,7 @@
  */
 
 import { setup, assign } from 'xstate';
-import type {
-  RecordingContext,
-  RecordingEvent,
-  RecordingMode,
-  RecordingStrategy,
-} from './types.js';
-import { TIMEOUTS } from './types.js';
+import type { RecordingContext, RecordingEvent, RecordingMode } from './types.js';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // INITIAL CONTEXT
@@ -28,6 +22,8 @@ export const initialContext: RecordingContext = {
   recordingId: null,
   correlationId: null,
   strategy: null,
+  overlayTabId: null,
+  recorderTabId: null,
   startedAt: null,
   lastActivityAt: null,
   options: {
@@ -37,10 +33,6 @@ export const initialContext: RecordingContext = {
   },
   error: null,
   failedChunkCount: 0,
-  overlayInjected: false,
-  confirmationTimeoutId: null,
-  saveTimeoutId: null,
-  checkpointIntervalId: null,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -72,12 +64,13 @@ export const recordingMachine = setup({
       recordingId: () => null,
       correlationId: () => null,
       strategy: () => null,
+      overlayTabId: () => null,
+      recorderTabId: () => null,
       startedAt: () => null,
       lastActivityAt: () => null,
       options: () => ({ mode: null, includeMic: false, includeSystemAudio: false }),
       error: () => null,
       failedChunkCount: () => 0,
-      overlayInjected: () => false,
     }),
 
     determineStrategy: assign({
@@ -93,39 +86,15 @@ export const recordingMachine = setup({
     }),
 
     setError: assign({
-      error: ({ event }) => {
-        const payload = (event as { error: { userMessage?: unknown; code?: unknown } }).error;
-
-        if (
-          payload &&
-          typeof payload === 'object' &&
-          typeof payload.userMessage === 'string' &&
-          payload.userMessage.trim()
-        ) {
-          return payload.userMessage;
-        }
-
-        if (payload && typeof payload === 'object' && typeof payload.code === 'string') {
-          return `Recording failed: ${payload.code}`;
-        }
-
-        if (typeof payload === 'string') {
-          return payload;
-        }
-
-        return 'Recording failed';
-      },
+      error: ({ event }) =>
+        (event as { type: 'OFFSCREEN_ERROR'; error: string }).error ||
+        (event as { type: 'RECORDER_ERROR'; error: string }).error ||
+        'Recording failed',
     }),
 
     setTabClosedError: assign({
       error: () => 'Tab closed during recording',
     }),
-  },
-
-  delays: {
-    CONFIRMATION_DELAY: TIMEOUTS.CONFIRMATION,
-    SAVE_DELAY: TIMEOUTS.SAVE,
-    CHECKPOINT_INTERVAL: TIMEOUTS.CHECKPOINT,
   },
 }).createMachine({
   id: 'recording',
@@ -157,26 +126,6 @@ export const recordingMachine = setup({
             }),
             error: () => null,
             failedChunkCount: () => 0,
-          }),
-        },
-        RECONCILE: {
-          target: 'recording',
-          actions: assign({
-            recordingId: ({ event }) =>
-              (event as { type: 'RECONCILE'; snapshot: { recordingId: string } }).snapshot
-                .recordingId,
-            strategy: ({ event }) =>
-              (event as { type: 'RECONCILE'; snapshot: { strategy: RecordingStrategy } }).snapshot
-                .strategy,
-            startedAt: ({ event }) =>
-              (event as { type: 'RECONCILE'; snapshot: { startedAt: number } }).snapshot.startedAt,
-            lastActivityAt: () => Date.now(),
-            options: ({ event }) =>
-              (event as { type: 'RECONCILE'; snapshot: { options: RecordingContext['options'] } })
-                .snapshot.options,
-            correlationId: ({ event }) =>
-              (event as { type: 'RECONCILE'; snapshot: { correlationId: string } }).snapshot
-                .correlationId,
           }),
         },
       },
@@ -248,11 +197,12 @@ export const recordingMachine = setup({
         UPDATE_STATE: {
           actions: 'updateLastActivity',
         },
-        OVERLAY_TAB_CLOSED: {
-          actions: 'setTabClosedError',
-          target: 'failed',
-        },
-        RECORDER_TAB_CLOSED: {
+        TAB_CLOSING: {
+          // Guard: only if closing the recorder tab
+          guard: ({ event, context }) => {
+            const tabId = (event as { type: 'TAB_CLOSING'; tabId: number }).tabId;
+            return context.recorderTabId === tabId || context.overlayTabId === tabId;
+          },
           actions: 'setTabClosedError',
           target: 'failed',
         },
@@ -314,11 +264,6 @@ export const recordingMachine = setup({
     // ─────────────────────────────────────────────────────────────────────────
     recoverable: {
       on: {
-        RECOVERY_RESUME: {
-          target: 'recording',
-          actions: 'updateLastActivity',
-          guard: 'isValidUUID',
-        },
         RECOVERY_DISCARD: {
           target: 'idle',
         },
