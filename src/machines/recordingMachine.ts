@@ -85,7 +85,28 @@ export const recordingMachine = setup({
     }),
 
     setError: assign({
-      error: ({ event }) => (event as { error: string }).error,
+      error: ({ event }) => {
+        const payload = (event as { error: { userMessage?: unknown; code?: unknown } }).error;
+
+        if (
+          payload &&
+          typeof payload === 'object' &&
+          typeof payload.userMessage === 'string' &&
+          payload.userMessage.trim()
+        ) {
+          return payload.userMessage;
+        }
+
+        if (payload && typeof payload === 'object' && typeof payload.code === 'string') {
+          return `Recording failed: ${payload.code}`;
+        }
+
+        if (typeof payload === 'string') {
+          return payload;
+        }
+
+        return 'Recording failed';
+      },
     }),
 
     setTabClosedError: assign({

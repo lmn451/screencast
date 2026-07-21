@@ -11,6 +11,7 @@ import {
   MSG_OFFSCREEN_START,
   MSG_OFFSCREEN_STOP,
   MSG_RECORDER_STOP,
+  MSG_RECORDER_ERROR,
   MSG_TAB_CLOSING,
   MSG_PREVIEW_READY,
   MSG_OFFSCREEN_ERROR,
@@ -20,6 +21,8 @@ import {
   schemas,
   validateMessage,
 } from '../../src/messages.js';
+
+const VALID_UUID = '550e8400-e29b-41d4-a716-446655440000';
 
 describe('messages.js', () => {
   describe('validateMessage', () => {
@@ -96,7 +99,7 @@ describe('messages.js', () => {
       expect(result.errors).toContain('Missing required field: recordingId');
     });
 
-    it('should validate the real OFFSCREEN_START payload', () => {
+  it('should validate the real OFFSCREEN_START payload', () => {
       const msg = {
         type: MSG_OFFSCREEN_START,
         mode: 'tab',
@@ -108,6 +111,60 @@ describe('messages.js', () => {
       const result = validateMessage(msg, schema);
       expect(result.valid).toBe(true);
       expect(result.errors).toHaveLength(0);
+    });
+
+    it('should reject RECORDER_ERROR without recordingId', () => {
+      const msg = {
+        type: MSG_RECORDER_ERROR,
+        error: {
+          ok: false,
+          code: 'screen-permission-denied',
+          userMessage: 'No permission',
+        },
+      };
+
+      const result = validateMessage(msg, schemas[MSG_RECORDER_ERROR]);
+      expect(result.valid).toBe(false);
+      expect(result.errors).toContain('Missing required field: recordingId');
+    });
+
+    it('should reject RECORDER_ERROR with non-object error payload', () => {
+      const msg = {
+        type: MSG_RECORDER_ERROR,
+        error: 'failed',
+        recordingId: VALID_UUID,
+      };
+
+      const result = validateMessage(msg, schemas[MSG_RECORDER_ERROR]);
+      expect(result.valid).toBe(false);
+      expect(result.errors).toContain("Field 'error' must be type 'object', got 'string'");
+    });
+
+    it('should reject OFFSCREEN_ERROR without recordingId', () => {
+      const msg = {
+        type: MSG_OFFSCREEN_ERROR,
+        error: {
+          ok: false,
+          code: 'screen-permission-denied',
+          userMessage: 'No permission',
+        },
+      };
+
+      const result = validateMessage(msg, schemas[MSG_OFFSCREEN_ERROR]);
+      expect(result.valid).toBe(false);
+      expect(result.errors).toContain('Missing required field: recordingId');
+    });
+
+    it('should reject OFFSCREEN_ERROR with non-object error payload', () => {
+      const msg = {
+        type: MSG_OFFSCREEN_ERROR,
+        error: 'failed',
+        recordingId: VALID_UUID,
+      };
+
+      const result = validateMessage(msg, schemas[MSG_OFFSCREEN_ERROR]);
+      expect(result.valid).toBe(false);
+      expect(result.errors).toContain("Field 'error' must be type 'object', got 'string'");
     });
   });
 
@@ -185,6 +242,16 @@ describe('messages.js', () => {
     it('should have OFFSCREEN_ERROR schema', () => {
       expect(schemas[MSG_OFFSCREEN_ERROR]).toBeDefined();
       expect(schemas[MSG_OFFSCREEN_ERROR].required.map(([f]) => f)).toContain('type');
+      expect(schemas[MSG_OFFSCREEN_ERROR].required.map(([f]) => f)).toContain('error');
+      expect(schemas[MSG_OFFSCREEN_ERROR].required.map(([f]) => f)).toContain('recordingId');
+    });
+
+    it('should have RECORDER_ERROR schema', () => {
+      expect(schemas[MSG_RECORDER_ERROR]).toBeDefined();
+      const requiredFields = schemas[MSG_RECORDER_ERROR].required.map(([f]) => f);
+      expect(requiredFields).toContain('type');
+      expect(requiredFields).toContain('error');
+      expect(requiredFields).toContain('recordingId');
     });
 
     it('should have OFFSCREEN_TEST schema', () => {

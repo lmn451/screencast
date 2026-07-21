@@ -101,21 +101,20 @@ export const schemas = {
     optional: [['recordingId', 'string']],
   },
   [MSG_OFFSCREEN_ERROR]: {
-    required: [['type', 'string']],
-    optional: [
-      // `error` may be a plain string or a structured error object — accept any type.
-      ['error', undefined],
-      ['code', 'string'],
+    required: [
+      ['type', 'string'],
+      ['error', 'object'],
       ['recordingId', 'string'],
     ],
+    optional: [['code', 'string']],
   },
   [MSG_RECORDER_ERROR]: {
-    required: [['type', 'string']],
-    optional: [
-      ['error', undefined],
-      ['code', 'string'],
+    required: [
+      ['type', 'string'],
+      ['error', 'object'],
       ['recordingId', 'string'],
     ],
+    optional: [['code', 'string']],
   },
   [MSG_OFFSCREEN_TEST]: {
     required: [['type', 'string']],

@@ -35,12 +35,16 @@ let recordingId = null;
 
 async function notifyRecorderStartError(captureError, isPermissionDenied) {
   try {
-    await chrome.runtime.sendMessage({
-      type: 'RECORDER_ERROR',
-      error: isPermissionDenied
+    const payload = createError(
+      isPermissionDenied ? CODES.SCREEN_PERMISSION_DENIED : CODES.SCREEN_PERMISSION_CANCELLED,
+      isPermissionDenied
         ? 'Screen capture permission was denied. Please allow access and try again.'
         : 'Failed to start screen capture: ' + (captureError.message || captureError),
-      code: isPermissionDenied ? CODES.SCREEN_PERMISSION_DENIED : 'capture-failed',
+      captureError.message || String(captureError)
+    );
+    await chrome.runtime.sendMessage({
+      type: 'RECORDER_ERROR',
+      error: payload,
       recordingId,
     });
   } catch (sendErr) {
@@ -194,7 +198,6 @@ async function start() {
           await chrome.runtime.sendMessage({
             type: 'RECORDER_ERROR',
             error: structuredError,
-            code: CODES.SAVE_FAILED,
             recordingId,
           });
           alert('Failed to save recording: ' + dbError.message);

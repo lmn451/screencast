@@ -451,7 +451,7 @@ describe('handleMessage routing', () => {
   });
 });
 
-describe('state projection and recovery exits', () => {
+  describe('state projection and recovery exits', () => {
   it('does not report recording=true after saved data arrives', async () => {
     const chrome = makeStubChrome();
     const svc = createRecordingService(chrome);
@@ -497,7 +497,11 @@ describe('state projection and recovery exits', () => {
     await svc.startRecording('tab', false, false);
     svc.handleOffscreenStarted();
 
-    await svc.handleOffscreenError('Permission denied', 'PERMISSION_DENIED');
+    await svc.handleOffscreenError({
+      ok: false,
+      code: 'screen-permission-denied',
+      userMessage: 'Permission denied',
+    }, undefined, svc.getState().recordingId);
 
     expect(svc.getState().status).toBe('failed');
     expect(svc.getState().recording).toBe(false);
@@ -510,10 +514,34 @@ describe('state projection and recovery exits', () => {
     await svc.startRecording('tab', false, false);
     svc.handleOffscreenStarted();
 
-    await svc.handleOffscreenError('stale failure', 'CAPTURE_FAILED', VALID_UUID);
+    await svc.handleOffscreenError(
+      {
+        ok: false,
+        code: 'capture-failed',
+        userMessage: 'stale failure',
+      },
+      undefined,
+      VALID_UUID
+    );
 
     expect(svc.getState().status).toBe('recording');
     expect(svc.getState().recording).toBe(true);
+  });
+
+  it('fails closed when OFFSCREEN_ERROR payload is malformed', async () => {
+    const chrome = makeStubChrome();
+    const svc = createRecordingService(chrome);
+    await svc.startRecording('tab', false, false);
+    svc.handleOffscreenStarted();
+
+    const result = await svc.handleMessage({
+      type: 'OFFSCREEN_ERROR',
+      recordingId: svc.getState().recordingId,
+      error: 'not-structured',
+    });
+
+    expect(result).toEqual({ ok: false, error: 'Malformed OFFSCREEN_ERROR payload' });
+    expect(svc.getState().status).toBe('recording');
   });
 });
 
