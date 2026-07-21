@@ -85,7 +85,7 @@ export const recordingMachine = setup({
     }),
 
     setError: assign({
-      error: ({ event }) => (event as { type: 'OFFSCREEN_ERROR' | 'RECORDER_ERROR' }).error,
+      error: ({ event }) => (event as { error: string }).error,
     }),
 
     setTabClosedError: assign({
