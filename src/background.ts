@@ -6,15 +6,14 @@
  * All Chrome API side effects live in RecordingService.
  */
 
-import { createRecordingService } from './services/recordingService.js';
+import { createRecordingService, CHECKPOINT_ALARM_NAME } from './services/recordingService.js';
 import { cleanupOldRecordings } from './lib/db.js';
+import { getAllRecordings } from './lib/recording.js';
 import { createLogger } from './logger.js';
-import { STOP_TIMEOUT_MS, AUTO_DELETE_AGE_MS } from './lib/constants.js';
+import { AUTO_DELETE_AGE_MS } from './lib/constants.js';
 import { hasChunks, markRecordingRecoverable } from './lib/chunkStorage.js';
 import { SESSION_SNAPSHOT_KEY } from './machines/types.js';
 import { validateMessageStrict, schemas } from './messages.js';
-
-declare const chrome: any;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CONSTANTS & GLOBALS
@@ -57,7 +56,11 @@ const chromeAPI = {
       chrome.scripting.executeScript(options),
   },
   offscreen: {
-    createDocument: (options: { url: string; reasons: string[]; justification: string }) =>
+    createDocument: (options: {
+      url: string;
+      reasons: chrome.offscreen.CreateParameters['reasons'];
+      justification: string;
+    }) =>
       chrome.offscreen.createDocument(options),
     closeDocument: () => chrome.offscreen.closeDocument(),
     hasDocument: () => chrome.offscreen.hasDocument(),
@@ -75,6 +78,12 @@ const chromeAPI = {
   windows: {
     update: (windowId: number, options: { focused: boolean }) =>
       chrome.windows.update(windowId, options),
+  },
+  alarms: {
+    create: (name: string, alarmInfo: { periodInMinutes?: number; delayInMinutes?: number }) => {
+      chrome.alarms.create(name, alarmInfo);
+    },
+    clear: (name: string) => chrome.alarms.clear(name),
   },
 };
 
@@ -110,40 +119,59 @@ function checkRateLimit(senderId: string): boolean {
 // SESSION RECONCILIATION
 // ═══════════════════════════════════════════════════════════════════════════════
 
-async function reconcileUnfinishedSessions(): Promise<void> {
+async function recoverOrphanedRecordings(): Promise<number> {
+  let recoveredCount = 0;
   try {
-    const result = await chrome.storage.local.get(SESSION_SNAPSHOT_KEY);
-    const snapshot = result[SESSION_SNAPSHOT_KEY];
-    if (!snapshot) return;
-
-    logger.log('Found session snapshot, checking age…', { snapshot });
-    const age = Date.now() - snapshot.lastActivityAt;
-
-    if (age > STOP_TIMEOUT_MS) {
-      // Stale session — clean up
-      logger.warn('Found stale recording session, cleaning up', { age, snapshot });
-      await chrome.storage.local.remove(SESSION_SNAPSHOT_KEY);
-
-      // Check for partial recordings
-      if (snapshot.recordingId) {
-        const hasChunksResult = await hasChunks(snapshot.recordingId);
-        if (hasChunksResult) {
-          await markRecordingRecoverable(snapshot.recordingId);
-          logger.log('Marked recording as recoverable', { recordingId: snapshot.recordingId });
-        }
+    const recordings = await getAllRecordings();
+    for (const recording of recordings) {
+      if (recording.status === 'active') {
+        await markRecordingRecoverable(recording.id);
+        recoveredCount++;
+        logger.log('Swept orphaned active recording to partial', {
+          recordingId: recording.id,
+        });
       }
-    } else {
-      // Active session — hydrate the machine and show the recovery prompt
-      logger.log('Found active session, hydrating machine and showing recovery prompt', {
-        age,
+    }
+  } catch (e) {
+    logger.error('Orphan-active sweep failed:', e);
+  }
+  return recoveredCount;
+}
+
+async function reconcileUnfinishedSessions(): Promise<void> {
+  const currentState = service.getState();
+  let recoveredOrphanCount = 0;
+  let result: Record<string, unknown>;
+  let snapshot: { status?: string; recordingId?: string } | undefined;
+
+  // Periodic reconciliation also runs while this service worker is alive. Do
+  // not mistake the current in-memory recording for an interrupted session.
+  if (currentState.recording) {
+    return;
+  }
+
+  try {
+    recoveredOrphanCount = await recoverOrphanedRecordings();
+    result = await chrome.storage.local.get(SESSION_SNAPSHOT_KEY);
+    snapshot = result[SESSION_SNAPSHOT_KEY] as
+      | { status?: string; recordingId?: string }
+      | undefined;
+
+    if (snapshot?.status && snapshot.status !== 'idle') {
+      logger.log('Found interrupted session snapshot, marking recoverable', {
         status: snapshot.status,
       });
-      if (snapshot.status === 'recording' || snapshot.status === 'stopping') {
-        // Bring the XState actor back into sync with the persisted state. Without
-        // this the UI would say "active recording" while the machine sat in idle.
-        service.reconcile(snapshot);
-        await showRecoveryPrompt();
+      await chrome.storage.local.remove(SESSION_SNAPSHOT_KEY);
+
+      if (snapshot.recordingId && (await hasChunks(snapshot.recordingId))) {
+        await markRecordingRecoverable(snapshot.recordingId);
+        logger.log('Marked recording as recoverable', { recordingId: snapshot.recordingId });
       }
+      await showRecoveryPrompt();
+    } else if (recoveredOrphanCount > 0) {
+      // A crash can happen before the first session snapshot is persisted.
+      // The metadata stub still makes the chunks recoverable, so notify the user.
+      await showRecoveryPrompt();
     }
   } catch (e) {
     logger.error('Session reconciliation failed:', e);
@@ -226,11 +254,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true; // Keep channel open for async response
 });
 
-// Keep the service informed about tab lifecycle changes for hard ownership checks.
-chrome.tabs.onRemoved.addListener((tabId) => {
-  void service.handleTabClosing(tabId);
-});
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // LIFECYCLE HANDLERS
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -256,10 +279,24 @@ chrome.runtime.onStartup.addListener(async () => {
   }
 });
 
-// Periodic reconciliation (every 5 minutes while SW is active)
-setInterval(async () => {
-  await reconcileUnfinishedSessions();
-}, 5 * 60 * 1000);
+// Periodic reconciliation via chrome.alarms (setInterval does not survive MV3
+// service-worker suspension). A named periodic alarm fires every 5 minutes.
+const RECONCILE_ALARM_NAME = 'capturecast-reconcile';
+chrome.alarms.create(RECONCILE_ALARM_NAME, { periodInMinutes: 5 });
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === RECONCILE_ALARM_NAME) {
+    reconcileUnfinishedSessions().catch((e) => {
+      logger.error('Periodic reconciliation failed:', e);
+    });
+  } else if (alarm.name === CHECKPOINT_ALARM_NAME) {
+    // Self-rescheduling checkpoint owned by RecordingService; re-arms itself
+    // while recording/stopping (see RecordingService.handleCheckpointAlarm).
+    service.handleCheckpointAlarm().catch((e) => {
+      logger.error('Checkpoint alarm handling failed:', e);
+    });
+  }
+});
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // EXPORTS (for testing)

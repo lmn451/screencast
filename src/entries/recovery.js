@@ -30,6 +30,8 @@ async function getRecoverableRecordings() {
       resolve(recordings);
     };
     req.onerror = () => reject(req.error);
+    tx.oncomplete = () => db.close();
+    tx.onerror = () => db.close();
   });
 }
 
@@ -42,6 +44,8 @@ async function countChunks(recordingId) {
     const req = index.getAllKeys(IDBKeyRange.only(recordingId));
     req.onsuccess = () => resolve(req.result.length);
     req.onerror = () => reject(req.error);
+    tx.oncomplete = () => db.close();
+    tx.onerror = () => db.close();
   });
 }
 
@@ -64,8 +68,14 @@ async function deleteRecording(recordingId) {
   };
 
   return new Promise((resolve, reject) => {
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
+    tx.oncomplete = () => {
+      db.close();
+      resolve();
+    };
+    tx.onerror = () => {
+      db.close();
+      reject(tx.error);
+    };
   });
 }
 
@@ -121,7 +131,13 @@ async function render() {
       item.className = 'item';
 
       const statusClass = rec.status === 'recoverable' ? 'status-recoverable' : 'status-partial';
-      const statusLabel = rec.status === 'recoverable' ? 'Recoverable' : 'Partial';
+      const statusLabel =
+        {
+          recoverable: 'Recoverable',
+          partial: 'Partial',
+          failed: 'Failed',
+          active: 'Active',
+        }[rec.status] || 'Partial';
 
       item.innerHTML = `
         <div class="item-header">
@@ -134,8 +150,12 @@ async function render() {
           <span class="item-status ${statusClass}">${statusLabel}</span>
         </div>
         <div class="item-actions">
-          <button class="btn-retry" data-id="${rec.id}" data-action="retry">Retry save</button>
-          <button class="btn-discard" data-id="${rec.id}" data-action="discard">Discard</button>
+          <button class="btn-retry" data-id="${escapeHtml(
+            rec.id
+          )}" data-action="save-partial">Save partial</button>
+          <button class="btn-discard" data-id="${escapeHtml(
+            rec.id
+          )}" data-action="discard">Discard</button>
         </div>`;
       listEl.appendChild(item);
     }
@@ -152,10 +172,8 @@ async function render() {
               try {
                 const snapshot = await chrome.storage.local.get('sessionSnapshot');
                 if (snapshot.sessionSnapshot && snapshot.sessionSnapshot.recordingId === id) {
-                  // Active session: clear via background message
+                  // Background owns the machine transition and snapshot cleanup.
                   await chrome.runtime.sendMessage({ type: 'RECOVERY_DISCARD', recordingId: id });
-                  // Also clear from storage
-                  await chrome.storage.local.remove('sessionSnapshot');
                 } else {
                   await deleteRecording(id);
                 }
@@ -173,17 +191,11 @@ async function render() {
               }
               render();
             }
-          } else if (action === 'retry') {
-            // Send resume message for active sessions
-            try {
-              const snapshot = await chrome.storage.local.get('sessionSnapshot');
-              if (snapshot.sessionSnapshot && snapshot.sessionSnapshot.recordingId === id) {
-                await chrome.runtime.sendMessage({ type: 'RECOVERY_RESUME', recordingId: id });
-              }
-            } catch (e) {
-              console.warn('[Recovery] Failed to send resume message (non-critical):', e);
-            }
-            // Navigate to preview with this ID
+          } else if (action === 'save-partial') {
+            // Resume is gone in MV3 (dead MediaStream, no tab/gesture to
+            // reattach to). The only recoverable artifact is the persisted
+            // chunk set, so just open the preview — it assembles the partial
+            // blob via getRecording() (chunks + metadata stub row).
             window.location.href = `preview.html?id=${encodeURIComponent(id)}`;
           }
         } catch (e) {

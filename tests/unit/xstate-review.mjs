@@ -29,7 +29,9 @@ function assertEqual(actual, expected, desc) {
     console.log(`  ✓ ${desc}`);
   } else {
     failed++;
-    console.log(`  ✕ ${desc} (expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)})`);
+    console.log(
+      `  ✕ ${desc} (expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)})`
+    );
   }
 }
 
@@ -127,7 +129,11 @@ async function main() {
     actor.send({ type: 'START', mode: 'tab' });
     actor.send({ type: 'CONFIRMATION_TIMEOUT' });
     actor.send({ type: 'STOP' });
-    actor.send({ type: 'OFFSCREEN_DATA', recordingId: '550e8400-e29b-41d4-a716-446655440000', mimeType: 'video/webm' });
+    actor.send({
+      type: 'OFFSCREEN_DATA',
+      recordingId: '550e8400-e29b-41d4-a716-446655440000',
+      mimeType: 'video/webm',
+    });
     assertEqual(actor.getSnapshot().value, 'saved', '→ saved');
     actor.stop();
   }
@@ -139,7 +145,11 @@ async function main() {
     actor.send({ type: 'START', mode: 'tab' });
     actor.send({ type: 'CONFIRMATION_TIMEOUT' });
     actor.send({ type: 'STOP' });
-    actor.send({ type: 'RECORDER_DATA', recordingId: '550e8400-e29b-41d4-a716-446655440000', mimeType: 'video/webm' });
+    actor.send({
+      type: 'RECORDER_DATA',
+      recordingId: '550e8400-e29b-41d4-a716-446655440000',
+      mimeType: 'video/webm',
+    });
     assertEqual(actor.getSnapshot().value, 'saved', '→ saved');
     actor.stop();
   }
@@ -156,9 +166,9 @@ async function main() {
     actor.stop();
   }
 
-  // ── Test 11: SAVE_TIMEOUT → recoverable → RECOVERY_RESUME → recording ──
+  // ── Test 11: SAVE_TIMEOUT → recoverable; RECOVERY_DISCARD → idle ──
   {
-    console.log('\n── recoverable flow ──');
+    console.log('\n── recoverable flow (save-partial/discard) ──');
     const actor = createActor(recordingMachine).start();
     actor.send({ type: 'START', mode: 'tab' });
     actor.send({ type: 'CONFIRMATION_TIMEOUT' });
@@ -166,8 +176,8 @@ async function main() {
     actor.send({ type: 'SAVE_TIMEOUT' });
     assertEqual(actor.getSnapshot().value, 'recoverable', '→ recoverable');
 
-    actor.send({ type: 'RECOVERY_RESUME', recordingId: '550e8400-e29b-41d4-a716-446655440000' });
-    assertEqual(actor.getSnapshot().value, 'recording', 'RECOVERY_RESUME → recording');
+    actor.send({ type: 'RECOVERY_DISCARD', recordingId: '550e8400-e29b-41d4-a716-446655440000' });
+    assertEqual(actor.getSnapshot().value, 'idle', 'RECOVERY_DISCARD → idle');
     actor.stop();
   }
 
@@ -233,26 +243,6 @@ async function main() {
     assertEqual(actor.getSnapshot().context.failedChunkCount, 1, 'after 1 failure');
     actor.send({ type: 'CHUNK_FAILED' });
     assertEqual(actor.getSnapshot().context.failedChunkCount, 2, 'after 2 failures');
-    actor.stop();
-  }
-
-  // ── Test 17: RECONCILE from idle → recording ──
-  {
-    console.log('\n── RECONCILE ──');
-    const actor = createActor(recordingMachine).start();
-    actor.send({
-      type: 'RECONCILE',
-      snapshot: {
-        status: 'recording',
-        recordingId: '550e8400-e29b-41d4-a716-446655440000',
-        startedAt: Date.now(),
-        strategy: 'offscreen',
-        options: { mode: 'tab', includeMic: false, includeSystemAudio: false },
-        correlationId: '550e8400-e29b-41d4-a716-446655440001',
-      },
-    });
-    assertEqual(actor.getSnapshot().value, 'recording', '→ recording');
-    assertEqual(actor.getSnapshot().context.recordingId, '550e8400-e29b-41d4-a716-446655440000', 'recordingId restored');
     actor.stop();
   }
 

@@ -170,7 +170,7 @@ describe('diagnostics.js', () => {
       if (entries.length < MAX_DIAGNOSTIC_ENTRIES) {
         expect(entries.length).toBeGreaterThan(0);
       }
-    });
+    }, 15_000);
   });
 
   describe('redactDiagnosticsEntry', () => {

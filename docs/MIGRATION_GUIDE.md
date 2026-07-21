@@ -112,7 +112,7 @@ RecordingStateManager → State Machine → Typed Events → Predictable Transit
 │    │                                      ├── OFFSCREEN_ERROR ──────► failed
 │    │                                      └── RECORDER_ERROR ───────► failed
 │    │                                                                   │
-│    │   recording ◄─────────────────── RECOVERY_RESUME ──── recoverable │
+│    │   recoverable ───────────── RECOVERY_DISCARD ───────────────► idle │
 │    │        │                                                       │
 │    │        │                                                      │
 │    │        ▼                                                      │
@@ -565,13 +565,14 @@ Recovery uses machine states `recoverable`, `failed` with events:
 
 ```typescript
 // Machine states
-TK:    recoverable: {
-      on: {
-        RECOVERY_RESUME: { target: 'recording' },
-        RECOVERY_DISCARD: { target: 'idle' },
-        RESET: { target: 'idle' },
-      },
-    },
+recoverable: {
+  on: {
+    RECOVERY_DISCARD: { target: 'idle' },
+    OFFSCREEN_DATA: { target: 'saved' },
+    RECORDER_DATA: { target: 'saved' },
+    RESET: { target: 'idle' },
+  },
+},
 
 // background-xstate.js reconciliation
 async function reconcileUnfinishedSessions() {
@@ -744,8 +745,6 @@ describe('Recording Machine', () => {
 | `handleRecorderError()` | `RECORDER_ERROR` |
 | Confirmation timeout fires | `CONFIRMATION_TIMEOUT` |
 | Save timeout fires | `SAVE_TIMEOUT` |
-| - | `RECONCILE` (session recovery) |
-| - | `RECOVERY_RESUME` |
 | - | `RECOVERY_DISCARD` |
 
 ---

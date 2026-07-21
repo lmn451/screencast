@@ -11,6 +11,8 @@ export const RECORDING_STATUS = {
   SAVED: 'saved', // Fully saved, playable
   FAILED: 'failed', // Save failed (no chunks or corrupted)
   PARTIAL: 'partial', // Some chunks saved but incomplete
+  ACTIVE: 'active', // In-progress stub written at recording start
+  RECOVERABLE: 'recoverable', // Interrupted session, awaiting save-partial/discard
 };
 
 /**
@@ -41,19 +43,81 @@ export async function finishRecording(
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_RECORDINGS, 'readwrite');
     const store = tx.objectStore(STORE_RECORDINGS);
+    const getRequest = store.get(id);
+    let putRequest;
+
+    getRequest.onsuccess = () => {
+      const existing = getRequest.result;
+      putRequest = store.put({
+        id,
+        mimeType,
+        duration,
+        size,
+        createdAt: existing?.createdAt ?? Date.now(),
+        name: existing?.name ?? null,
+        status,
+      });
+      putRequest.onerror = () => reject(putRequest.error);
+    };
+    getRequest.onerror = () => reject(getRequest.error);
+
+    // Resolve on tx.oncomplete (commit), not request.onsuccess, so an
+    // acknowledged save always means the IndexedDB transaction committed.
+    tx.oncomplete = () => {
+      db.close();
+      resolve();
+    };
+    tx.onerror = () => {
+      db.close();
+      reject(tx.error);
+    };
+    tx.onabort = () => {
+      db.close();
+      reject(tx.error);
+    };
+  });
+}
+
+/**
+ * Write a minimal metadata stub at recording start so the persisted chunk set
+ * is always recoverable even if the session crashes before finishRecording.
+ * finishRecording later upserts (put) over this stub on a clean stop.
+ * @param {string} id - Recording ID
+ * @param {string} mimeType - MIME type of the recording
+ * @returns {Promise<void>}
+ */
+export async function createRecordingStub(id, mimeType) {
+  let db;
+  try {
+    db = await openDB();
+  } catch (e) {
+    throw new Error(
+      '[DB] Failed to open database for createRecordingStub: ' + (e && e.message ? e.message : e)
+    );
+  }
+
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_RECORDINGS, 'readwrite');
+    const store = tx.objectStore(STORE_RECORDINGS);
     const request = store.put({
       id,
       mimeType,
-      duration,
-      size,
       createdAt: Date.now(),
-      name: null,
-      status,
+      status: RECORDING_STATUS.ACTIVE,
     });
-    request.onsuccess = () => resolve();
     request.onerror = () => reject(request.error);
-    tx.oncomplete = () => db.close();
-    tx.onerror = () => db.close();
+    tx.oncomplete = () => {
+      db.close();
+      resolve();
+    };
+    tx.onerror = () => {
+      db.close();
+      reject(tx.error);
+    };
+    tx.onabort = () => {
+      db.close();
+      reject(tx.error);
+    };
   });
 }
 

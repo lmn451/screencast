@@ -30,9 +30,18 @@ function formatSize(bytes) {
   return `${mb.toFixed(1)} MB`;
 }
 
+// 'active', 'partial', 'recoverable', and 'failed' recordings belong to the
+// recovery UI (recovery.html), not the completed-recordings list — an 'active'
+// stub would otherwise show mid-recording with a broken Play button.
+// 'recoverable' is never persisted today (interrupted rows become 'partial'),
+// but is excluded here for symmetry with recovery.js's status query.
+const EXCLUDED_STATUSES = new Set(['active', 'partial', 'recoverable', 'failed']);
+
 async function render() {
   try {
-    const recordings = await getAllRecordings();
+    const recordings = (await getAllRecordings()).filter(
+      (rec) => !EXCLUDED_STATUSES.has(rec.status)
+    );
 
     if (recordings.length === 0) {
       listEl.innerHTML = '<div class="empty">No recordings found.</div>';
@@ -109,9 +118,19 @@ async function render() {
       listEl.appendChild(item);
     });
   } catch (e) {
-    listEl.innerHTML = `<div class="empty">Error loading recordings: ${e.message}</div>`;
+    listEl.innerHTML = `<div class="empty">Error loading recordings: ${escapeHtml(
+      e.message
+    )}</div>`;
     logger.error('Failed to load recordings:', e);
   }
+}
+
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 }
 
 document.addEventListener('DOMContentLoaded', render);
