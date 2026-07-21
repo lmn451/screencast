@@ -12,7 +12,12 @@
  */
 
 import { setup, assign } from 'xstate';
-import type { RecordingContext, RecordingEvent, RecordingMode, RecordingStrategy } from './types.js';
+import type {
+  RecordingContext,
+  RecordingEvent,
+  RecordingMode,
+  RecordingStrategy,
+} from './types.js';
 import { TIMEOUTS } from './types.js';
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -50,7 +55,10 @@ export const recordingMachine = setup({
 
   guards: {
     isValidUUID: ({ event }) => {
-      if ('recordingId' in event && typeof (event as { recordingId?: string }).recordingId === 'string') {
+      if (
+        'recordingId' in event &&
+        typeof (event as { recordingId?: string }).recordingId === 'string'
+      ) {
         return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
           (event as { recordingId: string }).recordingId
         );
@@ -144,7 +152,8 @@ export const recordingMachine = setup({
             options: ({ event }) => ({
               mode: (event as { type: 'START'; mode: RecordingMode }).mode,
               includeMic: (event as { type: 'START'; mic?: boolean }).mic ?? false,
-              includeSystemAudio: (event as { type: 'START'; systemAudio?: boolean }).systemAudio ?? false,
+              includeSystemAudio:
+                (event as { type: 'START'; systemAudio?: boolean }).systemAudio ?? false,
             }),
             error: () => null,
             failedChunkCount: () => 0,
@@ -153,14 +162,21 @@ export const recordingMachine = setup({
         RECONCILE: {
           target: 'recording',
           actions: assign({
-            recordingId: ({ event }) => (event as { type: 'RECONCILE'; snapshot: { recordingId: string } }).snapshot.recordingId,
-            strategy: ({ event }) => (event as { type: 'RECONCILE'; snapshot: { strategy: RecordingStrategy } }).snapshot.strategy,
-            startedAt: ({ event }) => (event as { type: 'RECONCILE'; snapshot: { startedAt: number } }).snapshot.startedAt,
+            recordingId: ({ event }) =>
+              (event as { type: 'RECONCILE'; snapshot: { recordingId: string } }).snapshot
+                .recordingId,
+            strategy: ({ event }) =>
+              (event as { type: 'RECONCILE'; snapshot: { strategy: RecordingStrategy } }).snapshot
+                .strategy,
+            startedAt: ({ event }) =>
+              (event as { type: 'RECONCILE'; snapshot: { startedAt: number } }).snapshot.startedAt,
             lastActivityAt: () => Date.now(),
             options: ({ event }) =>
-              (event as { type: 'RECONCILE'; snapshot: { options: RecordingContext['options'] } }).snapshot.options,
+              (event as { type: 'RECONCILE'; snapshot: { options: RecordingContext['options'] } })
+                .snapshot.options,
             correlationId: ({ event }) =>
-              (event as { type: 'RECONCILE'; snapshot: { correlationId: string } }).snapshot.correlationId,
+              (event as { type: 'RECONCILE'; snapshot: { correlationId: string } }).snapshot
+                .correlationId,
           }),
         },
       },
@@ -330,4 +346,10 @@ export const recordingMachine = setup({
 // RE-EXPORT TYPES
 // ═══════════════════════════════════════════════════════════════════════════════
 
-export type { RecordingContext, RecordingEvent, SessionSnapshot, RecordingMode, RecordingStrategy } from './types.js';
+export type {
+  RecordingContext,
+  RecordingEvent,
+  SessionSnapshot,
+  RecordingMode,
+  RecordingStrategy,
+} from './types.js';

@@ -99,7 +99,7 @@ describe('messages.js', () => {
       expect(result.errors).toContain('Missing required field: recordingId');
     });
 
-  it('should validate the real OFFSCREEN_START payload', () => {
+    it('should validate the real OFFSCREEN_START payload', () => {
       const msg = {
         type: MSG_OFFSCREEN_START,
         mode: 'tab',

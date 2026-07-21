@@ -32,7 +32,10 @@ interface ChromeAPI {
     remove: (key: string) => Promise<void>;
   };
   tabs: {
-    query: (query: { active?: boolean; currentWindow?: boolean }) => Promise<Array<{ id?: number; windowId?: number }>>;
+    query: (query: {
+      active?: boolean;
+      currentWindow?: boolean;
+    }) => Promise<Array<{ id?: number; windowId?: number }>>;
     create: (options: { url: string; active?: boolean }) => Promise<{ id?: number }>;
     remove: (tabId: number) => Promise<void>;
     update: (tabId: number, options: { active: boolean }) => Promise<unknown>;
@@ -40,10 +43,18 @@ interface ChromeAPI {
     sendMessage: (tabId: number, message: Record<string, unknown>) => Promise<void>;
   };
   scripting: {
-    executeScript: (options: { target: { tabId: number }; files?: string[]; func?: () => void }) => Promise<unknown>;
+    executeScript: (options: {
+      target: { tabId: number };
+      files?: string[];
+      func?: () => void;
+    }) => Promise<unknown>;
   };
   offscreen: {
-    createDocument: (options: { url: string; reasons: string[]; justification: string }) => Promise<void>;
+    createDocument: (options: {
+      url: string;
+      reasons: string[];
+      justification: string;
+    }) => Promise<void>;
     closeDocument: () => Promise<void>;
     hasDocument: () => Promise<boolean>;
   };
@@ -141,7 +152,12 @@ export class RecordingService {
     // Session persistence based on state
     if (state === 'recording' || state === 'stopping') {
       await this.persistSessionSnapshot(context);
-    } else if (state === 'idle' || state === 'saved' || state === 'failed' || state === 'recoverable') {
+    } else if (
+      state === 'idle' ||
+      state === 'saved' ||
+      state === 'failed' ||
+      state === 'recoverable'
+    ) {
       await this.clearSessionSnapshot(context.recordingId);
     }
 
@@ -274,14 +290,20 @@ export class RecordingService {
   // OFFSCREEN DOCUMENT LIFECYCLE
   // ═══════════════════════════════════════════════════════════════════════════
 
-  private async ensureOffscreenDocument(mode: string, includeSystemAudio: boolean, recordingId: string, targetTabId: number | null): Promise<void> {
+  private async ensureOffscreenDocument(
+    mode: string,
+    includeSystemAudio: boolean,
+    recordingId: string,
+    targetTabId: number | null
+  ): Promise<void> {
     try {
       const existing = await this.chrome.offscreen.hasDocument();
       if (!existing) {
         await this.chrome.offscreen.createDocument({
           url: this.chrome.runtime.getURL('offscreen.html'),
           reasons: ['USER_MEDIA', 'BLOBS'],
-          justification: 'Record a screen capture stream using MediaRecorder in an offscreen document.',
+          justification:
+            'Record a screen capture stream using MediaRecorder in an offscreen document.',
         });
       }
 
@@ -416,7 +438,12 @@ export class RecordingService {
 
     try {
       if (context.strategy === 'offscreen') {
-        await this.ensureOffscreenDocument(mode, includeSystemAudio, context.recordingId, this.overlayTabId);
+        await this.ensureOffscreenDocument(
+          mode,
+          includeSystemAudio,
+          context.recordingId,
+          this.overlayTabId
+        );
       } else {
         await this.openRecorderTab(mode, includeMic, includeSystemAudio, context.recordingId);
       }
@@ -533,7 +560,10 @@ export class RecordingService {
       return;
     }
     if (!this.isCurrentRecording(recordingId)) {
-      console.warn('[RecordingService] Ignoring OFFSCREEN_DATA for non-active recording:', recordingId);
+      console.warn(
+        '[RecordingService] Ignoring OFFSCREEN_DATA for non-active recording:',
+        recordingId
+      );
       return;
     }
 
@@ -556,7 +586,10 @@ export class RecordingService {
       return;
     }
     if (!this.isCurrentRecording(recordingId)) {
-      console.warn('[RecordingService] Ignoring RECORDER_DATA for non-active recording:', recordingId);
+      console.warn(
+        '[RecordingService] Ignoring RECORDER_DATA for non-active recording:',
+        recordingId
+      );
       return;
     }
 
@@ -573,7 +606,11 @@ export class RecordingService {
     await this.cleanup();
   }
 
-  async handleOffscreenError(error: unknown, code?: string, recordingId?: string): Promise<boolean> {
+  async handleOffscreenError(
+    error: unknown,
+    code?: string,
+    recordingId?: string
+  ): Promise<boolean> {
     if (!recordingId) {
       console.error('[RecordingService] Ignoring malformed OFFSCREEN_ERROR: missing recordingId');
       return false;
@@ -586,7 +623,10 @@ export class RecordingService {
     }
 
     if (recordingId && !this.isCurrentRecording(recordingId)) {
-      console.warn('[RecordingService] Ignoring OFFSCREEN_ERROR for non-active recording:', recordingId);
+      console.warn(
+        '[RecordingService] Ignoring OFFSCREEN_ERROR for non-active recording:',
+        recordingId
+      );
       return true;
     }
     this.clearTimers();
@@ -615,7 +655,10 @@ export class RecordingService {
     }
 
     if (recordingId && !this.isCurrentRecording(recordingId)) {
-      console.warn('[RecordingService] Ignoring RECORDER_ERROR for non-active recording:', recordingId);
+      console.warn(
+        '[RecordingService] Ignoring RECORDER_ERROR for non-active recording:',
+        recordingId
+      );
       return true;
     }
     this.clearTimers();
@@ -649,8 +692,11 @@ export class RecordingService {
       code,
       userMessage,
       technicalMessage:
-        typeof candidate.technicalMessage === 'string' ? (candidate.technicalMessage as string) : '',
-      retryable: typeof candidate.retryable === 'boolean' ? (candidate.retryable as boolean) : undefined,
+        typeof candidate.technicalMessage === 'string'
+          ? (candidate.technicalMessage as string)
+          : '',
+      retryable:
+        typeof candidate.retryable === 'boolean' ? (candidate.retryable as boolean) : undefined,
       correlationId:
         typeof candidate.correlationId === 'string' || candidate.correlationId === null
           ? (candidate.correlationId as string | null)
@@ -689,7 +735,10 @@ export class RecordingService {
       lastActivityAt: context.lastActivityAt,
       options: { ...context.options },
       strategy: context.strategy,
-      recording: snapshot.matches('starting') || snapshot.matches('recording') || snapshot.matches('stopping'),
+      recording:
+        snapshot.matches('starting') ||
+        snapshot.matches('recording') ||
+        snapshot.matches('stopping'),
     };
   }
 
@@ -708,7 +757,11 @@ export class RecordingService {
     status: RecordingStatus;
     startedAt: number;
     lastActivityAt: number;
-    options: { mode: 'tab' | 'window' | 'screen' | null; includeMic: boolean; includeSystemAudio: boolean };
+    options: {
+      mode: 'tab' | 'window' | 'screen' | null;
+      includeMic: boolean;
+      includeSystemAudio: boolean;
+    };
     strategy: 'offscreen' | 'page' | null;
     correlationId: string;
   }): void {
@@ -757,7 +810,9 @@ export class RecordingService {
     );
   }
 
-  private async cleanup(expectedRecordingId: string | null = this.actor.getSnapshot().context.recordingId): Promise<void> {
+  private async cleanup(
+    expectedRecordingId: string | null = this.actor.getSnapshot().context.recordingId
+  ): Promise<void> {
     const current = this.actor.getSnapshot();
     if (current.context.recordingId !== expectedRecordingId) {
       return;
@@ -826,17 +881,11 @@ export class RecordingService {
         return { ok: true };
 
       case 'OFFSCREEN_DATA':
-        await this.handleOffscreenData(
-          message.recordingId as string,
-          message.mimeType as string
-        );
+        await this.handleOffscreenData(message.recordingId as string, message.mimeType as string);
         return { ok: true };
 
       case 'RECORDER_DATA':
-        await this.handleRecorderData(
-          message.recordingId as string,
-          message.mimeType as string
-        );
+        await this.handleRecorderData(message.recordingId as string, message.mimeType as string);
         return { ok: true };
 
       case 'OFFSCREEN_ERROR':
@@ -852,7 +901,12 @@ export class RecordingService {
         return { ok: true };
 
       case 'RECORDER_ERROR':
-        if (!(await this.handleRecorderError(message.error, message.recordingId as string | undefined))) {
+        if (
+          !(await this.handleRecorderError(
+            message.error,
+            message.recordingId as string | undefined
+          ))
+        ) {
           return { ok: false, error: 'Malformed RECORDER_ERROR payload' };
         }
         return { ok: true };
