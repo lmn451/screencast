@@ -41,7 +41,7 @@ test.describe('Tab mode error handling', () => {
         )
     );
     expect(startRes2?.ok).toBe(false);
-    expect(startRes2?.error).toContain('Already recording');
+    expect(startRes2?.error).toMatch(/^Cannot start: invalid state /);
 
     // Clean up
     await controlPage.evaluate(
@@ -58,7 +58,7 @@ test.describe('Tab mode error handling', () => {
       () => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'STOP' }, resolve))
     );
     expect(stopRes?.ok).toBe(false);
-    expect(stopRes?.error).toContain('Not recording');
+    expect(stopRes?.error).toMatch(/^Cannot stop: invalid state /);
   });
 
   test('invalid message type returns error', async ({ context, extensionId }) => {
@@ -69,6 +69,6 @@ test.describe('Tab mode error handling', () => {
       () => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'INVALID_TYPE' }, resolve))
     );
     expect(invalidRes?.ok).toBe(false);
-    expect(invalidRes?.error).toContain('Unknown message');
+    expect(invalidRes?.error).toContain('Unknown message type');
   });
 });
