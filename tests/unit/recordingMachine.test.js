@@ -220,7 +220,11 @@ describe('recordingMachine — recording state', () => {
 
   it('OFFSCREEN_ERROR transitions recording → failed', () => {
     const actor = toRecording();
-    actor.send({ type: 'OFFSCREEN_ERROR', recordingId: VALID_UUID, error: structuredError('GUM crashed') });
+    actor.send({
+      type: 'OFFSCREEN_ERROR',
+      recordingId: VALID_UUID,
+      error: structuredError('GUM crashed'),
+    });
     expect(actor.getSnapshot().value).toBe('failed');
     expect(actor.getSnapshot().context.error).toBe('GUM crashed');
     actor.stop();
@@ -265,7 +269,11 @@ describe('recordingMachine — stopping state', () => {
 
   it('OFFSCREEN_ERROR transitions stopping → failed', () => {
     const actor = toStopping();
-    actor.send({ type: 'OFFSCREEN_ERROR', recordingId: VALID_UUID, error: structuredError('stop failed') });
+    actor.send({
+      type: 'OFFSCREEN_ERROR',
+      recordingId: VALID_UUID,
+      error: structuredError('stop failed'),
+    });
     expect(actor.getSnapshot().value).toBe('failed');
     expect(actor.getSnapshot().context.error).toBe('stop failed');
     actor.stop();
@@ -342,7 +350,11 @@ describe('recordingMachine — failed state', () => {
     const actor = startActor();
     actor.send({ type: 'START', mode: 'tab' });
     actor.send({ type: 'OFFSCREEN_STARTED' });
-    actor.send({ type: 'OFFSCREEN_ERROR', recordingId: VALID_UUID, error: structuredError('boom') });
+    actor.send({
+      type: 'OFFSCREEN_ERROR',
+      recordingId: VALID_UUID,
+      error: structuredError('boom'),
+    });
     return actor;
   }
 

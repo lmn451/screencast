@@ -126,7 +126,9 @@ describe('media-recorder-utils (additional)', () => {
   });
 
   it('createMediaRecorder: throws when no codec supported', async () => {
-    await jest.unstable_mockModule('../../src/lib/chunkStorage.js', () => ({ saveChunk: jest.fn() }));
+    await jest.unstable_mockModule('../../src/lib/chunkStorage.js', () => ({
+      saveChunk: jest.fn(),
+    }));
 
     class NoCodecRecorder {
       static isTypeSupported() {
