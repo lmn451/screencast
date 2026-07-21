@@ -59,9 +59,11 @@ test.describe('Tab mode start functionality', () => {
       () => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'GET_STATE' }, resolve))
     );
     expect(state?.recordingId).toBeTruthy();
-    expect(state?.mode).toBe('tab');
-    expect(state?.mic).toBe(true);
-    expect(state?.systemAudio).toBe(false);
+    expect(state?.options).toEqual({
+      mode: 'tab',
+      includeMic: true,
+      includeSystemAudio: false,
+    });
 
     // Clean up
     await controlPage.evaluate(
@@ -88,9 +90,11 @@ test.describe('Tab mode start functionality', () => {
       () => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'GET_STATE' }, resolve))
     );
     expect(state?.recordingId).toBeTruthy();
-    expect(state?.mode).toBe('tab');
-    expect(state?.mic).toBe(false);
-    expect(state?.systemAudio).toBe(true);
+    expect(state?.options).toEqual({
+      mode: 'tab',
+      includeMic: false,
+      includeSystemAudio: true,
+    });
 
     // Clean up
     await controlPage.evaluate(
@@ -120,9 +124,11 @@ test.describe('Tab mode start functionality', () => {
       () => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'GET_STATE' }, resolve))
     );
     expect(state?.recordingId).toBeTruthy();
-    expect(state?.mode).toBe('tab');
-    expect(state?.mic).toBe(true);
-    expect(state?.systemAudio).toBe(true);
+    expect(state?.options).toEqual({
+      mode: 'tab',
+      includeMic: true,
+      includeSystemAudio: true,
+    });
 
     // Clean up
     await controlPage.evaluate(
