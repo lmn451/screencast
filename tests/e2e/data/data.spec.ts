@@ -1,4 +1,4 @@
-import { test, expect } from '../lib/fixtures';
+import { test, expect, generateWebmBlobInPage } from '../lib/fixtures';
 
 function controlPageUrl(extensionId: string) {
   // Use preview as a neutral extension page to get a Page with chrome.runtime access.
@@ -41,22 +41,23 @@ test.describe('Tab mode data management', () => {
     const recordingId = state.recordingId;
 
     // 3. Generate and save data
+    const generated = await generateWebmBlobInPage(controlPage);
     await controlPage.evaluate(
-      async ({ recordingId }) => {
+      async ({ recordingId, generated }) => {
         while (!window.__TEST__?.saveChunk) await new Promise((r) => setTimeout(r, 50));
 
-        // Simulate multiple chunks
-        const blob = new Blob([new Uint8Array(2000)], { type: 'video/webm' });
-        const chunkSize = 500;
+        // Simulate multiple chunks from a valid WebM recording
+        const blob = new Blob([new Uint8Array(generated.bytes)], { type: generated.type });
+        const chunkSize = Math.ceil(blob.size / 4);
         for (let i = 0; i < 4; i++) {
           const start = i * chunkSize;
           const end = Math.min(start + chunkSize, blob.size);
           const chunk = blob.slice(start, end);
           await window.__TEST__.saveChunk(recordingId, chunk, i);
         }
-        await window.__TEST__.finishRecording(recordingId, 'video/webm', 2000, blob.size);
+        await window.__TEST__.finishRecording(recordingId, 'video/webm', 700, blob.size);
       },
-      { recordingId }
+      { recordingId, generated }
     );
 
     // 4. Stop recording
@@ -124,14 +125,15 @@ test.describe('Tab mode data management', () => {
     );
     const recordingId1 = state.recordingId;
 
+    const generated1 = await generateWebmBlobInPage(controlPage);
     await controlPage.evaluate(
-      async ({ recordingId }) => {
+      async ({ recordingId, generated }) => {
         while (!window.__TEST__?.saveChunk) await new Promise((r) => setTimeout(r, 50));
-        const blob = new Blob([new Uint8Array(1000)], { type: 'video/webm' });
-        await window.__TEST__.saveChunk(recordingId, blob.slice(0, 500), 0);
+        const blob = new Blob([new Uint8Array(generated.bytes)], { type: generated.type });
+        await window.__TEST__.saveChunk(recordingId, blob, 0);
         await window.__TEST__.finishRecording(recordingId, 'video/webm');
       },
-      { recordingId: recordingId1 }
+      { recordingId: recordingId1, generated: generated1 }
     );
 
     await controlPage.evaluate(
@@ -160,6 +162,15 @@ test.describe('Tab mode data management', () => {
       });
     });
 
+    await expect
+      .poll(async () => {
+        const current = await controlPage.evaluate(
+          () => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'GET_STATE' }, resolve))
+        );
+        return current?.status;
+      })
+      .toBe('idle');
+
     // Second recording
     startRes = await controlPage.evaluate(
       () =>
@@ -178,14 +189,15 @@ test.describe('Tab mode data management', () => {
     const recordingId2 = state.recordingId;
     expect(recordingId2).not.toBe(recordingId1); // Different ID
 
+    const generated2 = await generateWebmBlobInPage(controlPage);
     await controlPage.evaluate(
-      async ({ recordingId }) => {
+      async ({ recordingId, generated }) => {
         while (!window.__TEST__?.saveChunk) await new Promise((r) => setTimeout(r, 50));
-        const blob = new Blob([new Uint8Array(1000)], { type: 'video/webm' });
-        await window.__TEST__.saveChunk(recordingId, blob.slice(0, 500), 0);
+        const blob = new Blob([new Uint8Array(generated.bytes)], { type: generated.type });
+        await window.__TEST__.saveChunk(recordingId, blob, 0);
         await window.__TEST__.finishRecording(recordingId, 'video/webm');
       },
-      { recordingId: recordingId2 }
+      { recordingId: recordingId2, generated: generated2 }
     );
 
     await controlPage.evaluate(

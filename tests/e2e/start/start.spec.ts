@@ -58,10 +58,11 @@ test.describe('Tab mode start functionality', () => {
     const state = await controlPage.evaluate(
       () => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'GET_STATE' }, resolve))
     );
+    const options = (state as any)?.options;
     expect(state?.recordingId).toBeTruthy();
-    expect(state?.mode).toBe('tab');
-    expect(state?.mic).toBe(true);
-    expect(state?.systemAudio).toBe(false);
+    expect(options?.mode).toBe('tab');
+    expect(options?.includeMic).toBe(true);
+    expect(options?.includeSystemAudio).toBe(false);
 
     // Clean up
     await controlPage.evaluate(
@@ -87,10 +88,11 @@ test.describe('Tab mode start functionality', () => {
     const state = await controlPage.evaluate(
       () => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'GET_STATE' }, resolve))
     );
+    const options = (state as any)?.options;
     expect(state?.recordingId).toBeTruthy();
-    expect(state?.mode).toBe('tab');
-    expect(state?.mic).toBe(false);
-    expect(state?.systemAudio).toBe(true);
+    expect(options?.mode).toBe('tab');
+    expect(options?.includeMic).toBe(false);
+    expect(options?.includeSystemAudio).toBe(true);
 
     // Clean up
     await controlPage.evaluate(
@@ -119,10 +121,11 @@ test.describe('Tab mode start functionality', () => {
     const state = await controlPage.evaluate(
       () => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'GET_STATE' }, resolve))
     );
+    const options = (state as any)?.options;
     expect(state?.recordingId).toBeTruthy();
-    expect(state?.mode).toBe('tab');
-    expect(state?.mic).toBe(true);
-    expect(state?.systemAudio).toBe(true);
+    expect(options?.mode).toBe('tab');
+    expect(options?.includeMic).toBe(true);
+    expect(options?.includeSystemAudio).toBe(true);
 
     // Clean up
     await controlPage.evaluate(

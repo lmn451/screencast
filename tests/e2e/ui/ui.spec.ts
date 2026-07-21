@@ -1,4 +1,4 @@
-import { test, expect } from '../lib/fixtures';
+import { test, expect, generateWebmBlobInPage } from '../lib/fixtures';
 
 function controlPageUrl(extensionId: string) {
   // Use preview as a neutral extension page to get a Page with chrome.runtime access.
@@ -36,16 +36,17 @@ test.describe('Tab mode UI components', () => {
     );
     const recordingId = state.recordingId;
 
-    // Generate and save data
+    // Generate and save valid WebM data
+    const generated = await generateWebmBlobInPage(controlPage);
     await controlPage.evaluate(
-      async ({ recordingId }) => {
+      async ({ recordingId, generated }) => {
         while (!window.__TEST__?.saveChunk) await new Promise((r) => setTimeout(r, 50));
 
-        const blob = new Blob([new Uint8Array(1000)], { type: 'video/webm' });
-        await window.__TEST__.saveChunk(recordingId, blob.slice(0, 500), 0);
+        const blob = new Blob([new Uint8Array(generated.bytes)], { type: generated.type });
+        await window.__TEST__.saveChunk(recordingId, blob, 0);
         await window.__TEST__.finishRecording(recordingId, 'video/webm');
       },
-      { recordingId }
+      { recordingId, generated }
     );
 
     // Trigger OFFSCREEN_DATA to open preview
@@ -119,15 +120,16 @@ test.describe('Tab mode UI components', () => {
     );
     const recordingId = state.recordingId;
 
+    const generated = await generateWebmBlobInPage(controlPage);
     await controlPage.evaluate(
-      async ({ recordingId }) => {
+      async ({ recordingId, generated }) => {
         while (!window.__TEST__?.saveChunk) await new Promise((r) => setTimeout(r, 50));
 
-        const blob = new Blob([new Uint8Array(1000)], { type: 'video/webm' });
-        await window.__TEST__.saveChunk(recordingId, blob.slice(0, 500), 0);
+        const blob = new Blob([new Uint8Array(generated.bytes)], { type: generated.type });
+        await window.__TEST__.saveChunk(recordingId, blob, 0);
         await window.__TEST__.finishRecording(recordingId, 'video/webm');
       },
-      { recordingId }
+      { recordingId, generated }
     );
 
     const sendDataRes = await controlPage.evaluate(
