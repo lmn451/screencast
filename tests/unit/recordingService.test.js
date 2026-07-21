@@ -410,6 +410,34 @@ describe('handleMessage routing', () => {
   });
 });
 
+describe('tab close handling', () => {
+  it('ignores unrelated tab close events', async () => {
+    const chrome = makeStubChrome();
+    const svc = createRecordingService(chrome);
+    await svc.startRecording('tab', false, false);
+    svc.handleOffscreenStarted();
+
+    svc.handleTabClosing(12345);
+
+    expect(svc.getState().status).toBe('recording');
+    expect(svc.getState().recording).toBe(true);
+  });
+
+  it('transitions to failed when the active recording tab closes', async () => {
+    const chrome = makeStubChrome();
+    const svc = createRecordingService(chrome);
+    await svc.startRecording('tab', false, false);
+    svc.handleOffscreenStarted();
+
+    // Overlay tab from stubbed query is id 42.
+    svc.handleTabClosing(42);
+
+    expect(svc.getState().status).toBe('failed');
+    expect(svc.getState().error).toBe('Tab closed during recording');
+    expect(svc.getState().recording).toBe(false);
+  });
+});
+
 describe('state projection and recovery exits', () => {
   it('does not report recording=true after saved data arrives', async () => {
     const chrome = makeStubChrome();

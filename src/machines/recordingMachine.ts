@@ -95,6 +95,16 @@ export const recordingMachine = setup({
     setTabClosedError: assign({
       error: () => 'Tab closed during recording',
     }),
+
+    setOverlayTabId: assign({
+      overlayTabId: ({ event }) =>
+        (event as { type: 'SET_OVERLAY_TAB_ID'; tabId: number | null }).tabId,
+    }),
+
+    setRecorderTabId: assign({
+      recorderTabId: ({ event }) =>
+        (event as { type: 'SET_RECORDER_TAB_ID'; tabId: number | null }).tabId,
+    }),
   },
 }).createMachine({
   id: 'recording',
@@ -198,7 +208,6 @@ export const recordingMachine = setup({
           actions: 'updateLastActivity',
         },
         TAB_CLOSING: {
-          // Guard: only if closing the recorder tab
           guard: ({ event, context }) => {
             const tabId = (event as { type: 'TAB_CLOSING'; tabId: number }).tabId;
             return context.recorderTabId === tabId || context.overlayTabId === tabId;
@@ -284,6 +293,12 @@ export const recordingMachine = setup({
   on: {
     RESET: '.idle',
     RECOVERY_DISCARD: '.idle',
+    SET_OVERLAY_TAB_ID: {
+      actions: 'setOverlayTabId',
+    },
+    SET_RECORDER_TAB_ID: {
+      actions: 'setRecorderTabId',
+    },
   },
 });
 

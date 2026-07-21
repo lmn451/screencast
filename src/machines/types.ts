@@ -59,6 +59,8 @@ export type RecordingEvent =
   | { type: 'CONFIRMATION_TIMEOUT' }
   | { type: 'SAVE_TIMEOUT' }
   | { type: 'RESET' }
+  | { type: 'SET_OVERLAY_TAB_ID'; tabId: number | null }
+  | { type: 'SET_RECORDER_TAB_ID'; tabId: number | null }
   | { type: 'RECOVERY_DISCARD'; recordingId: string }
   | { type: 'TAB_CLOSING'; tabId: number }
   | { type: 'PREVIEW_READY'; recordingId?: string }

@@ -2,6 +2,8 @@ import { jest } from '@jest/globals';
 
 let serviceState = { recording: false, recordingId: null };
 let reconcileUnfinishedSessions;
+const handleTabClosing = jest.fn();
+let onRemovedListener;
 
 const getAllRecordings = jest.fn();
 const hasChunks = jest.fn();
@@ -13,6 +15,7 @@ jest.unstable_mockModule('../../src/services/recordingService.js', () => ({
     getState: () => serviceState,
     handleMessage: jest.fn(),
     handleCheckpointAlarm: jest.fn(async () => undefined),
+    handleTabClosing,
   })),
 }));
 jest.unstable_mockModule('../../src/lib/db.js', () => ({
@@ -47,6 +50,7 @@ function makeChrome() {
       update: jest.fn(),
       get: jest.fn(),
       sendMessage: jest.fn(),
+      onRemoved: { addListener: jest.fn() },
     },
     scripting: { executeScript: jest.fn() },
     offscreen: { createDocument: jest.fn(), closeDocument: jest.fn(), hasDocument: jest.fn() },
@@ -67,6 +71,7 @@ function makeChrome() {
 beforeAll(async () => {
   global.chrome = makeChrome();
   ({ reconcileUnfinishedSessions } = await import('../../src/background.ts'));
+  onRemovedListener = chrome.tabs.onRemoved.addListener.mock.calls[0][0];
 });
 
 beforeEach(() => {
@@ -117,4 +122,33 @@ it('recovers and prompts for an interrupted persisted snapshot', async () => {
   expect(chrome.storage.local.remove).toHaveBeenCalledWith('sessionSnapshot');
   expect(markRecordingRecoverable).toHaveBeenCalledWith('interrupted-recording');
   expect(chrome.tabs.create).toHaveBeenCalledTimes(1);
+});
+
+it('skips reconciling an active recording that still appears live after SW restart', async () => {
+  chrome.offscreen.hasDocument.mockResolvedValueOnce(true);
+  getAllRecordings.mockResolvedValue([
+    { id: 'live-recording', status: 'active' },
+    { id: 'orphan-recording', status: 'active' },
+  ]);
+  chrome.storage.local.get.mockResolvedValue({
+    sessionSnapshot: {
+      recordingId: 'live-recording',
+      status: 'recording',
+      strategy: 'offscreen',
+      lastActivityAt: Date.now(),
+    },
+  });
+
+  await reconcileUnfinishedSessions();
+
+  expect(markRecordingRecoverable).toHaveBeenCalledTimes(1);
+  expect(markRecordingRecoverable).toHaveBeenCalledWith('orphan-recording');
+  expect(chrome.storage.local.remove).not.toHaveBeenCalledWith('sessionSnapshot');
+  expect(chrome.tabs.create).not.toHaveBeenCalled();
+});
+
+it('registers a tab removed listener wired to TAB_CLOSING handling', async () => {
+  await onRemovedListener(123, { isWindowClosing: false });
+
+  expect(handleTabClosing).toHaveBeenCalledWith(123);
 });
