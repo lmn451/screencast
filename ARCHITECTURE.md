@@ -301,7 +301,6 @@ Minimal permissions requested:
 - `offscreen`: Create hidden recording document
 - `storage`: Persist settings and recordings
 - `alarms`: Drive periodic background reconciliation/checkpoint timers that survive service-worker suspension (replaces unreliable `setInterval`)
-- `notifications` (optional): User-granted, used for recording status notifications
 
 **No** `<all_urls>` host permission - we don't need broad access. Tab creation/query (e.g. opening the overlay or recovery/preview pages) works under `activeTab`/`scripting` without a standing `tabs` permission.
 

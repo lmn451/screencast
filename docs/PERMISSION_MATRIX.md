@@ -4,12 +4,11 @@
 
 ```json
 {
-  "permissions": ["activeTab", "scripting", "offscreen"],
-  "optional_permissions": ["notifications"]
+  "permissions": ["activeTab", "scripting", "offscreen", "storage", "alarms"]
 }
 ```
 
-**Critical Finding**: The extension does NOT request `desktopCapture` permission, which is typically required for screen capture extensions. Instead, CaptureCast relies on `getDisplayMedia()` from the offscreen/recorder page contexts.
+**Implementation note**: The extension does not request `desktopCapture` or `tabCapture`. CaptureCast relies on `getDisplayMedia()` from the offscreen/recorder page contexts and uses only the permissions listed above.
 
 ---
 

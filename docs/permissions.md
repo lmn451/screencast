@@ -5,18 +5,16 @@ recording. See [`manifest.json`](../manifest.json) for the source of truth.
 
 ## Required (granted at install time)
 
-| Permission   | Why                                                                                              |
-| ------------ | ------------------------------------------------------------------------------------------------ |
-| `activeTab`  | Inject the overlay (Stop button) into the user's active tab during recording.                    |
-| `scripting`  | Required by `chrome.scripting.executeScript` so the background can attach `overlay.js`.          |
-| `offscreen`  | The offscreen document API lets us run `getDisplayMedia` + `MediaRecorder` without a visible tab. |
-| `tabCapture` | Required by `chrome.tabCapture` for the silent single-tab capture strategy.                      |
+| Permission  | Why                                                                                              |
+| ----------- | ------------------------------------------------------------------------------------------------ |
+| `activeTab` | Access the user's active tab while recording and support the Stop overlay.                       |
+| `scripting` | Required by `chrome.scripting.executeScript` to inject the Stop overlay.                         |
+| `offscreen` | Runs `getDisplayMedia` and `MediaRecorder` in a background offscreen document.                   |
+| `storage`   | Persists local session snapshots and recovery metadata in `chrome.storage.local`.                 |
+| `alarms`    | Schedules reconciliation and recording checkpoint work across service-worker suspension.          |
 
-## Optional (requested only when needed)
-
-| Permission      | Why                                                                |
-| --------------- | ------------------------------------------------------------------ |
-| `notifications` | Surface non-blocking user alerts (e.g. recording saved, failures). |
+CaptureCast does not request optional permissions. It does not use `chrome.notifications`,
+`chrome.tabCapture`, host permissions, or `<all_urls>`.
 
 ## Removed / avoided
 

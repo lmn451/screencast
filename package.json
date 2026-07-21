@@ -2,7 +2,7 @@
   "name": "screencast-e2e",
   "type": "module",
   "private": true,
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Playwright E2E tests for CaptureCast stop feature",
   "scripts": {
     "build": "node esbuild.config.js",

@@ -25,9 +25,11 @@ How it works
 
 Permissions
 
-- activeTab & tabs: detect the current tab and open the preview page
-- scripting: show a small Stop overlay on the page
+- activeTab: access the active tab while recording and support the Stop overlay
+- scripting: inject the small Stop overlay into the active tab
 - offscreen: capture and record in a lightweight background context
+- storage: preserve local session and recovery metadata
+- alarms: keep reconciliation and recording checkpoints running across service-worker suspension
 
 Support
 
