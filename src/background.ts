@@ -14,6 +14,8 @@ import { hasChunks, markRecordingRecoverable } from './lib/chunkStorage.js';
 import { SESSION_SNAPSHOT_KEY } from './machines/types.js';
 import { validateMessageStrict, schemas } from './messages.js';
 
+declare const chrome: any;
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // CONSTANTS & GLOBALS
 // ═══════════════════════════════════════════════════════════════════════════════

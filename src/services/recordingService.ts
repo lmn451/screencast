@@ -13,7 +13,7 @@ import { createActor } from 'xstate';
 import { recordingMachine, type RecordingContext } from '../machines/recordingMachine.js';
 import { MSG_RECOVERY_RESUME, MSG_RECOVERY_DISCARD } from '../messages.js';
 import { checkStorageQuota } from '../lib/storage-utils.js';
-import { TIMEOUTS, STORAGE_KEYS, isValidUUID } from '../machines/types.js';
+import { TIMEOUTS, STORAGE_KEYS, isValidUUID, RecordingStatus } from '../machines/types.js';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CHROME API TYPES
@@ -29,12 +29,12 @@ interface ChromeAPI {
     query: (query: { active?: boolean; currentWindow?: boolean }) => Promise<Array<{ id?: number; windowId?: number }>>;
     create: (options: { url: string; active?: boolean }) => Promise<{ id?: number }>;
     remove: (tabId: number) => Promise<void>;
-    update: (tabId: number, options: { active: boolean }) => Promise<void>;
+    update: (tabId: number, options: { active: boolean }) => Promise<unknown>;
     get: (tabId: number) => Promise<{ windowId: number }>;
     sendMessage: (tabId: number, message: Record<string, unknown>) => Promise<void>;
   };
   scripting: {
-    executeScript: (options: { target: { tabId: number }; files: string[] }) => Promise<void>;
+    executeScript: (options: { target: { tabId: number }; files?: string[]; func?: () => void }) => Promise<unknown>;
   };
   offscreen: {
     createDocument: (options: { url: string; reasons: string[]; justification: string }) => Promise<void>;
@@ -51,7 +51,7 @@ interface ChromeAPI {
     id: string;
   };
   windows: {
-    update: (windowId: number, options: { focused: boolean }) => Promise<void>;
+    update: (windowId: number, options: { focused: boolean }) => Promise<unknown>;
   };
 }
 
@@ -581,7 +581,7 @@ export class RecordingService {
    */
   reconcile(snapshot: {
     recordingId: string;
-    status: string;
+    status: RecordingStatus;
     startedAt: number;
     lastActivityAt: number;
     options: { mode: 'tab' | 'window' | 'screen' | null; includeMic: boolean; includeSystemAudio: boolean };
@@ -671,7 +671,7 @@ export class RecordingService {
   async handleMessage(
     message: Record<string, unknown>,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    _sender: { id: string }
+    _sender?: { id?: string }
   ): Promise<{ ok: boolean; error?: string } | null> {
     // Sender validation, schema validation, and rate limiting are performed
     // in src/background.ts before this is called. Do not duplicate them here.
