@@ -15,7 +15,7 @@ jobs:
       - name: Install pnpm
         run: |
           corepack enable
-          corepack prepare "$(node -p \"require('./package.json').packageManager\")" --activate
+          corepack prepare "$(node -p 'require("./package.json").packageManager')" --activate
 
       - name: Use Node 20
         uses: actions/setup-node@v4
@@ -54,7 +54,7 @@ jobs:
       - name: Install pnpm
         run: |
           corepack enable
-          corepack prepare "$(node -p \"require('./package.json').packageManager\")" --activate
+          corepack prepare "$(node -p 'require("./package.json").packageManager')" --activate
 
       - name: Use Node 20
         uses: actions/setup-node@v4
