@@ -11,7 +11,7 @@ Information Collection and Use
 
 Permissions
 
-- The extension requests only the minimum permissions necessary to function (activeTab, scripting, offscreen, tabs) in order to start/stop recordings, display a small in-page Stop button, and open a preview page.
+- The extension requests only the minimum permissions necessary to function (activeTab, scripting, offscreen, storage, alarms) in order to start/stop recordings, display a small in-page Stop button, persist local recovery metadata, and schedule service-worker-safe reconciliation.
 
 Data Sharing
 
