@@ -13,6 +13,21 @@ export type RecordingMode = 'tab' | 'window' | 'screen';
 /** Recording strategy - determines how recording happens */
 export type RecordingStrategy = 'offscreen' | 'page';
 
+/** Structured error payload used by recorder/offscreen error contracts */
+export interface StructuredErrorPayload {
+  ok: boolean;
+  code: string;
+  userMessage: string;
+  technicalMessage?: string;
+  retryable?: boolean;
+  correlationId?: string | null;
+  /**
+   * Allow additional metadata to support future extensions while keeping
+   * compatibility with existing `createError` call sites.
+   */
+  [key: string]: unknown;
+}
+
 /** Machine status values */
 export type RecordingStatus =
   | 'idle'
@@ -56,8 +71,8 @@ export type RecordingEvent =
   | { type: 'RECORDER_STARTED' }
   | { type: 'OFFSCREEN_DATA'; recordingId: string; mimeType: string }
   | { type: 'RECORDER_DATA'; recordingId: string; mimeType: string }
-  | { type: 'OFFSCREEN_ERROR'; error: string; code?: string }
-  | { type: 'RECORDER_ERROR'; error: string }
+  | { type: 'OFFSCREEN_ERROR'; recordingId: string; error: StructuredErrorPayload; code?: string }
+  | { type: 'RECORDER_ERROR'; recordingId: string; error: StructuredErrorPayload; code?: string }
   | { type: 'CONFIRMATION_TIMEOUT' }
   | { type: 'SAVE_TIMEOUT' }
   | { type: 'RESET' }

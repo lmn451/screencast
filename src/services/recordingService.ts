@@ -13,7 +13,13 @@ import { createActor } from 'xstate';
 import { recordingMachine, type RecordingContext } from '../machines/recordingMachine.js';
 import { MSG_RECOVERY_RESUME, MSG_RECOVERY_DISCARD } from '../messages.js';
 import { checkStorageQuota } from '../lib/storage-utils.js';
-import { TIMEOUTS, STORAGE_KEYS, isValidUUID, RecordingStatus } from '../machines/types.js';
+import {
+  TIMEOUTS,
+  STORAGE_KEYS,
+  isValidUUID,
+  RecordingStatus,
+  type StructuredErrorPayload,
+} from '../machines/types.js';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CHROME API TYPES
@@ -513,26 +519,90 @@ export class RecordingService {
     await this.cleanup();
   }
 
-  async handleOffscreenError(error: string, code?: string, recordingId?: string): Promise<void> {
+  async handleOffscreenError(error: unknown, code?: string, recordingId?: string): Promise<boolean> {
+    if (!recordingId) {
+      console.error('[RecordingService] Ignoring malformed OFFSCREEN_ERROR: missing recordingId');
+      return false;
+    }
+
+    const normalized = this.normalizeErrorPayload(error);
+    if (!normalized) {
+      console.error('[RecordingService] Ignoring malformed OFFSCREEN_ERROR payload:', error);
+      return false;
+    }
+
     if (recordingId && !this.isCurrentRecording(recordingId)) {
       console.warn('[RecordingService] Ignoring OFFSCREEN_ERROR for non-active recording:', recordingId);
-      return;
+      return true;
     }
     this.clearTimers();
-    this.actor.send({ type: 'OFFSCREEN_ERROR', error, code: code || undefined });
+    this.actor.send({
+      type: 'OFFSCREEN_ERROR',
+      recordingId: recordingId as string,
+      error: normalized,
+      code: code || normalized.code,
+    });
     await this.clearActiveSessionArtifacts();
     await this.cleanup();
+
+    return true;
   }
 
-  async handleRecorderError(error: string, recordingId?: string): Promise<void> {
+  async handleRecorderError(error: unknown, recordingId?: string): Promise<boolean> {
+    if (!recordingId) {
+      console.error('[RecordingService] Ignoring malformed RECORDER_ERROR: missing recordingId');
+      return false;
+    }
+
+    const normalized = this.normalizeErrorPayload(error);
+    if (!normalized) {
+      console.error('[RecordingService] Ignoring malformed RECORDER_ERROR payload:', error);
+      return false;
+    }
+
     if (recordingId && !this.isCurrentRecording(recordingId)) {
       console.warn('[RecordingService] Ignoring RECORDER_ERROR for non-active recording:', recordingId);
-      return;
+      return true;
     }
     this.clearTimers();
-    this.actor.send({ type: 'RECORDER_ERROR', error });
+    this.actor.send({
+      type: 'RECORDER_ERROR',
+      recordingId: recordingId as string,
+      error: normalized,
+      code: normalized.code,
+    });
     await this.clearActiveSessionArtifacts();
     await this.cleanup();
+
+    return true;
+  }
+
+  private normalizeErrorPayload(error: unknown): StructuredErrorPayload | null {
+    if (!error || typeof error !== 'object') {
+      return null;
+    }
+
+    const candidate = error as Record<string, unknown>;
+    const code = candidate.code;
+    const userMessage = candidate.userMessage;
+
+    if (typeof code !== 'string' || typeof userMessage !== 'string') {
+      return null;
+    }
+
+    return {
+      ok: candidate.ok === false || candidate.ok === true ? (candidate.ok as boolean) : false,
+      code,
+      userMessage,
+      technicalMessage:
+        typeof candidate.technicalMessage === 'string' ? (candidate.technicalMessage as string) : '',
+      retryable: typeof candidate.retryable === 'boolean' ? (candidate.retryable as boolean) : undefined,
+      correlationId:
+        typeof candidate.correlationId === 'string' || candidate.correlationId === null
+          ? (candidate.correlationId as string | null)
+          : undefined,
+      ...candidate,
+    };
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -711,18 +781,21 @@ export class RecordingService {
         return { ok: true };
 
       case 'OFFSCREEN_ERROR':
-        await this.handleOffscreenError(
-          message.error as string,
-          message.code as string | undefined,
-          message.recordingId as string | undefined
-        );
+        if (
+          !(await this.handleOffscreenError(
+            message.error,
+            message.code as string | undefined,
+            message.recordingId as string | undefined
+          ))
+        ) {
+          return { ok: false, error: 'Malformed OFFSCREEN_ERROR payload' };
+        }
         return { ok: true };
 
       case 'RECORDER_ERROR':
-        await this.handleRecorderError(
-          message.error as string,
-          message.recordingId as string | undefined
-        );
+        if (!(await this.handleRecorderError(message.error, message.recordingId as string | undefined))) {
+          return { ok: false, error: 'Malformed RECORDER_ERROR payload' };
+        }
         return { ok: true };
 
       case 'GET_STATE':
