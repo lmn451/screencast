@@ -190,24 +190,27 @@ describe('recordingMachine — recording state', () => {
     actor.stop();
   });
 
+  it('OVERLAY_TAB_CLOSED transitions recording to failed', () => {
+    const actor = toRecording();
+    actor.send({ type: 'OVERLAY_TAB_CLOSED' });
+    expect(actor.getSnapshot().value).toBe('failed');
+    expect(actor.getSnapshot().context.error).toBe('Tab closed during recording');
+    actor.stop();
+  });
+
+  it('RECORDER_TAB_CLOSED transitions recording to failed', () => {
+    const actor = toRecording();
+    actor.send({ type: 'RECORDER_TAB_CLOSED' });
+    expect(actor.getSnapshot().value).toBe('failed');
+    expect(actor.getSnapshot().context.error).toBe('Tab closed during recording');
+    actor.stop();
+  });
+
   it('OFFSCREEN_ERROR transitions recording → failed', () => {
     const actor = toRecording();
     actor.send({ type: 'OFFSCREEN_ERROR', error: 'GUM crashed' });
     expect(actor.getSnapshot().value).toBe('failed');
     expect(actor.getSnapshot().context.error).toBe('GUM crashed');
-    actor.stop();
-  });
-
-  it('TAB_CLOSING with matching recorderTabId transitions to failed', () => {
-    const actor = startActor();
-    actor.send({ type: 'START', mode: 'tab', mic: true }); // page strategy → would set recorderTabId
-    actor.send({ type: 'RECORDER_STARTED' });
-    // The service layer is the only writer of recorderTabId, so for this guard
-    // test we drive recording directly and verify the guard logic by sending a
-    // mismatched tabId first (should be ignored), then a matching one.
-    // recorderTabId is null in the initial context, so 123 doesn't match.
-    actor.send({ type: 'TAB_CLOSING', tabId: 123 });
-    expect(actor.getSnapshot().value).toBe('recording'); // guard rejected
     actor.stop();
   });
 
