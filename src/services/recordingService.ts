@@ -98,6 +98,7 @@ export class RecordingService {
   private saveTimeout: ReturnType<typeof setTimeout> | null = null;
   private overlayTabId: number | null = null;
   private recorderTabId: number | null = null;
+  private lastActorState: string | null = null;
   // Serializes onStateChange so persist/clear/close/badge side effects cannot
   // interleave across rapid transitions (notably saved→idle).
   private stateChangeQueue: Promise<void> = Promise.resolve();
@@ -133,6 +134,8 @@ export class RecordingService {
   }): Promise<void> {
     const state = snapshot.value;
     const context = snapshot.context;
+    const previousState = this.lastActorState;
+    this.lastActorState = state;
 
     // Badge management
     await this.updateBadge(state);
@@ -152,7 +155,7 @@ export class RecordingService {
     // Overlay removal on transition back to idle.
     // (Injection is driven explicitly from startRecording, not from state changes,
     // since overlayTabId is owned by the service instance, not the machine context.)
-    if (state === 'idle' && this.overlayTabId) {
+    if (state === 'idle' && this.overlayTabId && previousState && previousState !== 'idle') {
       await this.removeOverlay(this.overlayTabId);
       this.overlayTabId = null;
     }
@@ -307,6 +310,10 @@ export class RecordingService {
       active: true,
     });
     this.recorderTabId = tab.id ?? null;
+    this.actor.send({
+      type: 'SET_RECORDER_TAB_ID',
+      tabId: this.recorderTabId,
+    });
   }
 
   private async closeOffscreenDocumentIfIdle(): Promise<void> {
@@ -406,6 +413,7 @@ export class RecordingService {
     // Get active tab for overlay
     const [activeTab] = await this.chrome.tabs.query({ active: true, currentWindow: true });
     this.overlayTabId = activeTab?.id ?? null;
+    this.actor.send({ type: 'SET_OVERLAY_TAB_ID', tabId: this.overlayTabId });
 
     // Send START event to machine
     this.actor.send({
@@ -443,6 +451,7 @@ export class RecordingService {
       this.clearTimers();
       if (this.overlayTabId) {
         await this.removeOverlay(this.overlayTabId);
+        this.actor.send({ type: 'SET_OVERLAY_TAB_ID', tabId: null });
         this.overlayTabId = null;
       }
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
@@ -482,6 +491,7 @@ export class RecordingService {
           // Non-critical
         }
         await this.removeOverlay(this.overlayTabId);
+        this.actor.send({ type: 'SET_OVERLAY_TAB_ID', tabId: null });
         this.overlayTabId = null;
       }
       return { ok: true };
@@ -519,6 +529,7 @@ export class RecordingService {
         // Non-critical
       }
       await this.removeOverlay(this.overlayTabId);
+      this.actor.send({ type: 'SET_OVERLAY_TAB_ID', tabId: null });
     }
 
     return { ok: true };
@@ -630,6 +641,19 @@ export class RecordingService {
   }
 
   handleTabClosing(tabId: number): void {
+    const state = this.actor.getSnapshot().value;
+    if (state !== 'recording') {
+      return;
+    }
+
+    if (this.overlayTabId == null && this.recorderTabId == null) {
+      return;
+    }
+
+    if (tabId !== this.overlayTabId && tabId !== this.recorderTabId) {
+      return;
+    }
+
     this.actor.send({ type: 'TAB_CLOSING', tabId });
   }
 
@@ -655,6 +679,7 @@ export class RecordingService {
       status: snapshot.value,
       recordingId: context.recordingId,
       correlationId: context.correlationId,
+      error: context.error,
       startedAt: context.startedAt,
       lastActivityAt: context.lastActivityAt,
       options: { ...context.options },
@@ -669,6 +694,8 @@ export class RecordingService {
   reset(): void {
     this.clearTimers();
     this.actor.send({ type: 'RESET' });
+    this.actor.send({ type: 'SET_OVERLAY_TAB_ID', tabId: null });
+    this.actor.send({ type: 'SET_RECORDER_TAB_ID', tabId: null });
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -714,12 +741,14 @@ export class RecordingService {
     // Remove overlay
     if (this.overlayTabId) {
       await this.removeOverlay(this.overlayTabId);
+      this.actor.send({ type: 'SET_OVERLAY_TAB_ID', tabId: null });
       this.overlayTabId = null;
     }
 
     // Close recorder tab
     if (this.recorderTabId) {
       await this.chrome.tabs.remove(this.recorderTabId);
+      this.actor.send({ type: 'SET_RECORDER_TAB_ID', tabId: null });
       this.recorderTabId = null;
     }
 

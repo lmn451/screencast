@@ -119,12 +119,64 @@ function checkRateLimit(senderId: string): boolean {
 // SESSION RECONCILIATION
 // ═══════════════════════════════════════════════════════════════════════════════
 
-async function recoverOrphanedRecordings(): Promise<number> {
+type SessionSnapshotForReconcile = {
+  recordingId?: string;
+  status?: string;
+  strategy?: 'offscreen' | 'page' | null;
+};
+
+async function hasLiveRecorderTab(recordingId: string): Promise<boolean> {
+  try {
+    const tabs = (await chrome.tabs.query({})) as Array<{ url?: string }>;
+    return tabs.some((tab) => {
+      if (!tab.url || typeof tab.url !== 'string') return false;
+      try {
+        const parsed = new URL(tab.url);
+        return (
+          parsed.pathname.endsWith('/recorder.html') &&
+          parsed.searchParams.get('id') === recordingId
+        );
+      } catch {
+        return false;
+      }
+    });
+  } catch {
+    return false;
+  }
+}
+
+async function hasLikelyLiveSnapshot(snapshot: SessionSnapshotForReconcile | undefined): Promise<boolean> {
+  if (!snapshot?.recordingId || snapshot.status === 'idle') {
+    return false;
+  }
+
+  if (snapshot.strategy === 'offscreen') {
+    try {
+      return await chrome.offscreen.hasDocument();
+    } catch {
+      return false;
+    }
+  }
+
+  if (snapshot.strategy === 'page') {
+    return hasLiveRecorderTab(snapshot.recordingId);
+  }
+
+  return false;
+}
+
+async function recoverOrphanedRecordings(skipRecordingId: string | null): Promise<number> {
   let recoveredCount = 0;
   try {
     const recordings = await getAllRecordings();
     for (const recording of recordings) {
       if (recording.status === 'active') {
+        if (recording.id === skipRecordingId) {
+          logger.log('Skipping likely live active recording during orphan recovery', {
+            recordingId: recording.id,
+          });
+          continue;
+        }
         await markRecordingRecoverable(recording.id);
         recoveredCount++;
         logger.log('Swept orphaned active recording to partial', {
@@ -142,7 +194,8 @@ async function reconcileUnfinishedSessions(): Promise<void> {
   const currentState = service.getState();
   let recoveredOrphanCount = 0;
   let result: Record<string, unknown>;
-  let snapshot: { status?: string; recordingId?: string } | undefined;
+  let snapshot: SessionSnapshotForReconcile | undefined;
+  let skipRecordingId: string | null = null;
 
   // Periodic reconciliation also runs while this service worker is alive. Do
   // not mistake the current in-memory recording for an interrupted session.
@@ -151,23 +204,35 @@ async function reconcileUnfinishedSessions(): Promise<void> {
   }
 
   try {
-    recoveredOrphanCount = await recoverOrphanedRecordings();
     result = await chrome.storage.local.get(SESSION_SNAPSHOT_KEY);
     snapshot = result[SESSION_SNAPSHOT_KEY] as
-      | { status?: string; recordingId?: string }
+      | SessionSnapshotForReconcile
       | undefined;
 
-    if (snapshot?.status && snapshot.status !== 'idle') {
-      logger.log('Found interrupted session snapshot, marking recoverable', {
-        status: snapshot.status,
-      });
-      await chrome.storage.local.remove(SESSION_SNAPSHOT_KEY);
+    if (await hasLikelyLiveSnapshot(snapshot)) {
+      skipRecordingId = snapshot?.recordingId ?? null;
+    }
 
-      if (snapshot.recordingId && (await hasChunks(snapshot.recordingId))) {
-        await markRecordingRecoverable(snapshot.recordingId);
-        logger.log('Marked recording as recoverable', { recordingId: snapshot.recordingId });
+    recoveredOrphanCount = await recoverOrphanedRecordings(skipRecordingId);
+
+    if (snapshot?.status && snapshot.status !== 'idle') {
+      if (skipRecordingId === snapshot.recordingId) {
+        logger.log('Found likely active session snapshot, deferring recovery', {
+          status: snapshot.status,
+          recordingId: snapshot.recordingId,
+        });
+      } else {
+        logger.log('Found interrupted session snapshot, marking recoverable', {
+          status: snapshot.status,
+        });
+        await chrome.storage.local.remove(SESSION_SNAPSHOT_KEY);
+
+        if (snapshot.recordingId && (await hasChunks(snapshot.recordingId))) {
+          await markRecordingRecoverable(snapshot.recordingId);
+          logger.log('Marked recording as recoverable', { recordingId: snapshot.recordingId });
+        }
+        await showRecoveryPrompt();
       }
-      await showRecoveryPrompt();
     } else if (recoveredOrphanCount > 0) {
       // A crash can happen before the first session snapshot is persisted.
       // The metadata stub still makes the chunks recoverable, so notify the user.
@@ -252,6 +317,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   })();
 
   return true; // Keep channel open for async response
+});
+
+// Map tab teardown events into the recording recovery state machine.
+chrome.tabs.onRemoved.addListener((tabId) => {
+  service.handleTabClosing(tabId);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════
