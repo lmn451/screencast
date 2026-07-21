@@ -115,18 +115,18 @@ async function startCapture(mode, recordingId, includeAudio) {
     const userMessage = isPermissionDenied
       ? 'Screen capture permission was denied. Please allow access and try again.'
       : 'Failed to start screen capture: ' + (error.message || error);
-      try {
-        const payload = createError(
-          isPermissionDenied ? CODES.SCREEN_PERMISSION_DENIED : CODES.SCREEN_PERMISSION_CANCELLED,
-          userMessage,
-          error?.message || String(error)
-        );
-        await chrome.runtime.sendMessage({
-          type: 'OFFSCREEN_ERROR',
-          error: payload,
-          recordingId,
-        });
-      } catch (sendErr) {
+    try {
+      const payload = createError(
+        isPermissionDenied ? CODES.SCREEN_PERMISSION_DENIED : CODES.SCREEN_PERMISSION_CANCELLED,
+        userMessage,
+        error?.message || String(error)
+      );
+      await chrome.runtime.sendMessage({
+        type: 'OFFSCREEN_ERROR',
+        error: payload,
+        recordingId,
+      });
+    } catch (sendErr) {
       logger.error('Failed to send OFFSCREEN_ERROR to background:', sendErr);
     }
     throw error;

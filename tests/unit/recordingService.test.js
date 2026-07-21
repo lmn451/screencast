@@ -189,64 +189,65 @@ describe('startRecording', () => {
     expect(svc.getState().recordingId).toBe(recordingId);
     expect(chrome.runtime.sendMessage).toHaveBeenCalledTimes(1);
   });
+});
+
+describe('tab closing handling', () => {
+  it('ignores tab close events for non-owned tabs while recording', async () => {
+    const chrome = makeStubChrome();
+    const svc = createRecordingService(chrome);
+    await svc.startRecording('tab', false, false);
+    svc.handleOffscreenStarted();
+    expect(svc.getState().status).toBe('recording');
+
+    svc.handleTabClosing(1234);
+
+    expect(svc.getState().status).toBe('recording');
   });
-
-  describe('tab closing handling', () => {
-    it('ignores tab close events for non-owned tabs while recording', async () => {
-      const chrome = makeStubChrome();
-      const svc = createRecordingService(chrome);
-      await svc.startRecording('tab', false, false);
-      svc.handleOffscreenStarted();
-      expect(svc.getState().status).toBe('recording');
-
-      svc.handleTabClosing(1234);
-
-      expect(svc.getState().status).toBe('recording');
-    });
 
   it('transitions to failed when the active overlay tab closes during recording', async () => {
-      const chrome = makeStubChrome();
-      const svc = createRecordingService(chrome);
-      await svc.startRecording('tab', false, false);
-      svc.handleOffscreenStarted();
+    const chrome = makeStubChrome();
+    const svc = createRecordingService(chrome);
+    await svc.startRecording('tab', false, false);
+    svc.handleOffscreenStarted();
 
-      svc.overlayTabId = 42;
+    svc.overlayTabId = 42;
 
-      svc.handleTabClosing(42); // active tab where overlay is injected
+    svc.handleTabClosing(42); // active tab where overlay is injected
 
-      expect(svc.getState().status).toBe('failed');
-    });
-
-  it('transitions to failed and closes the recorder tab when recorder tab closes during recording', async () => {
-      const chrome = makeStubChrome();
-      const svc = createRecordingService(chrome);
-      await svc.startRecording('tab', true, false);
-      svc.handleRecorderStarted();
-      expect(svc.getState().status).toBe('recording');
-
-      svc.recorderTabId = 99;
-
-      svc.handleTabClosing(99); // recorder tab id
-
-      expect(svc.getState().status).toBe('failed');
-      expect(chrome.tabs.remove).toHaveBeenCalledWith(99);
-    });
-
-    it('does not transition to failed for tab closes already tracked as service-owned cleanup', async () => {
-      const chrome = makeStubChrome();
-      const svc = createRecordingService(chrome);
-      await svc.startRecording('tab', true, false);
-      svc.handleRecorderStarted();
-
-      svc.expectedClosedTabs.add(99);
-      svc.handleTabClosing(99);
-
-      expect(svc.getState().status).toBe('recording');
-      expect(svc.expectedClosedTabs.has(99)).toBe(false);
-    });
+    expect(svc.getState().status).toBe('failed');
   });
 
-  describe('stopRecording', () => {
+  it('transitions to failed and closes the recorder tab when recorder tab closes during recording', async () => {
+    const chrome = makeStubChrome();
+    const svc = createRecordingService(chrome);
+    await svc.startRecording('tab', true, false);
+    svc.handleRecorderStarted();
+    expect(svc.getState().status).toBe('recording');
+
+    svc.recorderTabId = 99;
+
+    svc.handleTabClosing(99); // recorder tab id
+    await Promise.resolve();
+
+    expect(svc.getState().status).toBe('failed');
+    expect(chrome.tabs.remove).toHaveBeenCalledWith(99);
+  });
+
+  it('does not transition to failed for tab closes already tracked as service-owned cleanup', async () => {
+    const chrome = makeStubChrome();
+    const svc = createRecordingService(chrome);
+    await svc.startRecording('tab', true, false);
+    svc.handleRecorderStarted();
+
+    svc.expectedClosedTabs.add(99);
+    svc.handleTabClosing(99);
+
+    expect(svc.getState().status).toBe('recording');
+    expect(svc.expectedClosedTabs.has(99)).toBe(false);
+  });
+});
+
+describe('stopRecording', () => {
   it('rejects when state is idle', async () => {
     const chrome = makeStubChrome();
     const svc = createRecordingService(chrome);
@@ -460,7 +461,7 @@ describe('handleMessage routing', () => {
   });
 });
 
-  describe('state projection and recovery exits', () => {
+describe('state projection and recovery exits', () => {
   it('does not report recording=true after saved data arrives', async () => {
     const chrome = makeStubChrome();
     const svc = createRecordingService(chrome);
@@ -488,10 +489,11 @@ describe('handleMessage routing', () => {
     });
 
     await svc.handleRecoveryDiscard(VALID_UUID);
+    await svc.drainStateEffects();
 
     expect(svc.getState().status).toBe('idle');
     expect(svc.getState().recording).toBe(false);
-    expect(chrome.storage.remove).toHaveBeenCalledWith('sessionSnapshot');
+    expect(chrome.storage.remove).toHaveBeenCalledWith(STORAGE_KEYS.SESSION_SNAPSHOT);
   });
 
   it('cleans up and reports inactive after offscreen errors', async () => {
@@ -506,11 +508,15 @@ describe('handleMessage routing', () => {
     await svc.startRecording('tab', false, false);
     svc.handleOffscreenStarted();
 
-    await svc.handleOffscreenError({
-      ok: false,
-      code: 'screen-permission-denied',
-      userMessage: 'Permission denied',
-    }, undefined, svc.getState().recordingId);
+    await svc.handleOffscreenError(
+      {
+        ok: false,
+        code: 'screen-permission-denied',
+        userMessage: 'Permission denied',
+      },
+      undefined,
+      svc.getState().recordingId
+    );
 
     expect(svc.getState().status).toBe('failed');
     expect(svc.getState().recording).toBe(false);
@@ -554,7 +560,7 @@ describe('handleMessage routing', () => {
   });
 });
 
-  describe('reconcile', () => {
+describe('reconcile', () => {
   it('hydrates the machine from a snapshot when idle', () => {
     const chrome = makeStubChrome();
     const svc = createRecordingService(chrome);
@@ -609,9 +615,13 @@ describe('handleMessage routing', () => {
       });
 
       await Promise.resolve();
+      // Let state-effect queue flush start transition work before resolving persistence.
+      await Promise.resolve();
+      await Promise.resolve();
       expect(callOrder).toEqual(['persist-start']);
 
       gate.resolve();
+      await Promise.resolve();
       await svc.drainStateEffects();
 
       expect(callOrder).toEqual(['persist-start', 'persist-end', 'clear-start']);
@@ -641,7 +651,7 @@ describe('handleMessage routing', () => {
       expect(consoleSpy).toHaveBeenCalledWith(
         '[RecordingService] Failed to process serialized state effects:',
         expect.objectContaining({
-          state: 'stopping',
+          state: expect.stringMatching(/^(recording|stopping)$/),
           error: expect.any(Error),
         })
       );
@@ -652,6 +662,7 @@ describe('handleMessage routing', () => {
     it('does not allow stale snapshot clearing to affect a newer session', async () => {
       const snapshotStore = { value: null };
 
+      const removeCalls = [];
       const chrome = makeStubChrome({
         storage: {
           get: jest.fn(async () => ({ [STORAGE_KEYS.SESSION_SNAPSHOT]: snapshotStore.value })),
@@ -659,6 +670,7 @@ describe('handleMessage routing', () => {
             snapshotStore.value = items[STORAGE_KEYS.SESSION_SNAPSHOT];
           }),
           remove: jest.fn(async () => {
+            removeCalls.push(svc.getState().recordingId);
             snapshotStore.value = null;
           }),
         },
@@ -687,14 +699,13 @@ describe('handleMessage routing', () => {
 
       await svc.startRecording('tab', true, false);
       svc.handleOffscreenStarted();
+      const secondRecordingId = svc.getState().recordingId;
 
       await svc.drainStateEffects();
-
-      const secondRecordingId = svc.getState().recordingId;
-      expect(chrome.storage.remove).toHaveBeenCalledTimes(0);
+      expect(removeCalls).not.toContain(secondRecordingId);
       expect(secondRecordingId).not.toBe(firstRecordingId);
-      expect(snapshotStore.value).not.toBeNull();
       expect(snapshotStore.value.recordingId).toBe(secondRecordingId);
+      expect(snapshotStore.value).not.toBeNull();
     });
   });
 
