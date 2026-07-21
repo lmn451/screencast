@@ -180,9 +180,64 @@ describe('startRecording', () => {
     expect(svc.getState().recordingId).toBe(recordingId);
     expect(chrome.runtime.sendMessage).toHaveBeenCalledTimes(1);
   });
-});
+  });
 
-describe('stopRecording', () => {
+  describe('tab closing handling', () => {
+    it('ignores tab close events for non-owned tabs while recording', async () => {
+      const chrome = makeStubChrome();
+      const svc = createRecordingService(chrome);
+      await svc.startRecording('tab', false, false);
+      svc.handleOffscreenStarted();
+      expect(svc.getState().status).toBe('recording');
+
+      svc.handleTabClosing(1234);
+
+      expect(svc.getState().status).toBe('recording');
+    });
+
+  it('transitions to failed when the active overlay tab closes during recording', async () => {
+      const chrome = makeStubChrome();
+      const svc = createRecordingService(chrome);
+      await svc.startRecording('tab', false, false);
+      svc.handleOffscreenStarted();
+
+      svc.overlayTabId = 42;
+
+      svc.handleTabClosing(42); // active tab where overlay is injected
+
+      expect(svc.getState().status).toBe('failed');
+    });
+
+  it('transitions to failed and closes the recorder tab when recorder tab closes during recording', async () => {
+      const chrome = makeStubChrome();
+      const svc = createRecordingService(chrome);
+      await svc.startRecording('tab', true, false);
+      svc.handleRecorderStarted();
+      expect(svc.getState().status).toBe('recording');
+
+      svc.recorderTabId = 99;
+
+      svc.handleTabClosing(99); // recorder tab id
+
+      expect(svc.getState().status).toBe('failed');
+      expect(chrome.tabs.remove).toHaveBeenCalledWith(99);
+    });
+
+    it('does not transition to failed for tab closes already tracked as service-owned cleanup', async () => {
+      const chrome = makeStubChrome();
+      const svc = createRecordingService(chrome);
+      await svc.startRecording('tab', true, false);
+      svc.handleRecorderStarted();
+
+      svc.expectedClosedTabs.add(99);
+      svc.handleTabClosing(99);
+
+      expect(svc.getState().status).toBe('recording');
+      expect(svc.expectedClosedTabs.has(99)).toBe(false);
+    });
+  });
+
+  describe('stopRecording', () => {
   it('rejects when state is idle', async () => {
     const chrome = makeStubChrome();
     const svc = createRecordingService(chrome);

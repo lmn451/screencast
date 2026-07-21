@@ -72,6 +72,7 @@ export class RecordingService {
   private checkpointInterval: ReturnType<typeof setInterval> | null = null;
   private overlayTabId: number | null = null;
   private recorderTabId: number | null = null;
+  private readonly expectedClosedTabs = new Set<number>();
 
   constructor(chrome: ChromeAPI) {
     this.chrome = chrome;
@@ -534,10 +535,6 @@ export class RecordingService {
     await this.cleanup();
   }
 
-  handleTabClosing(tabId: number): void {
-    this.actor.send({ type: 'TAB_CLOSING', tabId });
-  }
-
   // ═══════════════════════════════════════════════════════════════════════════
   // RECOVERY HANDLERS
   // ═══════════════════════════════════════════════════════════════════════════
@@ -645,7 +642,14 @@ export class RecordingService {
 
     // Close recorder tab
     if (this.recorderTabId) {
-      await this.chrome.tabs.remove(this.recorderTabId);
+      const recorderTabId = this.recorderTabId;
+      this.expectedClosedTabs.add(recorderTabId);
+      try {
+        await this.chrome.tabs.remove(recorderTabId);
+      } catch (e) {
+        console.warn('[RecordingService] Recorder tab removal failed:', e);
+        this.expectedClosedTabs.delete(recorderTabId);
+      }
       this.recorderTabId = null;
     }
 
@@ -752,6 +756,39 @@ export class RecordingService {
 
       default:
         return { ok: false, error: 'Unhandled message type' };
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // TAB CLOSE FILTERING
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  private consumeExpectedClosedTab(tabId: number): boolean {
+    return this.expectedClosedTabs.delete(tabId);
+  }
+
+  handleTabClosing(tabId: number): void {
+    if (!tabId || this.consumeExpectedClosedTab(tabId)) {
+      return;
+    }
+
+    // Only treat these as terminal failures while actively recording.
+    const state = this.actor.getSnapshot().value;
+    if (state !== 'recording') {
+      return;
+    }
+
+    if (this.overlayTabId === tabId) {
+      this.clearTimers();
+      this.actor.send({ type: 'OVERLAY_TAB_CLOSED' });
+      void this.cleanup();
+      return;
+    }
+
+    if (this.recorderTabId === tabId) {
+      this.clearTimers();
+      this.actor.send({ type: 'RECORDER_TAB_CLOSED' });
+      void this.cleanup();
     }
   }
 }

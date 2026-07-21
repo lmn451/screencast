@@ -221,6 +221,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true; // Keep channel open for async response
 });
 
+// Keep the service informed about tab lifecycle changes for hard ownership checks.
+chrome.tabs.onRemoved.addListener((tabId) => {
+  service.handleTabClosing(tabId);
+});
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // LIFECYCLE HANDLERS
 // ═══════════════════════════════════════════════════════════════════════════════

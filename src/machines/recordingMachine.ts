@@ -23,8 +23,6 @@ export const initialContext: RecordingContext = {
   recordingId: null,
   correlationId: null,
   strategy: null,
-  overlayTabId: null,
-  recorderTabId: null,
   startedAt: null,
   lastActivityAt: null,
   options: {
@@ -66,8 +64,6 @@ export const recordingMachine = setup({
       recordingId: () => null,
       correlationId: () => null,
       strategy: () => null,
-      overlayTabId: () => null,
-      recorderTabId: () => null,
       startedAt: () => null,
       lastActivityAt: () => null,
       options: () => ({ mode: null, includeMic: false, includeSystemAudio: false }),
@@ -215,12 +211,11 @@ export const recordingMachine = setup({
         UPDATE_STATE: {
           actions: 'updateLastActivity',
         },
-        TAB_CLOSING: {
-          // Guard: only if closing the recorder tab
-          guard: ({ event, context }) => {
-            const tabId = (event as { type: 'TAB_CLOSING'; tabId: number }).tabId;
-            return context.recorderTabId === tabId || context.overlayTabId === tabId;
-          },
+        OVERLAY_TAB_CLOSED: {
+          actions: 'setTabClosedError',
+          target: 'failed',
+        },
+        RECORDER_TAB_CLOSED: {
           actions: 'setTabClosedError',
           target: 'failed',
         },

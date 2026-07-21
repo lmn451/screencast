@@ -29,8 +29,6 @@ export interface RecordingContext {
   recordingId: string | null;
   correlationId: string | null;
   strategy: RecordingStrategy | null;
-  overlayTabId: number | null;
-  recorderTabId: number | null;
   startedAt: number | null;
   lastActivityAt: number | null;
   options: {
@@ -63,6 +61,8 @@ export type RecordingEvent =
   | { type: 'CONFIRMATION_TIMEOUT' }
   | { type: 'SAVE_TIMEOUT' }
   | { type: 'RESET' }
+  | { type: 'OVERLAY_TAB_CLOSED' }
+  | { type: 'RECORDER_TAB_CLOSED' }
   | {
       type: 'RECONCILE';
       snapshot: Partial<RecordingContext> & {
@@ -72,7 +72,6 @@ export type RecordingEvent =
     }
   | { type: 'RECOVERY_RESUME'; recordingId: string }
   | { type: 'RECOVERY_DISCARD'; recordingId: string }
-  | { type: 'TAB_CLOSING'; tabId: number }
   | { type: 'PREVIEW_READY'; recordingId?: string }
   | { type: 'CHUNK_FAILED'; chunkIndex: number }
   | { type: 'UPDATE_STATE'; status: RecordingStatus };
