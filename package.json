@@ -16,7 +16,9 @@
     "lint": "eslint . --ext .js --ignore-path .eslintignore",
     "format": "prettier --write .",
     "e2e:stop": "playwright test tests/e2e/stop -c tests/e2e/playwright.config.ts",
-    "e2e": "playwright test -c tests/e2e/playwright.config.ts"
+    "e2e": "playwright test -c tests/e2e/playwright.config.ts",
+    "e2e:list": "playwright test -c tests/e2e/playwright.config.ts --list",
+    "e2e:ci": "xvfb-run -a --server-args='-screen 0 1920x1080x24' pnpm run e2e"
   },
   "devDependencies": {
     "@playwright/test": "^1.55.0",
