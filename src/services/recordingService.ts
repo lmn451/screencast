@@ -265,6 +265,7 @@ export class RecordingService {
   private async ensureOffscreenDocument(
     mode: string,
     includeSystemAudio: boolean,
+    bestQuality: boolean,
     recordingId: string,
     targetTabId: number | null
   ): Promise<void> {
@@ -284,6 +285,7 @@ export class RecordingService {
         type: 'OFFSCREEN_START',
         mode,
         includeAudio: includeSystemAudio,
+        bestQuality,
         recordingId,
         targetTabId,
       });
@@ -297,6 +299,7 @@ export class RecordingService {
     mode: 'tab' | 'window' | 'screen',
     includeMic: boolean,
     includeSystemAudio: boolean,
+    bestQuality: boolean,
     recordingId: string
   ): Promise<void> {
     const params = new URLSearchParams({
@@ -304,6 +307,7 @@ export class RecordingService {
       mode,
       mic: includeMic ? '1' : '0',
       sys: includeSystemAudio ? '1' : '0',
+      best: bestQuality ? '1' : '0',
     });
     const tab = await this.chrome.tabs.create({
       url: this.chrome.runtime.getURL(`recorder.html?${params.toString()}`),
@@ -397,7 +401,8 @@ export class RecordingService {
   async startRecording(
     mode: 'tab' | 'window' | 'screen',
     includeMic: boolean,
-    includeSystemAudio: boolean
+    includeSystemAudio: boolean,
+    bestQuality = false
   ): Promise<{ ok: boolean; error?: string; overlayInjected?: boolean }> {
     const currentState = this.actor.getSnapshot().value;
     if (currentState !== 'idle') {
@@ -421,6 +426,7 @@ export class RecordingService {
       mode,
       mic: includeMic,
       systemAudio: includeSystemAudio,
+      bestQuality,
     });
 
     const context = this.actor.getSnapshot().context;
@@ -440,11 +446,18 @@ export class RecordingService {
         await this.ensureOffscreenDocument(
           mode,
           includeSystemAudio,
+          bestQuality,
           context.recordingId,
           this.overlayTabId
         );
       } else {
-        await this.openRecorderTab(mode, includeMic, includeSystemAudio, context.recordingId);
+        await this.openRecorderTab(
+          mode,
+          includeMic,
+          includeSystemAudio,
+          bestQuality,
+          context.recordingId
+        );
       }
     } catch (e) {
       this.actor.send({ type: 'RESET' });
@@ -781,7 +794,8 @@ export class RecordingService {
         return await this.startRecording(
           message.mode as 'tab' | 'window' | 'screen',
           message.mic as boolean,
-          message.systemAudio as boolean
+          message.systemAudio as boolean,
+          message.bestQuality === true
         );
 
       case 'STOP':

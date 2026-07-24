@@ -129,9 +129,26 @@ describe('startRecording', () => {
       type: 'OFFSCREEN_START',
       mode: 'tab',
       includeAudio: false,
+      bestQuality: false,
       recordingId: expect.stringMatching(/^[0-9a-f-]{36}$/i),
       targetTabId: 42,
     });
+  });
+
+  it('forwards best quality to the offscreen recorder and machine state', async () => {
+    const chrome = makeStubChrome();
+    const svc = createRecordingService(chrome);
+
+    const result = await svc.startRecording('tab', false, false, true);
+
+    expect(result.ok).toBe(true);
+    expect(svc.getState().options.bestQuality).toBe(true);
+    expect(chrome.runtime.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'OFFSCREEN_START',
+        bestQuality: true,
+      })
+    );
   });
 
   it('refuses to start when storage quota is exhausted', async () => {
@@ -173,7 +190,7 @@ describe('startRecording', () => {
     expect(chrome.offscreen.createDocument).not.toHaveBeenCalled();
     expect(chrome.tabs.create).toHaveBeenCalledWith({
       url: expect.stringMatching(
-        /^chrome-extension:\/\/test\/recorder\.html\?id=[0-9a-f-]{36}&mode=screen&mic=1&sys=1$/i
+        /^chrome-extension:\/\/test\/recorder\.html\?id=[0-9a-f-]{36}&mode=screen&mic=1&sys=1&best=0$/i
       ),
       active: true,
     });

@@ -87,6 +87,8 @@ it('stops every acquired capture track when createMediaRecorder throws (no suppo
     applyContentHints: jest.fn(),
     setupAutoStop: jest.fn(),
     CHUNK_INTERVAL_MS: 1000,
+    getDisplayVideoConstraints: jest.fn(() => true),
+    BEST_QUALITY_VIDEO_BITS_PER_SECOND: 25_000_000,
   }));
 
   await import('../../src/entries/offscreen.js');
@@ -129,6 +131,8 @@ it('rejects recording commands from an unauthorized sender', async () => {
     applyContentHints: jest.fn(),
     setupAutoStop: jest.fn(),
     CHUNK_INTERVAL_MS: 1000,
+    getDisplayVideoConstraints: jest.fn(() => true),
+    BEST_QUALITY_VIDEO_BITS_PER_SECOND: 25_000_000,
   }));
 
   await import('../../src/entries/offscreen.js');

@@ -22,10 +22,11 @@ async function loadParams() {
     mode,
     mic: params.get('mic') === 'true' || params.get('mic') === '1',
     systemAudio: params.get('sys') === 'true' || params.get('sys') === '1',
+    bestQuality: params.get('best') === 'true' || params.get('best') === '1',
   };
 }
 
-function buildCaptureList(mode, mic, systemAudio) {
+function buildCaptureList(mode, mic, systemAudio, bestQuality) {
   const items = [];
 
   // Screen/window/tab capture
@@ -39,6 +40,10 @@ function buildCaptureList(mode, mic, systemAudio) {
     items.push('Microphone audio will be included');
   } else if (systemAudio) {
     items.push('System/tab audio will be included');
+  }
+
+  if (bestQuality) {
+    items.push('Best quality enabled (source resolution, up to 60 FPS)');
   }
 
   return items;
@@ -65,7 +70,7 @@ function buildNote(mode, mic, _systemAudio) {
 
 async function init() {
   try {
-    const { mode, mic, systemAudio } = await loadParams();
+    const { mode, mic, systemAudio, bestQuality } = await loadParams();
 
     // Render capture list
     const listEl = document.getElementById('capture-list');
@@ -79,18 +84,18 @@ async function init() {
       return;
     }
 
-    const items = buildCaptureList(mode, mic, systemAudio);
+    const items = buildCaptureList(mode, mic, systemAudio, bestQuality);
     listEl.innerHTML = items.map((item) => `<li>${item}</li>`).join('');
 
     // Render note
     noteEl.textContent = buildNote(mode, mic, systemAudio) || 'Everything stays on your device.';
 
     // Track consent displayed
-    trackConsent('displayed', { mode, mic, systemAudio });
+    trackConsent('displayed', { mode, mic, systemAudio, bestQuality });
 
     // Continue button
     btnContinue.addEventListener('click', () => {
-      trackConsent('accepted', { mode, mic, systemAudio });
+      trackConsent('accepted', { mode, mic, systemAudio, bestQuality });
 
       // Store consent flag in sessionStorage
       try {
@@ -108,6 +113,7 @@ async function init() {
             mode,
             mic,
             systemAudio,
+            bestQuality,
           },
           (res) => {
             if (chrome.runtime.lastError) {
@@ -128,7 +134,7 @@ async function init() {
               noteEl.textContent = `Error: ${errMsg}`;
               noteEl.style.background = '#fce8e6';
               alert('CaptureCast: ' + errMsg);
-              trackConsent('failed', { mode, mic, systemAudio, error: errMsg });
+              trackConsent('failed', { mode, mic, systemAudio, bestQuality, error: errMsg });
             }
           }
         );
@@ -143,7 +149,7 @@ async function init() {
 
     // Cancel button
     btnCancel.addEventListener('click', () => {
-      trackConsent('cancelled', { mode, mic, systemAudio });
+      trackConsent('cancelled', { mode, mic, systemAudio, bestQuality });
       window.close();
     });
   } catch (e) {

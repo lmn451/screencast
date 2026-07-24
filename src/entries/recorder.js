@@ -5,7 +5,9 @@ import {
   applyContentHints,
   combineStreams,
   setupAutoStop,
+  getDisplayVideoConstraints,
   CHUNK_INTERVAL_MS,
+  BEST_QUALITY_VIDEO_BITS_PER_SECOND,
 } from '../lib/media-recorder-utils.js';
 import { createError, CODES } from '../error-codes.js';
 
@@ -52,10 +54,10 @@ async function notifyRecorderStartError(captureError, isPermissionDenied) {
   }
 }
 
-async function requestDisplayStream(wantSys, status, startBtn) {
+async function requestDisplayStream(wantSys, bestQuality, status, startBtn) {
   try {
     return await navigator.mediaDevices.getDisplayMedia({
-      video: true,
+      video: getDisplayVideoConstraints(bestQuality),
       audio: wantSys, // only ask for system audio if requested
     });
   } catch (captureError) {
@@ -110,6 +112,7 @@ async function start() {
   recordingId = getQueryParam('id');
   const wantMic = getQueryParam('mic') === '1';
   const wantSys = getQueryParam('sys') === '1';
+  const bestQuality = getQueryParam('best') === '1';
 
   const status = document.getElementById('status');
   const preview = document.getElementById('preview');
@@ -134,7 +137,7 @@ async function start() {
     status.textContent = 'Requesting screen capture…';
     startBtn.classList.add('hidden');
     // 1. Request screen share (requires user gesture, if auto-start fails this needs a button click)
-    displayStream = await requestDisplayStream(wantSys, status, startBtn);
+    displayStream = await requestDisplayStream(wantSys, bestQuality, status, startBtn);
     if (!displayStream) return;
 
     // Apply content hints to screen stream
@@ -171,7 +174,7 @@ async function start() {
     stopBtn.classList.remove('hidden');
 
     // Create recorder with standard handlers
-    const { recorder } = createMediaRecorder(mediaStream, recordingId, {
+    const recorderCallbacks = {
       onStart: () => {
         logger.log('Recording started');
       },
@@ -221,7 +224,16 @@ async function start() {
       onError: (e) => {
         logger.error('MediaRecorder error:', e);
       },
-    });
+    };
+    const recordingOptions = {
+      videoBitsPerSecond: bestQuality ? BEST_QUALITY_VIDEO_BITS_PER_SECOND : undefined,
+    };
+    const { recorder } = createMediaRecorder(
+      mediaStream,
+      recordingId,
+      recorderCallbacks,
+      recordingOptions
+    );
 
     mediaRecorder = recorder;
 

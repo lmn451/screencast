@@ -24,6 +24,7 @@ describe('media-recorder-utils (additional)', () => {
       }
       constructor(_stream, options = {}) {
         this.mimeType = options.mimeType || 'video/webm';
+        this.videoBitsPerSecond = options.videoBitsPerSecond;
         this.state = 'inactive';
         this.onstart = null;
         this.ondataavailable = null;
@@ -51,14 +52,19 @@ describe('media-recorder-utils (additional)', () => {
     global.MediaRecorder = FakeMediaRecorder;
 
     const mod = await import('../../src/lib/media-recorder-utils.js');
-    const { createMediaRecorder } = mod;
+    const { createMediaRecorder, BEST_QUALITY_VIDEO_BITS_PER_SECOND } = mod;
 
     const stream = {}; // not inspected by our fake
     const onStart = jest.fn();
     const onStop = jest.fn(() => Promise.resolve());
     const onError = jest.fn();
 
-    const { recorder, getStats } = createMediaRecorder(stream, 'r1', { onStart, onStop, onError });
+    const { recorder, getStats } = createMediaRecorder(
+      stream,
+      'r1',
+      { onStart, onStop, onError },
+      { videoBitsPerSecond: BEST_QUALITY_VIDEO_BITS_PER_SECOND }
+    );
 
     recorder.start();
     // request a chunk (triggers ondataavailable -> saveChunk)
@@ -72,6 +78,7 @@ describe('media-recorder-utils (additional)', () => {
     expect(onStart).toHaveBeenCalled();
     expect(saveChunkMock).toHaveBeenCalledWith('r1', expect.objectContaining({ size: 256 }), 0);
     expect(onStop).toHaveBeenCalled();
+    expect(recorder.videoBitsPerSecond).toBe(BEST_QUALITY_VIDEO_BITS_PER_SECOND);
 
     const stats = getStats();
     expect(stats.chunkIndex).toBeGreaterThanOrEqual(1);

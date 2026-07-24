@@ -8,6 +8,21 @@ const logger = createLogger('MediaRecorderUtils');
 
 // Constants for recorder configuration
 export const CHUNK_INTERVAL_MS = 1000; // 1 second chunks for balance of memory/recovery
+export const BEST_QUALITY_FRAME_RATE = 60;
+export const BEST_QUALITY_VIDEO_BITS_PER_SECOND = 25_000_000;
+
+/**
+ * Return display-capture constraints for the selected quality mode.
+ * Leaving width and height unconstrained preserves the selected source's native resolution.
+ * @param {boolean} bestQuality - Whether to target the best-quality preset
+ * @returns {true|MediaTrackConstraints} Video constraints for getDisplayMedia
+ */
+export function getDisplayVideoConstraints(bestQuality = false) {
+  if (!bestQuality) return true;
+  return {
+    frameRate: { ideal: BEST_QUALITY_FRAME_RATE, max: BEST_QUALITY_FRAME_RATE },
+  };
+}
 
 // Retry configuration for chunk saves
 const MAX_CHUNK_SAVE_RETRIES = 3;
@@ -89,17 +104,31 @@ export function applyContentHints(stream, { hasSystemAudio = false, hasMicrophon
  * @param {Function} callbacks.onStart - Called when recording starts
  * @param {Function} callbacks.onStop - Called when recording stops (receives mimeType, duration, totalSize, { failedChunks })
  * @param {Function} callbacks.onError - Called on recorder error
+ * @param {Object} recordingOptions - MediaRecorder encoding options
+ * @param {number} recordingOptions.videoBitsPerSecond - Optional target video bitrate
  * @returns {{
  *   recorder: MediaRecorder,
  *   getStats: () => { chunkIndex: number, totalSize: number, duration: number, failedChunks: number },
  *   getFailedChunkCount: () => number,
  * }} MediaRecorder + per-instance stats accessors.
  */
-export function createMediaRecorder(stream, recordingId, callbacks = {}) {
+export function createMediaRecorder(stream, recordingId, callbacks = {}, recordingOptions = {}) {
   const { onStart, onStop, onError } = callbacks;
+  const { videoBitsPerSecond } = recordingOptions;
+
+  if (
+    videoBitsPerSecond !== undefined &&
+    (!Number.isSafeInteger(videoBitsPerSecond) || videoBitsPerSecond <= 0)
+  ) {
+    throw new TypeError('videoBitsPerSecond must be a positive safe integer');
+  }
 
   const mimeType = getOptimalCodec();
-  const recorder = new MediaRecorder(stream, { mimeType });
+  const mediaRecorderOptions = { mimeType };
+  if (videoBitsPerSecond !== undefined) {
+    mediaRecorderOptions.videoBitsPerSecond = videoBitsPerSecond;
+  }
+  const recorder = new MediaRecorder(stream, mediaRecorderOptions);
 
   let chunkIndex = 0;
   let totalSize = 0;

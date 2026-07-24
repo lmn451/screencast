@@ -4,7 +4,9 @@ import {
   createMediaRecorder,
   applyContentHints,
   setupAutoStop,
+  getDisplayVideoConstraints,
   CHUNK_INTERVAL_MS,
+  BEST_QUALITY_VIDEO_BITS_PER_SECOND,
 } from '../lib/media-recorder-utils.js';
 import { createError, CODES } from '../error-codes.js';
 import { openDB } from '../lib/db-shared.js';
@@ -73,11 +75,11 @@ function attemptPartialSave() {
 // Save partial data on unexpected document close
 globalThis.addEventListener('beforeunload', attemptPartialSave);
 
-function getConstraintsFromMode(mode, includeAudio) {
+function getConstraintsFromMode(mode, includeAudio, bestQuality) {
   // For now, mode is informative only; actual selection (tab/window/screen)
   // is performed by the browser's picker. Constraints can diverge by mode later.
   return {
-    video: true,
+    video: getDisplayVideoConstraints(bestQuality),
     audio: includeAudio
       ? {
           echoCancellation: false,
@@ -88,16 +90,16 @@ function getConstraintsFromMode(mode, includeAudio) {
   };
 }
 
-async function startCapture(mode, recordingId, includeAudio) {
+async function startCapture(mode, recordingId, includeAudio, bestQuality = false) {
   if (mediaRecorder) throw new Error('Already recording');
   currentId = recordingId;
 
-  logger.log('Starting capture with mode:', mode, 'includeAudio:', includeAudio);
+  logger.log('Starting capture with mode:', mode, { includeAudio, bestQuality });
 
   try {
     logger.log('Requesting display media with audio:', includeAudio);
     const displayStream = await navigator.mediaDevices.getDisplayMedia(
-      getConstraintsFromMode(mode, includeAudio)
+      getConstraintsFromMode(mode, includeAudio, bestQuality)
     );
 
     // Apply content hints for encoder optimization
@@ -113,7 +115,7 @@ async function startCapture(mode, recordingId, includeAudio) {
     mediaStream = displayStream;
 
     // Create recorder with standard handlers
-    const { recorder } = createMediaRecorder(mediaStream, currentId, {
+    const recorderCallbacks = {
       onStart: () => {
         logger.log('Recording started');
       },
@@ -164,7 +166,16 @@ async function startCapture(mode, recordingId, includeAudio) {
       onError: (e) => {
         logger.error('MediaRecorder error:', e);
       },
-    });
+    };
+    const recordingOptions = {
+      videoBitsPerSecond: bestQuality ? BEST_QUALITY_VIDEO_BITS_PER_SECOND : undefined,
+    };
+    const { recorder } = createMediaRecorder(
+      mediaStream,
+      currentId,
+      recorderCallbacks,
+      recordingOptions
+    );
 
     mediaRecorder = recorder;
 
@@ -252,7 +263,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type === 'OFFSCREEN_START') {
       try {
         logger.log('Received START message:', message);
-        await startCapture(message.mode, message.recordingId, message.includeAudio);
+        await startCapture(
+          message.mode,
+          message.recordingId,
+          message.includeAudio,
+          message.bestQuality === true
+        );
         logger.log('startCapture completed successfully');
         sendResponse({ ok: true });
       } catch (e) {

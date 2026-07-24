@@ -37,6 +37,7 @@ export interface RecordingContext {
     mode: RecordingMode | null;
     includeMic: boolean;
     includeSystemAudio: boolean;
+    bestQuality: boolean;
   };
   error: string | null;
   failedChunkCount: number;
@@ -48,7 +49,13 @@ export interface RecordingContext {
 
 /** Events that can be sent to the recording machine */
 export type RecordingEvent =
-  | { type: 'START'; mode: RecordingMode; mic?: boolean; systemAudio?: boolean }
+  | {
+      type: 'START';
+      mode: RecordingMode;
+      mic?: boolean;
+      systemAudio?: boolean;
+      bestQuality?: boolean;
+    }
   | { type: 'STOP' }
   | { type: 'OFFSCREEN_STARTED' }
   | { type: 'RECORDER_STARTED' }
@@ -81,6 +88,7 @@ export interface SessionSnapshot {
     mode: RecordingMode | null;
     includeMic: boolean;
     includeSystemAudio: boolean;
+    bestQuality: boolean;
   };
   strategy: RecordingStrategy | null;
   correlationId: string;

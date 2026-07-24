@@ -31,6 +31,7 @@ export const schemas = {
     optional: [
       ['mic', 'boolean'],
       ['systemAudio', 'boolean'],
+      ['bestQuality', 'boolean'],
     ],
   },
   [MSG_STOP]: {
@@ -78,7 +79,10 @@ export const schemas = {
       ['recordingId', 'string'],
       ['includeAudio', 'boolean'],
     ],
-    optional: [['targetTabId', 'number']],
+    optional: [
+      ['targetTabId', 'number'],
+      ['bestQuality', 'boolean'],
+    ],
   },
   [MSG_OFFSCREEN_STOP]: {
     required: [['type', 'string']],

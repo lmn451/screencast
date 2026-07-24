@@ -35,12 +35,15 @@ async function start(mode) {
   try {
     const micEl = document.getElementById('opt-mic');
     const sysEl = document.getElementById('opt-sys');
+    const bestQualityEl = document.getElementById('opt-best-quality');
     const mic = micEl instanceof HTMLInputElement && micEl.checked;
     const sys = sysEl instanceof HTMLInputElement && sysEl.checked;
+    const bestQuality = bestQualityEl instanceof HTMLInputElement && bestQualityEl.checked;
     const params = new URLSearchParams({
       mode,
       mic: mic ? 'true' : 'false',
       sys: sys ? 'true' : 'false',
+      best: bestQuality ? 'true' : 'false',
     });
     window.location.href = `consent.html?${params.toString()}`;
   } catch (e) {
