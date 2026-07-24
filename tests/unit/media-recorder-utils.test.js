@@ -3,10 +3,12 @@
 import { jest } from '@jest/globals';
 import {
   getOptimalCodec,
+  getDisplayVideoConstraints,
   applyContentHints,
   combineStreams,
   setupAutoStop,
   CHUNK_INTERVAL_MS,
+  BEST_QUALITY_FRAME_RATE,
 } from '../../src/lib/media-recorder-utils.js';
 
 describe('media-recorder-utils.js', () => {
@@ -62,6 +64,18 @@ describe('media-recorder-utils.js', () => {
       };
 
       expect(() => getOptimalCodec()).toThrow('No supported video codec found');
+    });
+  });
+
+  describe('getDisplayVideoConstraints', () => {
+    it('keeps browser defaults for standard quality', () => {
+      expect(getDisplayVideoConstraints(false)).toBe(true);
+    });
+
+    it('targets up to 60 FPS for best quality', () => {
+      expect(getDisplayVideoConstraints(true)).toEqual({
+        frameRate: { ideal: BEST_QUALITY_FRAME_RATE, max: BEST_QUALITY_FRAME_RATE },
+      });
     });
   });
 

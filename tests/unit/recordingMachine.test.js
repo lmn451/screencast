@@ -40,6 +40,7 @@ describe('recordingMachine — initial state', () => {
     expect(context.correlationId).toBeNull();
     expect(context.strategy).toBeNull();
     expect(context.failedChunkCount).toBe(0);
+    expect(context.options.bestQuality).toBe(false);
     actor.stop();
   });
 });
@@ -48,13 +49,20 @@ describe('recordingMachine — happy path (idle → starting → recording → s
   it('walks the full lifecycle and resets to idle', () => {
     const actor = startActor();
 
-    actor.send({ type: 'START', mode: 'tab', mic: false, systemAudio: false });
+    actor.send({
+      type: 'START',
+      mode: 'tab',
+      mic: false,
+      systemAudio: false,
+      bestQuality: true,
+    });
     expect(actor.getSnapshot().value).toBe('starting');
 
     const startingCtx = actor.getSnapshot().context;
     expect(startingCtx.recordingId).toMatch(/^[0-9a-f-]{36}$/i);
     expect(startingCtx.correlationId).toMatch(/^[0-9a-f-]{36}$/i);
     expect(startingCtx.options.mode).toBe('tab');
+    expect(startingCtx.options.bestQuality).toBe(true);
     expect(startingCtx.strategy).toBe('offscreen'); // determineStrategy: mic=false → offscreen
 
     actor.send({ type: 'OFFSCREEN_STARTED' });

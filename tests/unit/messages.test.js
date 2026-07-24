@@ -104,6 +104,7 @@ describe('messages.js', () => {
         mode: 'tab',
         recordingId: '550e8400-e29b-41d4-a716-446655440000',
         includeAudio: false,
+        bestQuality: true,
         targetTabId: 42,
       };
       const schema = schemas[MSG_OFFSCREEN_START];
@@ -172,6 +173,7 @@ describe('messages.js', () => {
       expect(schemas[MSG_START]).toBeDefined();
       expect(schemas[MSG_START].required.map(([f]) => f)).toContain('type');
       expect(schemas[MSG_START].required.map(([f]) => f)).toContain('mode');
+      expect(schemas[MSG_START].optional.map(([f]) => f)).toContain('bestQuality');
     });
 
     it('should have STOP schema with only required fields', () => {
@@ -216,6 +218,7 @@ describe('messages.js', () => {
       const requiredFields = schemas[MSG_OFFSCREEN_START].required.map(([f]) => f);
       expect(requiredFields).toEqual(['type', 'mode', 'recordingId', 'includeAudio']);
       expect(schemas[MSG_OFFSCREEN_START].optional.map(([f]) => f)).toContain('targetTabId');
+      expect(schemas[MSG_OFFSCREEN_START].optional.map(([f]) => f)).toContain('bestQuality');
     });
 
     it('should have OFFSCREEN_STOP schema', () => {
