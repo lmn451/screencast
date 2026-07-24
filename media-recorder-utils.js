@@ -36,31 +36,31 @@ function shouldForceVP8() {
 
 /**
  * Get the best supported video codec from a prioritized list
- * 
+ *
  * For normal browsers: AV1 → VP9 → VP8 (best compression)
  * For CI/testing: VP8 first (most reliable software codec, no GPU needed)
  * For ?codec=vp8: Always use VP8
- * 
+ *
  * @returns {string} MIME type of the best supported codec
  */
 export function getOptimalCodec() {
   // Always prefer VP8 for reliability (especially in CI/testing)
   // This avoids AV1 green screen issues
   const forceVP8 = shouldForceVP8() || isCI;
-  
+
   // In CI environments or with forceVP8, use VP8 (pure software encoding)
   // AV1/VP9 may require GPU acceleration which isn't available
   const codecsForCI = [
-    'video/webm;codecs=vp8,opus',  // Most reliable software codec
-    'video/webm;codecs=vp8',        // VP8 without audio
-    'video/webm',                   // Generic fallback
+    'video/webm;codecs=vp8,opus', // Most reliable software codec
+    'video/webm;codecs=vp8', // VP8 without audio
+    'video/webm', // Generic fallback
   ];
 
   const codecsForNormal = [
     'video/webm;codecs=av01,opus', // AV1 (best compression, GPU preferred)
     'video/webm;codecs=av1,opus',
-    'video/webm;codecs=vp9,opus',   // VP9 (good compression)
-    'video/webm;codecs=vp8,opus',   // VP8 (reliable fallback)
+    'video/webm;codecs=vp9,opus', // VP9 (good compression)
+    'video/webm;codecs=vp8,opus', // VP8 (reliable fallback)
     'video/webm',
   ];
 
@@ -83,11 +83,7 @@ export function getOptimalCodec() {
  * @returns {string} MIME type for VP8 software encoding
  */
 export function getSoftwareCodec() {
-  const softwareCodecs = [
-    'video/webm;codecs=vp8,opus',
-    'video/webm;codecs=vp8',
-    'video/webm',
-  ];
+  const softwareCodecs = ['video/webm;codecs=vp8,opus', 'video/webm;codecs=vp8', 'video/webm'];
 
   for (const codec of softwareCodecs) {
     if (MediaRecorder.isTypeSupported(codec)) {
@@ -168,11 +164,12 @@ export function createMediaRecorder(stream, recordingId, callbacks = {}) {
   } else {
     mimeType = getOptimalCodec();
   }
-  
+
   const recorder = new MediaRecorder(stream, { mimeType });
 
   let chunkIndex = 0;
   let totalSize = 0;
+  let saveErrorCount = 0;
   let recordingStartTime = 0;
 
   recorder.onstart = () => {
@@ -187,8 +184,11 @@ export function createMediaRecorder(stream, recordingId, callbacks = {}) {
         totalSize += e.data.size;
         await saveChunk(recordingId, e.data, chunkIndex++);
       } catch (err) {
+        saveErrorCount++;
         logger.error('Failed to save chunk:', err);
-        // Continue recording despite save failure
+        // Continue recording despite save failure; onStop receives the count
+        // so callers can surface a corrupt-recording error instead of
+        // silently producing a truncated file.
       }
     }
   };
@@ -207,14 +207,24 @@ export function createMediaRecorder(stream, recordingId, callbacks = {}) {
     if (chunkIndex === 0) {
       logger.warn('No chunks recorded! Recording may have been too short.');
     }
+    if (saveErrorCount > 0) {
+      logger.error(
+        `${saveErrorCount} of ${chunkIndex} chunks failed to save; recording may be corrupt/truncated.`
+      );
+    }
 
     const finalMimeType = recorder.mimeType || 'video/webm';
-    await onStop?.(finalMimeType, duration, totalSize);
+    await onStop?.(finalMimeType, duration, totalSize, { chunkCount: chunkIndex, saveErrorCount });
   };
 
   return {
     recorder,
-    getStats: () => ({ chunkIndex, totalSize, duration: Date.now() - recordingStartTime }),
+    getStats: () => ({
+      chunkIndex,
+      totalSize,
+      saveErrorCount,
+      duration: Date.now() - recordingStartTime,
+    }),
   };
 }
 

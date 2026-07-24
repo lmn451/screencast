@@ -1,4 +1,7 @@
 import { DB_NAME, DB_VERSION, STORE_RECORDINGS, STORE_CHUNKS } from './db-shared.js';
+import { createLogger } from './logger.js';
+
+const logger = createLogger('DB');
 
 function openDB() {
   return new Promise((resolve, reject) => {

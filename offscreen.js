@@ -24,14 +24,14 @@ let pendingResolve = null;
 chrome.runtime.onConnect.addListener((port) => {
   logger.log('Offscreen received connection:', port.name);
   activePort = port;
-  
+
   // Send acknowledgment
   port.postMessage({ status: 'awake', name: port.name });
-  
+
   // Handle incoming messages
   port.onMessage.addListener((msg) => {
     logger.log('Offscreen received port message:', msg);
-    
+
     if (msg.command === 'ping') {
       port.postMessage({ status: 'pong' });
     } else if (msg.command === 'wakeup-complete' && pendingResolve) {
@@ -39,7 +39,7 @@ chrome.runtime.onConnect.addListener((port) => {
       pendingResolve = null;
     }
   });
-  
+
   port.onDisconnect.addListener(() => {
     logger.log('Offscreen port disconnected');
     activePort = null;
@@ -55,7 +55,7 @@ chrome.runtime.onConnect.addListener((port) => {
       request.onsuccess = () => resolve(request.result);
     });
     logger.log('IndexedDB initialized successfully');
-    
+
     // Signal that we're ready
     if (activePort) {
       activePort.postMessage({ status: 'initialized' });
@@ -133,10 +133,24 @@ async function startCapture(mode, recordingId, includeAudio, silent = false, str
     onStart: () => {
       logger.log('Recording started');
     },
-    onStop: async (mimeType, duration, totalSize) => {
+    onStop: async (mimeType, duration, totalSize, stats) => {
       try {
         await finishRecording(currentId, mimeType, duration, totalSize);
         logger.log('Finished recording in DB');
+
+        // If chunks failed to persist, the reassembled file would be
+        // corrupt/truncated. Report an error instead of opening a preview
+        // that silently shows a broken recording.
+        if (stats && stats.saveErrorCount > 0) {
+          logger.error(
+            `${stats.saveErrorCount} chunks failed to save; reporting corrupt recording.`
+          );
+          chrome.runtime.sendMessage({
+            type: 'OFFSCREEN_ERROR',
+            error: `Recording may be corrupt: ${stats.saveErrorCount} of ${stats.chunkCount} chunks failed to save.`,
+          });
+          return;
+        }
 
         try {
           await chrome.runtime.sendMessage({
@@ -246,16 +260,18 @@ function paintCDPFrame(data, metadata) {
   }
 
   try {
+    // Resize the canvas to match the source dimensions BEFORE drawing so the
+    // first frame isn't stretched to the default 1280x720 size.
+    if (metadata?.deviceHeight) {
+      canvas.height = metadata.deviceHeight;
+      canvas.width = metadata.deviceWidth;
+    }
+
     const img = new Image();
     img.onload = () => {
       ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
     };
     img.src = 'data:image/jpeg;base64,' + data;
-
-    if (metadata?.deviceHeight) {
-      canvas.height = metadata.deviceHeight;
-      canvas.width = metadata.deviceWidth;
-    }
   } catch (e) {
     logger.error('Failed to paint CDP frame:', e);
   }

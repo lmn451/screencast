@@ -87,29 +87,26 @@ async function start() {
         } else {
           logger.log('No streamId available, using chrome.tabCapture.capture()');
           const tracks = [];
-          const videoTrack = await new Promise((resolve, reject) => {
+          const tabStream = await new Promise((resolve, reject) => {
             chrome.tabCapture.capture({ video: true, audio: wantSys || wantMic }, (stream) => {
               if (chrome.runtime.lastError) {
                 reject(new Error(chrome.runtime.lastError.message));
               } else {
-                resolve(stream?.getVideoTracks()[0] ?? null);
+                resolve(stream ?? null);
               }
             });
           });
 
-          if (!videoTrack) {
+          if (!tabStream || tabStream.getVideoTracks().length === 0) {
             throw new Error('Tab capture failed: no video track available');
           }
+
+          const videoTrack = tabStream.getVideoTracks()[0];
           tracks.push(videoTrack);
 
-          const audioTrack = tracks[0].clone();
-          const audioStream = new MediaStream([audioTrack]);
-          captureStream = audioStream;
-          if (captureStream.getAudioTracks().length > 0) {
-            captureStream = new MediaStream([videoTrack, ...captureStream.getAudioTracks()]);
-          } else {
-            captureStream = new MediaStream([videoTrack]);
-          }
+          // Preserve audio tracks from the tab capture stream (previously
+          // discarded because only the video track was resolved).
+          captureStream = new MediaStream([videoTrack, ...tabStream.getAudioTracks()]);
 
           logger.log('Tab capture succeeded in recorder');
         }
@@ -176,28 +173,38 @@ async function start() {
       onStart: () => {
         logger.log('Recording started');
       },
-      onStop: async (mimeType, duration, totalSize) => {
+      onStop: async (mimeType, duration, totalSize, stats) => {
         try {
           // Finish recording in DB
           await finishRecording(recordingId, mimeType, duration, totalSize);
           logger.log('Finished recording in DB');
+          // If chunks failed to persist, warn the user instead of silently
+          // producing a corrupt/truncated file.
+          if (stats && stats.saveErrorCount > 0) {
+            logger.error(
+              `${stats.saveErrorCount} chunks failed to save; recording may be corrupt.`
+            );
+            alert(
+              `Recording may be corrupt: ${stats.saveErrorCount} of ${stats.chunkCount} chunks failed to save.`
+            );
+          }
 
           await chrome.runtime.sendMessage({
             type: 'RECORDER_DATA',
             recordingId,
             mimeType,
           });
+          // Only close the recorder tab after a successful save.
+          window.close();
         } catch (dbError) {
           logger.error('Failed to finish recording in DB:', dbError);
           alert('Failed to save recording: ' + dbError.message);
-          return;
         } finally {
           try {
             mediaStream?.getTracks().forEach((t) => t.stop());
           } catch (e) {
             logger.log('Error stopping tracks (non-fatal):', e);
           }
-          window.close();
         }
       },
       onError: (e) => {

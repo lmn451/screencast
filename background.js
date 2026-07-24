@@ -277,6 +277,46 @@
       await ensureOffscreenDocument();
       const cdpPort = chrome.runtime.connect(void 0, { name: "cdpScreencast" });
       STATE.cdpPort = cdpPort;
+
+      // CDP screencast driver: attach chrome.debugger to the target tab,
+      // start Page.startScreencast, and forward each frame to the offscreen
+      // document (which paints it onto a canvas and records via MediaRecorder).
+      const cdpTarget = { tabId: STATE.cdpTabId };
+      const CDP_WIDTH = 1280;
+      const CDP_HEIGHT = 720;
+      const onScreencastFrame = async (_source, method, params) => {
+        if (method !== "Page.screencastFrame") return;
+        try {
+          cdpPort.postMessage({
+            type: "CDP_FRAME",
+            data: params.data,
+            metadata: params.metadata,
+            ackId: params.sessionId,
+          });
+        } catch (e) {
+          /* port may be closed; ignore */
+        }
+        try {
+          await chrome.debugger.sendCommand(cdpTarget, "Page.screencastFrameAck", {
+            sessionId: params.sessionId,
+          });
+        } catch (e) {
+          logger3.warn("screencastFrameAck failed:", e.message);
+        }
+      };
+      const stopCDPDriver = async () => {
+        try {
+          chrome.debugger.onEvent.removeListener(onScreencastFrame);
+        } catch (e) {}
+        try {
+          await chrome.debugger.sendCommand(cdpTarget, "Page.stopScreencast");
+        } catch (e) {}
+        try {
+          await chrome.debugger.detach(cdpTarget);
+        } catch (e) {}
+      };
+      STATE._cdpCleanup = stopCDPDriver;
+
       cdpPort.onMessage.addListener((msg) => {
         if (msg.type === "CDP_ERROR") {
           logger3.error("CDP backend error:", msg.error);
@@ -285,16 +325,40 @@
       cdpPort.onDisconnect.addListener(() => {
         logger3.log("CDP port disconnected");
         STATE.cdpPort = null;
+        stopCDPDriver();
         if (STATE.status === "RECORDING") {
           stopRecording();
         }
       });
+
+      try {
+        chrome.debugger.onEvent.addListener(onScreencastFrame);
+        await chrome.debugger.attach(cdpTarget, "1.3");
+        await chrome.debugger.sendCommand(cdpTarget, "Page.enable");
+        await chrome.debugger.sendCommand(cdpTarget, "Page.startScreencast", {
+          format: "jpeg",
+          quality: 80,
+          maxWidth: CDP_WIDTH,
+          maxHeight: CDP_HEIGHT,
+        });
+      } catch (e) {
+        logger3.error("CDP screencast setup failed:", e);
+        await stopCDPDriver();
+        STATE._cdpCleanup = null;
+        try { cdpPort.disconnect(); } catch (e2) {}
+        STATE.cdpPort = null;
+        STATE.backend = null;
+        STATE.cdpTabId = null;
+        STATE.status = "IDLE";
+        await updateBadge();
+        return { ok: false, error: "CDP screencast failed: " + e.message };
+      }
+
       cdpPort.postMessage({
         type: "CDP_START",
-        tabId: STATE.cdpTabId,
         recordingId: STATE.recordingId,
-        mode: STATE.mode,
-        includeAudio: STATE.includeSystemAudio || STATE.includeMic
+        width: CDP_WIDTH,
+        height: CDP_HEIGHT
       });
       let overlayInjected = false;
       if (STATE.overlayTabId) {
@@ -447,6 +511,9 @@
       try {
         if (STATE.backend === "cdpScreencast" && STATE.cdpPort) {
           STATE.cdpPort.postMessage({ type: "CDP_STOP" });
+          // Stop the debugger screencast and detach so no more frames flow.
+          try { await STATE._cdpCleanup?.(); } catch (e) {}
+          STATE._cdpCleanup = null;
           STATE.cdpPort.disconnect();
           STATE.cdpPort = null;
         } else if (STATE.strategy === "page") {
@@ -465,6 +532,10 @@
         clearTimeout(STATE.stopTimeoutId);
         STATE.stopTimeoutId = null;
       }
+      try {
+        await STATE._cdpCleanup?.();
+      } catch (e) {}
+      STATE._cdpCleanup = null;
       STATE.status = "IDLE";
       await updateBadge();
       try {

@@ -21,15 +21,15 @@ afterEach(() => {
 
 describe('db.js (IndexedDB-backed) unit tests', () => {
   test('saveChunk + finishRecording + getRecording: saves chunks and reassembles blob in order', async () => {
-    await finishRecording('rec1', 'video/webm', 1234, 999);
+    await finishRecording('11111111-1111-1111-1111-111111111111', 'video/webm', 1234, 999);
 
     // Save two chunks (simulate binary blob parts)
-    await saveChunk('rec1', new Blob(['hello']), 0);
-    await saveChunk('rec1', new Blob(['-world']), 1);
+    await saveChunk('11111111-1111-1111-1111-111111111111', new Blob(['hello']), 0);
+    await saveChunk('11111111-1111-1111-1111-111111111111', new Blob(['-world']), 1);
 
-    const rec = await getRecording('rec1');
+    const rec = await getRecording('11111111-1111-1111-1111-111111111111');
     expect(rec).not.toBeNull();
-    expect(rec.id).toBe('rec1');
+    expect(rec.id).toBe('11111111-1111-1111-1111-111111111111');
     expect(rec.mimeType).toBe('video/webm');
     expect(rec.duration).toBe(1234);
     expect(rec.size).toBe(999);
@@ -59,27 +59,27 @@ describe('db.js (IndexedDB-backed) unit tests', () => {
   });
 
   test('deleteRecording: removes metadata and chunks', async () => {
-    await finishRecording('rdel', 'audio/ogg', 10, 10);
-    await saveChunk('rdel', new Blob(['a']), 0);
-    await saveChunk('rdel', new Blob(['b']), 1);
+    await finishRecording('22222222-2222-2222-2222-222222222222', 'audio/ogg', 10, 10);
+    await saveChunk('22222222-2222-2222-2222-222222222222', new Blob(['a']), 0);
+    await saveChunk('22222222-2222-2222-2222-222222222222', new Blob(['b']), 1);
 
     // ensure present
-    let rec = await getRecording('rdel');
+    let rec = await getRecording('22222222-2222-2222-2222-222222222222');
     expect(rec).not.toBeNull();
 
-    await deleteRecording('rdel');
+    await deleteRecording('22222222-2222-2222-2222-222222222222');
 
-    rec = await getRecording('rdel');
+    rec = await getRecording('22222222-2222-2222-2222-222222222222');
     expect(rec).toBeNull();
 
     const all = await getAllRecordings();
-    expect(all.find((r) => r.id === 'rdel')).toBeUndefined();
+    expect(all.find((r) => r.id === '22222222-2222-2222-2222-222222222222')).toBeUndefined();
   });
 
   test('cleanupOldRecordings: deletes recordings older than threshold', async () => {
     // create an "old" recording, then update its createdAt to an old timestamp
-    await finishRecording('old', 'video/webm', 1, 1);
-    await finishRecording('new', 'video/webm', 2, 2);
+    await finishRecording('33333333-3333-3333-3333-333333333333', 'video/webm', 1, 1);
+    await finishRecording('44444444-4444-4444-4444-444444444444', 'video/webm', 2, 2);
 
     // mutate the old recording's createdAt to a far past time
     await new Promise((resolve) => {
@@ -88,7 +88,7 @@ describe('db.js (IndexedDB-backed) unit tests', () => {
         const db = req.result;
         const tx = db.transaction('recordings', 'readwrite');
         const store = tx.objectStore('recordings');
-        const getReq = store.get('old');
+        const getReq = store.get('33333333-3333-3333-3333-333333333333');
         getReq.onsuccess = () => {
           const rec = getReq.result;
           rec.createdAt = Date.now() - 1000 * 60 * 60 * 24 * 7; // 7 days ago
@@ -104,8 +104,8 @@ describe('db.js (IndexedDB-backed) unit tests', () => {
     // Run cleanup with a 1-day threshold (should remove 'old')
     await cleanupOldRecordings(1000 * 60 * 60 * 24);
 
-    const oldRec = await getRecording('old');
-    const newRec = await getRecording('new');
+    const oldRec = await getRecording('33333333-3333-3333-3333-333333333333');
+    const newRec = await getRecording('44444444-4444-4444-4444-444444444444');
     expect(oldRec).toBeNull();
     expect(newRec).not.toBeNull();
   });
@@ -146,13 +146,13 @@ describe('db.js (IndexedDB-backed) unit tests', () => {
       return req;
     };
 
-    await expect(finishRecording('y', 'video/mp4', 1, 1)).rejects.toThrow('open failure 2');
+    await expect(finishRecording('66666666-6666-6666-6666-666666666666', 'video/mp4', 1, 1)).rejects.toThrow('open failure 2');
 
     global.indexedDB.open = realOpen;
   });
 
   test('getRecording: returns null for missing recording and handles open() failure', async () => {
-    const notFound = await getRecording('missing-id');
+    const notFound = await getRecording('77777777-7777-7777-7777-777777777777');
     expect(notFound).toBeNull();
 
     const realOpen = global.indexedDB.open;
@@ -169,7 +169,7 @@ describe('db.js (IndexedDB-backed) unit tests', () => {
       return req;
     };
 
-    await expect(getRecording('whatever')).rejects.toThrow('open failure 3');
+    await expect(getRecording('88888888-8888-8888-8888-888888888888')).rejects.toThrow('open failure 3');
     global.indexedDB.open = realOpen;
   });
 
