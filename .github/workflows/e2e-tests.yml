@@ -43,12 +43,11 @@ jobs:
         run: pnpm exec playwright install chromium --with-deps
 
       - name: Run E2E tests
-        run: pnpm e2e:ci
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1280x720x24" pnpm e2e:ci
         env:
           CI: true
           NODE_ENV: test
-          # CI=true signals the code to use software encoding (VP8)
-          # and apply GPU-disabled flags to prevent green screen
+          # CI enables Linux sandbox and shared-memory flags in the fixture.
 
       - name: Upload test results
         if: failure()
