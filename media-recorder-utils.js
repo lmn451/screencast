@@ -8,9 +8,6 @@ const logger = createLogger('MediaRecorderUtils');
 // Constants for recorder configuration
 export const CHUNK_INTERVAL_MS = 1000; // 1 second chunks for balance of memory/recovery
 
-// Detect if we're in a CI/testing environment (GPU acceleration may be disabled)
-const isCI = typeof process !== 'undefined' && process.env?.CI === 'true';
-
 /**
  * Check if VP8 should be forced (via URL parameter or test mode)
  */
@@ -38,17 +35,16 @@ function shouldForceVP8() {
  * Get the best supported video codec from a prioritized list
  *
  * For normal browsers: AV1 → VP9 → VP8 (best compression)
- * For CI/testing: VP8 first (most reliable software codec, no GPU needed)
+ * When explicitly forced: VP8 first (most reliable software codec, no GPU needed)
  * For ?codec=vp8: Always use VP8
  *
  * @returns {string} MIME type of the best supported codec
  */
 export function getOptimalCodec() {
-  // Always prefer VP8 for reliability (especially in CI/testing)
-  // This avoids AV1 green screen issues
-  const forceVP8 = shouldForceVP8() || isCI;
+  // VP8 is opt-in because generic CI environments also run normal codec unit tests.
+  const forceVP8 = shouldForceVP8();
 
-  // In CI environments or with forceVP8, use VP8 (pure software encoding)
+  // When forced, use VP8 (pure software encoding).
   // AV1/VP9 may require GPU acceleration which isn't available
   const codecsForCI = [
     'video/webm;codecs=vp8,opus', // Most reliable software codec

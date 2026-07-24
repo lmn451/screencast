@@ -11,11 +11,11 @@
     "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --coverage",
     "lint": "eslint . --ext .js --ignore-path .eslintignore",
     "format": "prettier --write .",
-    "build:test": "node build/background.js",
+    "build:test": "node scripts/build-test-background.js",
     "e2e:stop": "playwright test tests/e2e/stop -c tests/e2e/playwright.config.ts --grep-invert @manual-picker",
-    "e2e": "node build/background.js && playwright test -c tests/e2e/playwright.config.ts --grep-invert @manual-picker",
+    "e2e": "pnpm build:test && playwright test -c tests/e2e/playwright.config.ts --grep-invert @manual-picker",
     "e2e:manual": "playwright test -c tests/e2e/playwright.config.ts --grep @manual-picker",
-    "e2e:ci": "CI=true node build/background.js && playwright test -c tests/e2e/playwright.config.ts --grep-invert @manual-picker --reporter=github"
+    "e2e:ci": "pnpm build:test && playwright test -c tests/e2e/playwright.config.ts --grep-invert @manual-picker --reporter=github"
   },
   "devDependencies": {
     "@jest/globals": "29.7.0",
