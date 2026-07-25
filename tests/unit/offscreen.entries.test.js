@@ -120,6 +120,54 @@ it('stops every acquired capture track when createMediaRecorder throws (no suppo
   );
 });
 
+it('correlates OFFSCREEN_STARTED with the active recording id', async () => {
+  const videoTrack = makeTrack();
+  const fakeStream = {
+    getTracks: () => [videoTrack],
+    getVideoTracks: () => [videoTrack],
+    getAudioTracks: () => [],
+    id: 'stream-ack',
+    active: true,
+  };
+  const recorder = {
+    mimeType: 'video/webm',
+    state: 'inactive',
+    stream: fakeStream,
+    start: jest.fn(() => {
+      recorder.state = 'recording';
+    }),
+  };
+
+  Object.defineProperty(global.navigator, 'mediaDevices', {
+    value: { getDisplayMedia: jest.fn(async () => fakeStream) },
+    configurable: true,
+  });
+  await jest.unstable_mockModule('../../src/lib/media-recorder-utils.js', () => ({
+    createMediaRecorder: jest.fn(() => ({ recorder })),
+    applyContentHints: jest.fn(),
+    setupAutoStop: jest.fn(),
+    CHUNK_INTERVAL_MS: 1000,
+    getDisplayVideoConstraints: jest.fn(() => true),
+    BEST_QUALITY_VIDEO_BITS_PER_SECOND: 25_000_000,
+  }));
+
+  await import('../../src/entries/offscreen.js');
+  await flush();
+  global.chrome.runtime.sendMessage.mockClear();
+
+  capturedListener(
+    { type: 'OFFSCREEN_START', mode: 'tab', recordingId: RECORDING_ID, includeAudio: false },
+    { id: 'test-ext' },
+    jest.fn()
+  );
+  await flush();
+
+  expect(global.chrome.runtime.sendMessage).toHaveBeenCalledWith({
+    type: 'OFFSCREEN_STARTED',
+    recordingId: RECORDING_ID,
+  });
+});
+
 it('rejects recording commands from an unauthorized sender', async () => {
   const getDisplayMedia = jest.fn();
   Object.defineProperty(global.navigator, 'mediaDevices', {

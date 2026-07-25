@@ -80,6 +80,14 @@ async function flushMicrotasks(times = 20) {
   }
 }
 
+function acknowledgeOffscreen(svc) {
+  return svc.handleOffscreenStarted(svc.getState().recordingId);
+}
+
+function acknowledgeRecorder(svc) {
+  return svc.handleRecorderStarted(svc.getState().recordingId);
+}
+
 beforeEach(() => {
   __resetRecordingServiceForTests();
   storageUtils.checkStorageQuota.mockClear();
@@ -197,11 +205,24 @@ describe('startRecording', () => {
     expect(svc.getState().status).toBe('starting');
   });
 
+  it('fails page startup when the newly created recorder tab already closed', async () => {
+    const chrome = makeStubChrome();
+    chrome.tabs.get.mockRejectedValueOnce(new Error('No tab with id: 99'));
+    const svc = createRecordingService(chrome);
+
+    const result = await svc.startRecording('screen', true, true);
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/No tab with id/);
+    expect(svc.getState().status).toBe('idle');
+    expect(svc.recorderTabId).toBeNull();
+  });
+
   it('rejects duplicate START while a recording is active', async () => {
     const chrome = makeStubChrome();
     const svc = createRecordingService(chrome);
     await svc.startRecording('tab', false, false);
-    svc.handleOffscreenStarted();
+    acknowledgeOffscreen(svc);
     const recordingId = svc.getState().recordingId;
 
     const result = await svc.startRecording('tab', false, false);
@@ -210,6 +231,73 @@ describe('startRecording', () => {
     expect(result.error).toMatch(/recording/);
     expect(svc.getState().recordingId).toBe(recordingId);
     expect(chrome.runtime.sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('serializes concurrent START requests before their first await', async () => {
+    const chrome = makeStubChrome();
+    const svc = createRecordingService(chrome);
+
+    const [first, second] = await Promise.all([
+      svc.startRecording('tab', false, false),
+      svc.startRecording('tab', false, false),
+    ]);
+    const offscreenStarts = chrome.runtime.sendMessage.mock.calls.filter(
+      ([message]) => message.type === 'OFFSCREEN_START'
+    );
+
+    expect(first.ok).toBe(true);
+    expect(second).toEqual({
+      ok: false,
+      error: 'Cannot start: initialization already in progress',
+    });
+    expect(offscreenStarts).toHaveLength(1);
+  });
+
+  it('blocks replacement START until a cancelled initialization settles', async () => {
+    const chrome = makeStubChrome();
+    let resolveTabCreation;
+    const tabCreation = new Promise((resolve) => {
+      resolveTabCreation = resolve;
+    });
+    chrome.tabs.create.mockImplementationOnce(() => tabCreation);
+    const svc = createRecordingService(chrome);
+
+    const firstStart = svc.startRecording('tab', true, false);
+    await flushMicrotasks();
+    await svc.stopRecording();
+    const overlappingStart = await svc.startRecording('tab', false, false);
+
+    expect(overlappingStart).toEqual({
+      ok: false,
+      error: 'Cannot start: initialization already in progress',
+    });
+
+    resolveTabCreation({ id: 99 });
+    await expect(firstStart).resolves.toEqual({
+      ok: false,
+      error: 'Recording start was cancelled during initialization',
+    });
+
+    const replacementStart = await svc.startRecording('tab', false, false);
+    expect(replacementStart.ok).toBe(true);
+  });
+
+  it('ignores a stale acknowledgment without cancelling the current start timeout', async () => {
+    const chrome = makeStubChrome();
+    const svc = createRecordingService(chrome);
+    await svc.startRecording('tab', false, false);
+    const staleRecordingId = svc.getState().recordingId;
+    await svc.stopRecording();
+
+    await svc.startRecording('tab', true, false);
+    const currentRecordingId = svc.getState().recordingId;
+    const accepted = svc.handleOffscreenStarted(staleRecordingId);
+
+    expect(accepted).toBe(false);
+    expect(currentRecordingId).not.toBe(staleRecordingId);
+    expect(svc.getState().status).toBe('starting');
+    jest.advanceTimersByTime(5000);
+    expect(svc.getState().status).toBe('recording');
   });
 });
 
@@ -238,7 +326,7 @@ describe('stopRecording', () => {
     const chrome = makeStubChrome();
     const svc = createRecordingService(chrome);
     await svc.startRecording('tab', false, false);
-    svc.handleOffscreenStarted();
+    acknowledgeOffscreen(svc);
     expect(svc.getState().status).toBe('recording');
 
     const result = await svc.stopRecording();
@@ -253,7 +341,7 @@ describe('stopRecording', () => {
     const chrome = makeStubChrome();
     const svc = createRecordingService(chrome);
     await svc.startRecording('tab', false, false);
-    svc.handleOffscreenStarted();
+    acknowledgeOffscreen(svc);
     await svc.stopRecording();
     expect(svc.getState().status).toBe('stopping');
 
@@ -266,7 +354,7 @@ describe('stopRecording', () => {
     const chrome = makeStubChrome();
     const svc = createRecordingService(chrome);
     await svc.startRecording('tab', true /* mic */, false);
-    svc.handleRecorderStarted();
+    acknowledgeRecorder(svc);
     expect(svc.getState().status).toBe('recording');
 
     await svc.stopRecording();
@@ -286,7 +374,7 @@ describe('stopRecording', () => {
     });
     const svc = createRecordingService(chrome);
     await svc.startRecording('tab', false, false);
-    svc.handleOffscreenStarted();
+    acknowledgeOffscreen(svc);
 
     const result = await svc.stopRecording();
 
@@ -300,8 +388,8 @@ describe('stopRecording', () => {
 describe('handleOffscreenData / handleRecorderData', () => {
   async function arriveAtStopping(chrome, svc, withMic = false) {
     await svc.startRecording('tab', withMic, false);
-    if (withMic) svc.handleRecorderStarted();
-    else svc.handleOffscreenStarted();
+    if (withMic) acknowledgeRecorder(svc);
+    else acknowledgeOffscreen(svc);
     const recordingId = svc.getState().recordingId;
     await svc.stopRecording();
     return recordingId;
@@ -432,9 +520,9 @@ describe('tab close handling', () => {
     const chrome = makeStubChrome();
     const svc = createRecordingService(chrome);
     await svc.startRecording('tab', false, false);
-    svc.handleOffscreenStarted();
+    acknowledgeOffscreen(svc);
 
-    svc.handleTabClosing(12345);
+    await svc.handleTabClosing(12345);
 
     expect(svc.getState().status).toBe('recording');
     expect(svc.getState().recording).toBe(true);
@@ -444,14 +532,69 @@ describe('tab close handling', () => {
     const chrome = makeStubChrome();
     const svc = createRecordingService(chrome);
     await svc.startRecording('tab', false, false);
-    svc.handleOffscreenStarted();
+    acknowledgeOffscreen(svc);
 
     // Overlay tab from stubbed query is id 42.
-    svc.handleTabClosing(42);
+    await svc.handleTabClosing(42);
 
     expect(svc.getState().status).toBe('failed');
     expect(svc.getState().error).toBe('Tab closed during recording');
     expect(svc.getState().recording).toBe(false);
+  });
+
+  it('fails and cleans up when the recorder tab closes during startup', async () => {
+    const chrome = makeStubChrome();
+    const svc = createRecordingService(chrome);
+    await svc.startRecording('tab', true, false);
+
+    const handled = await svc.handleTabClosing(99);
+
+    expect(handled).toBe(true);
+    expect(svc.getState().status).toBe('failed');
+    expect(svc.getState().error).toBe('Tab closed during recording');
+    expect(chrome.tabs.remove).not.toHaveBeenCalledWith(99);
+    jest.advanceTimersByTime(5000);
+    expect(svc.getState().status).toBe('failed');
+  });
+
+  it('removes a recorder tab that finishes opening after startup was cancelled', async () => {
+    const chrome = makeStubChrome();
+    let resolveTabCreation;
+    const tabCreation = new Promise((resolve) => {
+      resolveTabCreation = resolve;
+    });
+    chrome.tabs.create.mockImplementationOnce(() => tabCreation);
+    const svc = createRecordingService(chrome);
+
+    const start = svc.startRecording('tab', true, false);
+    await flushMicrotasks();
+    expect(chrome.tabs.create).toHaveBeenCalled();
+
+    await svc.handleTabClosing(42);
+    resolveTabCreation({ id: 99 });
+    const result = await start;
+
+    expect(result).toEqual({
+      ok: false,
+      error: 'Recording start was cancelled during initialization',
+    });
+    expect(svc.getState().status).toBe('failed');
+    expect(chrome.tabs.remove).toHaveBeenCalledWith(99);
+  });
+
+  it('continues cleanup when a sibling recorder tab is already gone', async () => {
+    const chrome = makeStubChrome();
+    chrome.tabs.remove.mockRejectedValueOnce(new Error('No tab with id: 99'));
+    chrome.offscreen.hasDocument.mockResolvedValue(true);
+    const svc = createRecordingService(chrome);
+    await svc.startRecording('tab', true, false);
+    acknowledgeRecorder(svc);
+
+    await expect(svc.handleTabClosing(42)).resolves.toBe(true);
+
+    expect(svc.getState().status).toBe('failed');
+    expect(chrome.offscreen.closeDocument).toHaveBeenCalled();
+    expect(svc.recorderTabId).toBeNull();
   });
 });
 
@@ -460,7 +603,7 @@ describe('state projection and recovery exits', () => {
     const chrome = makeStubChrome();
     const svc = createRecordingService(chrome);
     await svc.startRecording('tab', false, false);
-    svc.handleOffscreenStarted();
+    acknowledgeOffscreen(svc);
     const recordingId = svc.getState().recordingId;
 
     await svc.handleOffscreenData(recordingId, 'video/webm');
@@ -473,7 +616,7 @@ describe('state projection and recovery exits', () => {
     const chrome = makeStubChrome();
     const svc = createRecordingService(chrome);
     await svc.startRecording('tab', false, false);
-    svc.handleOffscreenStarted();
+    acknowledgeOffscreen(svc);
     const recordingId = svc.getState().recordingId;
 
     await svc.stopRecording();
@@ -488,6 +631,21 @@ describe('state projection and recovery exits', () => {
     expect(chrome.storage.remove).toHaveBeenCalledWith('sessionSnapshot');
   });
 
+  it('rejects a stale recovery discard without touching the active session', async () => {
+    const chrome = makeStubChrome();
+    const svc = createRecordingService(chrome);
+    await svc.startRecording('tab', true, false);
+    acknowledgeRecorder(svc);
+    const recordingId = svc.getState().recordingId;
+
+    const discarded = await svc.handleRecoveryDiscard(VALID_UUID);
+
+    expect(discarded).toBe(false);
+    expect(svc.getState().status).toBe('recording');
+    expect(svc.getState().recordingId).toBe(recordingId);
+    expect(chrome.tabs.remove).not.toHaveBeenCalled();
+  });
+
   it('cleans up and reports inactive after offscreen errors', async () => {
     const chrome = makeStubChrome({
       offscreen: {
@@ -498,7 +656,7 @@ describe('state projection and recovery exits', () => {
     });
     const svc = createRecordingService(chrome);
     await svc.startRecording('tab', false, false);
-    svc.handleOffscreenStarted();
+    acknowledgeOffscreen(svc);
 
     await svc.handleOffscreenError('Permission denied', 'PERMISSION_DENIED');
 
@@ -511,7 +669,7 @@ describe('state projection and recovery exits', () => {
     const chrome = makeStubChrome();
     const svc = createRecordingService(chrome);
     await svc.startRecording('tab', false, false);
-    svc.handleOffscreenStarted();
+    acknowledgeOffscreen(svc);
 
     await svc.handleOffscreenError('stale failure', 'CAPTURE_FAILED', VALID_UUID);
 
@@ -524,7 +682,7 @@ describe('state projection and recovery exits', () => {
     const chrome = makeStubChrome();
     const svc = createRecordingService(chrome);
     await svc.startRecording('tab', false, false);
-    svc.handleOffscreenStarted();
+    acknowledgeOffscreen(svc);
 
     for (let i = 0; i < 5; i++) {
       await new Promise((resolve) => setTimeout(resolve, 0));

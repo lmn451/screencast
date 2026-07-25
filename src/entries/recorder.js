@@ -250,7 +250,10 @@ async function start() {
 
     mediaRecorder.start(CHUNK_INTERVAL_MS);
     try {
-      await chrome.runtime.sendMessage({ type: 'RECORDER_STARTED' });
+      await chrome.runtime.sendMessage({
+        type: 'RECORDER_STARTED',
+        recordingId,
+      });
     } catch (e) {
       logger.warn('Failed to send RECORDER_STARTED message, continuing anyway:', e);
     }

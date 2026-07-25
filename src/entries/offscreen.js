@@ -192,7 +192,10 @@ async function startCapture(mode, recordingId, includeAudio, bestQuality = false
 
     mediaRecorder.start(CHUNK_INTERVAL_MS);
     try {
-      await chrome.runtime.sendMessage({ type: 'OFFSCREEN_STARTED' });
+      await chrome.runtime.sendMessage({
+        type: 'OFFSCREEN_STARTED',
+        recordingId: currentId,
+      });
     } catch (e) {
       logger.warn('Failed to send OFFSCREEN_STARTED message (non-critical):', e);
     }

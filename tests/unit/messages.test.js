@@ -98,6 +98,22 @@ describe('messages.js', () => {
       expect(result.errors).toContain('Missing required field: recordingId');
     });
 
+    it('should reject start acknowledgments without recordingId', () => {
+      const offscreenResult = validateMessage(
+        { type: MSG_OFFSCREEN_STARTED },
+        schemas[MSG_OFFSCREEN_STARTED]
+      );
+      const recorderResult = validateMessage(
+        { type: MSG_RECORDER_STARTED },
+        schemas[MSG_RECORDER_STARTED]
+      );
+
+      expect(offscreenResult.valid).toBe(false);
+      expect(recorderResult.valid).toBe(false);
+      expect(offscreenResult.errors).toContain('Missing required field: recordingId');
+      expect(recorderResult.errors).toContain('Missing required field: recordingId');
+    });
+
     it('should validate the real OFFSCREEN_START payload', () => {
       const msg = {
         type: MSG_OFFSCREEN_START,
@@ -187,9 +203,10 @@ describe('messages.js', () => {
       expect(schemas[MSG_GET_STATE].required.map(([f]) => f)).toContain('type');
     });
 
-    it('should have OFFSCREEN_STARTED schema', () => {
-      expect(schemas[MSG_OFFSCREEN_STARTED]).toBeDefined();
-      expect(schemas[MSG_OFFSCREEN_STARTED].required.map(([f]) => f)).toContain('type');
+    it('should have OFFSCREEN_STARTED schema with required recordingId', () => {
+      const requiredFields = schemas[MSG_OFFSCREEN_STARTED].required.map(([field]) => field);
+      expect(requiredFields).toContain('type');
+      expect(requiredFields).toContain('recordingId');
     });
 
     it('should have OFFSCREEN_DATA schema with required recordingId', () => {
@@ -208,9 +225,10 @@ describe('messages.js', () => {
       expect(requiredFields).toContain('mimeType');
     });
 
-    it('should have RECORDER_STARTED schema', () => {
-      expect(schemas[MSG_RECORDER_STARTED]).toBeDefined();
-      expect(schemas[MSG_RECORDER_STARTED].required.map(([f]) => f)).toContain('type');
+    it('should have RECORDER_STARTED schema with required recordingId', () => {
+      const requiredFields = schemas[MSG_RECORDER_STARTED].required.map(([field]) => field);
+      expect(requiredFields).toContain('type');
+      expect(requiredFields).toContain('recordingId');
     });
 
     it('should have OFFSCREEN_START schema', () => {

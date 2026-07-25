@@ -321,7 +321,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // Map tab teardown events into the recording recovery state machine.
 chrome.tabs.onRemoved.addListener((tabId) => {
-  service.handleTabClosing(tabId);
+  void Promise.resolve(service.handleTabClosing(tabId)).catch((error) => {
+    logger.error('Failed to handle tab removal:', error);
+  });
 });
 
 // ═══════════════════════════════════════════════════════════════════════════════

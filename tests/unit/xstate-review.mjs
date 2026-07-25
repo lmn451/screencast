@@ -85,7 +85,10 @@ async function main() {
     console.log('\n── starting → recording (OFFSCREEN_STARTED) ──');
     const actor = createActor(recordingMachine).start();
     actor.send({ type: 'START', mode: 'tab' });
-    actor.send({ type: 'OFFSCREEN_STARTED' });
+    actor.send({
+      type: 'OFFSCREEN_STARTED',
+      recordingId: actor.getSnapshot().context.recordingId,
+    });
     assertEqual(actor.getSnapshot().value, 'recording', '→ recording');
     actor.stop();
   }
@@ -94,8 +97,11 @@ async function main() {
   {
     console.log('\n── starting → recording (RECORDER_STARTED) ──');
     const actor = createActor(recordingMachine).start();
-    actor.send({ type: 'START', mode: 'tab' });
-    actor.send({ type: 'RECORDER_STARTED' });
+    actor.send({ type: 'START', mode: 'tab', mic: true });
+    actor.send({
+      type: 'RECORDER_STARTED',
+      recordingId: actor.getSnapshot().context.recordingId,
+    });
     assertEqual(actor.getSnapshot().value, 'recording', '→ recording');
     actor.stop();
   }
@@ -176,7 +182,10 @@ async function main() {
     actor.send({ type: 'SAVE_TIMEOUT' });
     assertEqual(actor.getSnapshot().value, 'recoverable', '→ recoverable');
 
-    actor.send({ type: 'RECOVERY_DISCARD', recordingId: '550e8400-e29b-41d4-a716-446655440000' });
+    actor.send({
+      type: 'RECOVERY_DISCARD',
+      recordingId: actor.getSnapshot().context.recordingId,
+    });
     assertEqual(actor.getSnapshot().value, 'idle', 'RECOVERY_DISCARD → idle');
     actor.stop();
   }
@@ -187,7 +196,10 @@ async function main() {
     const actor = createActor(recordingMachine).start();
     actor.send({ type: 'START', mode: 'tab' });
     actor.send({ type: 'OFFSCREEN_ERROR', error: 'Failed' });
-    actor.send({ type: 'RECOVERY_DISCARD', recordingId: '550e8400-e29b-41d4-a716-446655440000' });
+    actor.send({
+      type: 'RECOVERY_DISCARD',
+      recordingId: actor.getSnapshot().context.recordingId,
+    });
     assertEqual(actor.getSnapshot().value, 'idle', '→ idle');
     actor.stop();
   }

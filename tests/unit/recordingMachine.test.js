@@ -18,6 +18,20 @@ function startActor() {
   return actor;
 }
 
+function acknowledgeOffscreen(actor) {
+  actor.send({
+    type: 'OFFSCREEN_STARTED',
+    recordingId: actor.getSnapshot().context.recordingId,
+  });
+}
+
+function acknowledgeRecorder(actor) {
+  actor.send({
+    type: 'RECORDER_STARTED',
+    recordingId: actor.getSnapshot().context.recordingId,
+  });
+}
+
 beforeEach(() => {
   jest.useFakeTimers();
 });
@@ -65,7 +79,7 @@ describe('recordingMachine — happy path (idle → starting → recording → s
     expect(startingCtx.options.bestQuality).toBe(true);
     expect(startingCtx.strategy).toBe('offscreen'); // determineStrategy: mic=false → offscreen
 
-    actor.send({ type: 'OFFSCREEN_STARTED' });
+    acknowledgeOffscreen(actor);
     expect(actor.getSnapshot().value).toBe('recording');
 
     actor.send({ type: 'STOP' });
@@ -92,7 +106,7 @@ describe('recordingMachine — happy path (idle → starting → recording → s
   it('RECORDER_DATA from stopping → saved (page strategy path)', () => {
     const actor = startActor();
     actor.send({ type: 'START', mode: 'tab', mic: true });
-    actor.send({ type: 'RECORDER_STARTED' });
+    acknowledgeRecorder(actor);
     expect(actor.getSnapshot().value).toBe('recording');
     actor.send({ type: 'STOP' });
     actor.send({ type: 'RECORDER_DATA', recordingId: VALID_UUID, mimeType: 'video/webm' });
@@ -103,7 +117,7 @@ describe('recordingMachine — happy path (idle → starting → recording → s
   it('OFFSCREEN_DATA from recording → saved for browser auto-stop', () => {
     const actor = startActor();
     actor.send({ type: 'START', mode: 'tab', mic: false });
-    actor.send({ type: 'OFFSCREEN_STARTED' });
+    acknowledgeOffscreen(actor);
     expect(actor.getSnapshot().value).toBe('recording');
 
     actor.send({ type: 'OFFSCREEN_DATA', recordingId: VALID_UUID, mimeType: 'video/webm' });
@@ -115,7 +129,7 @@ describe('recordingMachine — happy path (idle → starting → recording → s
   it('RECORDER_DATA from recording → saved for browser auto-stop', () => {
     const actor = startActor();
     actor.send({ type: 'START', mode: 'tab', mic: true });
-    actor.send({ type: 'RECORDER_STARTED' });
+    acknowledgeRecorder(actor);
     expect(actor.getSnapshot().value).toBe('recording');
 
     actor.send({ type: 'RECORDER_DATA', recordingId: VALID_UUID, mimeType: 'video/webm' });
@@ -176,13 +190,37 @@ describe('recordingMachine — starting state', () => {
     expect(actor.getSnapshot().value).toBe('saved');
     actor.stop();
   });
+
+  it('ignores stale or wrong-strategy start acknowledgments', () => {
+    const actor = startActor();
+    actor.send({ type: 'START', mode: 'tab', mic: true });
+    const recordingId = actor.getSnapshot().context.recordingId;
+
+    actor.send({ type: 'RECORDER_STARTED', recordingId: VALID_UUID });
+    actor.send({ type: 'OFFSCREEN_STARTED', recordingId });
+
+    expect(actor.getSnapshot().value).toBe('starting');
+    actor.stop();
+  });
+
+  it('fails when an owned recorder tab closes during startup', () => {
+    const actor = startActor();
+    actor.send({ type: 'START', mode: 'tab', mic: true });
+    actor.send({ type: 'SET_RECORDER_TAB_ID', tabId: 99 });
+    actor.send({ type: 'TAB_CLOSING', tabId: 99 });
+
+    expect(actor.getSnapshot().value).toBe('failed');
+    actor.send({ type: 'CONFIRMATION_TIMEOUT' });
+    expect(actor.getSnapshot().value).toBe('failed');
+    actor.stop();
+  });
 });
 
 describe('recordingMachine — recording state', () => {
   function toRecording() {
     const actor = startActor();
     actor.send({ type: 'START', mode: 'tab' });
-    actor.send({ type: 'OFFSCREEN_STARTED' });
+    acknowledgeOffscreen(actor);
     return actor;
   }
 
@@ -208,7 +246,7 @@ describe('recordingMachine — recording state', () => {
   it('TAB_CLOSING with matching recorderTabId transitions to failed', () => {
     const actor = startActor();
     actor.send({ type: 'START', mode: 'tab', mic: true }); // page strategy → would set recorderTabId
-    actor.send({ type: 'RECORDER_STARTED' });
+    acknowledgeRecorder(actor);
     // The service layer is the only writer of recorderTabId, so for this guard
     // test we drive recording directly and verify the guard logic by sending a
     // mismatched tabId first (should be ignored), then a matching one.
@@ -234,7 +272,7 @@ describe('recordingMachine — stopping state', () => {
   function toStopping() {
     const actor = startActor();
     actor.send({ type: 'START', mode: 'tab' });
-    actor.send({ type: 'OFFSCREEN_STARTED' });
+    acknowledgeOffscreen(actor);
     actor.send({ type: 'STOP' });
     return actor;
   }
@@ -276,7 +314,7 @@ describe('recordingMachine — recoverable state guards', () => {
   function toRecoverable() {
     const actor = startActor();
     actor.send({ type: 'START', mode: 'tab' });
-    actor.send({ type: 'OFFSCREEN_STARTED' });
+    acknowledgeOffscreen(actor);
     actor.send({ type: 'STOP' });
     actor.send({ type: 'SAVE_TIMEOUT' });
     return actor;
@@ -284,7 +322,10 @@ describe('recordingMachine — recoverable state guards', () => {
 
   it('RECOVERY_DISCARD transitions to idle', () => {
     const actor = toRecoverable();
-    actor.send({ type: 'RECOVERY_DISCARD', recordingId: VALID_UUID });
+    actor.send({
+      type: 'RECOVERY_DISCARD',
+      recordingId: actor.getSnapshot().context.recordingId,
+    });
     expect(actor.getSnapshot().value).toBe('idle');
     actor.stop();
   });
@@ -308,7 +349,7 @@ describe('recordingMachine — failed state', () => {
   function toFailed() {
     const actor = startActor();
     actor.send({ type: 'START', mode: 'tab' });
-    actor.send({ type: 'OFFSCREEN_STARTED' });
+    acknowledgeOffscreen(actor);
     actor.send({ type: 'OFFSCREEN_ERROR', error: 'boom' });
     return actor;
   }
@@ -322,7 +363,10 @@ describe('recordingMachine — failed state', () => {
 
   it('RECOVERY_DISCARD from failed → idle', () => {
     const actor = toFailed();
-    actor.send({ type: 'RECOVERY_DISCARD', recordingId: VALID_UUID });
+    actor.send({
+      type: 'RECOVERY_DISCARD',
+      recordingId: actor.getSnapshot().context.recordingId,
+    });
     expect(actor.getSnapshot().value).toBe('idle');
     actor.stop();
   });
@@ -332,7 +376,11 @@ describe('recordingMachine — global RESET', () => {
   it('RESET from any state returns to idle', () => {
     const states = [
       (a) => a.send({ type: 'START', mode: 'tab' }),
-      (a) => a.send({ type: 'OFFSCREEN_STARTED' }),
+      (a) =>
+        a.send({
+          type: 'OFFSCREEN_STARTED',
+          recordingId: a.getSnapshot().context.recordingId,
+        }),
       (a) => a.send({ type: 'STOP' }),
       (a) => a.send({ type: 'SAVE_TIMEOUT' }),
     ];
@@ -346,16 +394,17 @@ describe('recordingMachine — global RESET', () => {
     }
   });
 
-  it('RECOVERY_DISCARD from active recording returns to idle', () => {
+  it('ignores RECOVERY_DISCARD while actively recording', () => {
     const actor = startActor();
     actor.send({ type: 'START', mode: 'tab' });
-    actor.send({ type: 'OFFSCREEN_STARTED' });
+    acknowledgeOffscreen(actor);
+    const recordingId = actor.getSnapshot().context.recordingId;
     expect(actor.getSnapshot().value).toBe('recording');
 
-    actor.send({ type: 'RECOVERY_DISCARD', recordingId: VALID_UUID });
+    actor.send({ type: 'RECOVERY_DISCARD', recordingId });
 
-    expect(actor.getSnapshot().value).toBe('idle');
-    expect(actor.getSnapshot().context.recordingId).toBeNull();
+    expect(actor.getSnapshot().value).toBe('recording');
+    expect(actor.getSnapshot().context.recordingId).toBe(recordingId);
     actor.stop();
   });
 });

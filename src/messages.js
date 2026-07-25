@@ -43,11 +43,11 @@ export const schemas = {
     optional: [],
   },
   [MSG_OFFSCREEN_STARTED]: {
-    required: [['type', 'string']],
-    optional: [
+    required: [
+      ['type', 'string'],
       ['recordingId', 'string'],
-      ['strategy', 'string'],
     ],
+    optional: [['strategy', 'string']],
   },
   [MSG_OFFSCREEN_DATA]: {
     required: [
@@ -66,11 +66,11 @@ export const schemas = {
     optional: [],
   },
   [MSG_RECORDER_STARTED]: {
-    required: [['type', 'string']],
-    optional: [
+    required: [
+      ['type', 'string'],
       ['recordingId', 'string'],
-      ['strategy', 'string'],
     ],
+    optional: [['strategy', 'string']],
   },
   [MSG_OFFSCREEN_START]: {
     required: [

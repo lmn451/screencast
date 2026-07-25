@@ -57,8 +57,8 @@ export type RecordingEvent =
       bestQuality?: boolean;
     }
   | { type: 'STOP' }
-  | { type: 'OFFSCREEN_STARTED' }
-  | { type: 'RECORDER_STARTED' }
+  | { type: 'OFFSCREEN_STARTED'; recordingId: string }
+  | { type: 'RECORDER_STARTED'; recordingId: string }
   | { type: 'OFFSCREEN_DATA'; recordingId: string; mimeType: string }
   | { type: 'RECORDER_DATA'; recordingId: string; mimeType: string }
   | { type: 'OFFSCREEN_ERROR'; error: string; code?: string }

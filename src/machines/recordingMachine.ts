@@ -58,6 +58,19 @@ export const recordingMachine = setup({
       }
       return false;
     },
+    isCurrentOffscreenStart: ({ context, event }) =>
+      event.type === 'OFFSCREEN_STARTED' &&
+      context.strategy === 'offscreen' &&
+      event.recordingId === context.recordingId,
+    isCurrentRecorderStart: ({ context, event }) =>
+      event.type === 'RECORDER_STARTED' &&
+      context.strategy === 'page' &&
+      event.recordingId === context.recordingId,
+    isCurrentRecordingId: ({ context, event }) =>
+      'recordingId' in event && event.recordingId === context.recordingId,
+    isOwnedTab: ({ context, event }) =>
+      event.type === 'TAB_CLOSING' &&
+      (context.recorderTabId === event.tabId || context.overlayTabId === event.tabId),
   },
 
   actions: {
@@ -156,10 +169,12 @@ export const recordingMachine = setup({
       entry: 'determineStrategy',
       on: {
         OFFSCREEN_STARTED: {
+          guard: 'isCurrentOffscreenStart',
           target: 'recording',
           actions: 'updateLastActivity',
         },
         RECORDER_STARTED: {
+          guard: 'isCurrentRecorderStart',
           target: 'recording',
           actions: 'updateLastActivity',
         },
@@ -180,6 +195,11 @@ export const recordingMachine = setup({
         RECORDER_ERROR: {
           target: 'failed',
           actions: 'setError',
+        },
+        TAB_CLOSING: {
+          guard: 'isOwnedTab',
+          actions: 'setTabClosedError',
+          target: 'failed',
         },
         STOP: {
           target: 'idle',
@@ -215,10 +235,7 @@ export const recordingMachine = setup({
           actions: 'updateLastActivity',
         },
         TAB_CLOSING: {
-          guard: ({ event, context }) => {
-            const tabId = (event as { type: 'TAB_CLOSING'; tabId: number }).tabId;
-            return context.recorderTabId === tabId || context.overlayTabId === tabId;
-          },
+          guard: 'isOwnedTab',
           actions: 'setTabClosedError',
           target: 'failed',
         },
@@ -270,6 +287,7 @@ export const recordingMachine = setup({
       on: {
         RESET: { target: 'idle' },
         RECOVERY_DISCARD: {
+          guard: 'isCurrentRecordingId',
           target: 'idle',
         },
       },
@@ -281,6 +299,7 @@ export const recordingMachine = setup({
     recoverable: {
       on: {
         RECOVERY_DISCARD: {
+          guard: 'isCurrentRecordingId',
           target: 'idle',
         },
         OFFSCREEN_DATA: {
@@ -299,7 +318,6 @@ export const recordingMachine = setup({
   // ───────────────────────────────────────────────────────────────────────────
   on: {
     RESET: '.idle',
-    RECOVERY_DISCARD: '.idle',
     SET_OVERLAY_TAB_ID: {
       actions: 'setOverlayTabId',
     },
