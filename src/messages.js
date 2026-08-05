@@ -18,8 +18,33 @@ export const MSG_OFFSCREEN_ERROR = 'OFFSCREEN_ERROR';
 export const MSG_RECORDER_ERROR = 'RECORDER_ERROR';
 export const MSG_OFFSCREEN_TEST = 'OFFSCREEN_TEST';
 export const MSG_RECOVERY_DISCARD = 'RECOVERY_DISCARD';
+// Outbound (background → overlay content script, via chrome.tabs.sendMessage)
+export const MSG_STATE_UPDATE = 'STATE_UPDATE';
+export const MSG_OVERLAY_REMOVE = 'OVERLAY_REMOVE';
 
 const RECORDING_MODES = ['tab', 'window', 'screen'];
+
+// Status values of the recording machine (src/machines/recordingMachine.ts).
+export const RECORDING_STATUSES = [
+  'idle',
+  'starting',
+  'recording',
+  'stopping',
+  'saved',
+  'failed',
+  'recoverable',
+];
+
+// Messages the background broadcasts via chrome.runtime.sendMessage to other
+// extension contexts (offscreen document, recorder tab). The background's own
+// onMessage listener also receives them and must not respond, otherwise it can
+// win the sendResponse race and mask the target context's real acknowledgement.
+export const OUTBOUND_CONTROL_MESSAGES = new Set([
+  MSG_OFFSCREEN_START,
+  MSG_OFFSCREEN_STOP,
+  MSG_RECORDER_STOP,
+  MSG_OFFSCREEN_TEST,
+]);
 
 // Message schemas: required + optional fields per type (typed for strict validation)
 export const schemas = {
@@ -130,6 +155,20 @@ export const schemas = {
     ],
     optional: [],
   },
+  // Outbound: background → overlay content script (chrome.tabs.sendMessage).
+  // Never arrive at the background's onMessage listener, but live in the same
+  // registry so every message type in the extension has exactly one contract.
+  [MSG_STATE_UPDATE]: {
+    required: [
+      ['type', 'string'],
+      ['status', 'string', RECORDING_STATUSES],
+    ],
+    optional: [],
+  },
+  [MSG_OVERLAY_REMOVE]: {
+    required: [['type', 'string']],
+    optional: [],
+  },
   // Catch-all entry for unknown types with '*' field wildcard
   UNKNOWN: {
     required: [],
@@ -212,6 +251,32 @@ export function validateMessageStrict(message, schema) {
   ];
 
   return { valid: errors.length === 0, errors };
+}
+
+/**
+ * Build an outbound message and validate it against its schema at the send
+ * site. Throws on contract violations so a malformed or unregistered message
+ * fails loudly in unit tests instead of being silently dropped by the
+ * receiver's validation (the failure mode behind "nobody sends this").
+ *
+ * Fields with `undefined` values are omitted, so callers can pass optional
+ * fields unconditionally (e.g. `targetTabId: tabId ?? undefined`).
+ *
+ * @param {string} type - One of the MSG_* constants.
+ * @param {Record<string, unknown>} [fields] - Message fields besides `type`.
+ * @returns {{type: string} & Record<string, unknown>} The validated message.
+ */
+export function buildMessage(type, fields = {}) {
+  const message = { type };
+  for (const [key, value] of Object.entries(fields)) {
+    if (value !== undefined) message[key] = value;
+  }
+
+  const { valid, errors } = validateMessageStrict(message, schemas[type]);
+  if (!valid) {
+    throw new Error(`buildMessage(${type}): ${errors.join(', ')}`);
+  }
+  return message;
 }
 
 // Alias for loose validation (Phase 1+)

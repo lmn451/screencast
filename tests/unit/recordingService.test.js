@@ -709,3 +709,36 @@ describe('state projection and recovery exits', () => {
     expect(chrome.alarms.create).not.toHaveBeenCalled();
   });
 });
+
+describe('overlay STATE_UPDATE push', () => {
+  it('pushes starting→recording transitions to the overlay tab', async () => {
+    const chrome = makeStubChrome();
+    const svc = createRecordingService(chrome);
+
+    await svc.startRecording('tab', false, false);
+    await flushMicrotasks();
+    expect(chrome.tabs.sendMessage).toHaveBeenCalledWith(42, {
+      type: 'STATE_UPDATE',
+      status: 'starting',
+    });
+
+    acknowledgeOffscreen(svc);
+    await flushMicrotasks();
+    expect(chrome.tabs.sendMessage).toHaveBeenCalledWith(42, {
+      type: 'STATE_UPDATE',
+      status: 'recording',
+    });
+  });
+
+  it('keeps recording when the overlay tab rejects the push', async () => {
+    const chrome = makeStubChrome();
+    chrome.tabs.sendMessage.mockRejectedValue(new Error('no receiver'));
+    const svc = createRecordingService(chrome);
+
+    await svc.startRecording('tab', false, false);
+    acknowledgeOffscreen(svc);
+    await flushMicrotasks();
+
+    expect(svc.getState().status).toBe('recording');
+  });
+});

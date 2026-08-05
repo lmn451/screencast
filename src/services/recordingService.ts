@@ -11,7 +11,18 @@
 
 import { createActor } from 'xstate';
 import { recordingMachine, type RecordingContext } from '../machines/recordingMachine.js';
-import { MSG_RECOVERY_DISCARD } from '../messages.js';
+import {
+  MSG_RECOVERY_DISCARD,
+  MSG_STATE_UPDATE,
+  MSG_OVERLAY_REMOVE,
+  MSG_OFFSCREEN_START,
+  MSG_OFFSCREEN_STOP,
+  MSG_RECORDER_STOP,
+  buildMessage,
+  type ExtensionMessage,
+  type RecordingMode,
+  type StructuredError,
+} from '../messages.js';
 import { checkStorageQuota } from '../lib/storage-utils.js';
 import { TIMEOUTS, STORAGE_KEYS, isValidUUID } from '../machines/types.js';
 
@@ -34,7 +45,7 @@ interface ChromeAPI {
     remove: (tabId: number) => Promise<void>;
     update: (tabId: number, options: { active: boolean }) => Promise<unknown>;
     get: (tabId: number) => Promise<{ windowId: number }>;
-    sendMessage: (tabId: number, message: Record<string, unknown>) => Promise<void>;
+    sendMessage: (tabId: number, message: ExtensionMessage) => Promise<void>;
   };
   scripting: {
     executeScript: (options: {
@@ -58,7 +69,7 @@ interface ChromeAPI {
   };
   runtime: {
     getURL: (path: string) => string;
-    sendMessage: (message: Record<string, unknown>) => Promise<unknown>;
+    sendMessage: (message: ExtensionMessage) => Promise<unknown>;
     id: string;
   };
   windows: {
@@ -73,6 +84,16 @@ interface ChromeAPI {
     ) => void;
     clear: (name: string) => Promise<boolean>;
   };
+}
+
+/**
+ * Normalize a wire error payload (structured object from createError, or a
+ * plain string) into the display string the recording machine stores in
+ * context.error.
+ */
+function toErrorText(error: string | StructuredError): string {
+  if (typeof error === 'string') return error;
+  return error?.userMessage || 'Recording failed';
 }
 
 /**
@@ -140,6 +161,24 @@ export class RecordingService {
 
     // Badge management
     await this.updateBadge(state);
+
+    // Push the new status to the overlay button. The overlay's initial
+    // GET_STATE races the recorder acknowledgment: if it resolves during
+    // `starting`, the button renders a disabled "Starting…" and, without this
+    // push, never learns about the starting→recording transition.
+    if (
+      this.overlayTabId &&
+      (state === 'starting' || state === 'recording' || state === 'stopping')
+    ) {
+      try {
+        await this.chrome.tabs.sendMessage(
+          this.overlayTabId,
+          buildMessage(MSG_STATE_UPDATE, { status: state })
+        );
+      } catch (e) {
+        // Non-critical: overlay may not be injected (yet) on this tab.
+      }
+    }
 
     // Session persistence based on state
     if (state === 'recording' || state === 'stopping') {
@@ -264,7 +303,7 @@ export class RecordingService {
   // ═══════════════════════════════════════════════════════════════════════════
 
   private async ensureOffscreenDocument(
-    mode: string,
+    mode: RecordingMode,
     includeSystemAudio: boolean,
     bestQuality: boolean,
     recordingId: string,
@@ -282,14 +321,15 @@ export class RecordingService {
       }
 
       // Send start message to offscreen
-      await this.chrome.runtime.sendMessage({
-        type: 'OFFSCREEN_START',
-        mode,
-        includeAudio: includeSystemAudio,
-        bestQuality,
-        recordingId,
-        targetTabId,
-      });
+      await this.chrome.runtime.sendMessage(
+        buildMessage(MSG_OFFSCREEN_START, {
+          mode,
+          includeAudio: includeSystemAudio,
+          bestQuality,
+          recordingId,
+          targetTabId: targetTabId ?? undefined,
+        })
+      );
     } catch (e) {
       console.error('[RecordingService] Failed to create offscreen document:', e);
       throw e;
@@ -423,12 +463,7 @@ export class RecordingService {
 
     this.startInProgress = true;
     try {
-      return await this.initializeRecording(
-        mode,
-        includeMic,
-        includeSystemAudio,
-        bestQuality
-      );
+      return await this.initializeRecording(mode, includeMic, includeSystemAudio, bestQuality);
     } finally {
       this.startInProgress = false;
     }
@@ -541,7 +576,7 @@ export class RecordingService {
       this.clearTimers();
       if (this.overlayTabId) {
         try {
-          await this.chrome.tabs.sendMessage(this.overlayTabId, { type: 'OVERLAY_REMOVE' });
+          await this.chrome.tabs.sendMessage(this.overlayTabId, buildMessage(MSG_OVERLAY_REMOVE));
         } catch (e) {
           // Non-critical
         }
@@ -579,7 +614,7 @@ export class RecordingService {
     // Best-effort overlay removal
     if (this.overlayTabId) {
       try {
-        await this.chrome.tabs.sendMessage(this.overlayTabId, { type: 'OVERLAY_REMOVE' });
+        await this.chrome.tabs.sendMessage(this.overlayTabId, buildMessage(MSG_OVERLAY_REMOVE));
       } catch (e) {
         // Non-critical
       }
@@ -693,7 +728,11 @@ export class RecordingService {
     await this.cleanup();
   }
 
-  async handleOffscreenError(error: string, code?: string, recordingId?: string): Promise<void> {
+  async handleOffscreenError(
+    error: string | StructuredError,
+    code?: string,
+    recordingId?: string
+  ): Promise<void> {
     if (recordingId && !this.isCurrentRecording(recordingId)) {
       console.warn(
         '[RecordingService] Ignoring OFFSCREEN_ERROR for non-active recording:',
@@ -702,12 +741,16 @@ export class RecordingService {
       return;
     }
     this.clearTimers();
-    this.actor.send({ type: 'OFFSCREEN_ERROR', error, code: code || undefined });
+    this.actor.send({
+      type: 'OFFSCREEN_ERROR',
+      error: toErrorText(error),
+      code: code || undefined,
+    });
     await this.clearActiveSessionArtifacts();
     await this.cleanup();
   }
 
-  async handleRecorderError(error: string, recordingId?: string): Promise<void> {
+  async handleRecorderError(error: string | StructuredError, recordingId?: string): Promise<void> {
     if (recordingId && !this.isCurrentRecording(recordingId)) {
       console.warn(
         '[RecordingService] Ignoring RECORDER_ERROR for non-active recording:',
@@ -716,7 +759,7 @@ export class RecordingService {
       return;
     }
     this.clearTimers();
-    this.actor.send({ type: 'RECORDER_ERROR', error });
+    this.actor.send({ type: 'RECORDER_ERROR', error: toErrorText(error) });
     await this.clearActiveSessionArtifacts();
     await this.cleanup();
   }
@@ -820,11 +863,11 @@ export class RecordingService {
 
   private async sendStopCommand(strategy: RecordingContext['strategy']): Promise<void> {
     if (strategy === 'offscreen') {
-      await this.chrome.runtime.sendMessage({ type: 'OFFSCREEN_STOP' });
+      await this.chrome.runtime.sendMessage(buildMessage(MSG_OFFSCREEN_STOP));
       return;
     }
     if (strategy === 'page' && this.recorderTabId) {
-      await this.chrome.tabs.sendMessage(this.recorderTabId, { type: 'RECORDER_STOP' });
+      await this.chrome.tabs.sendMessage(this.recorderTabId, buildMessage(MSG_RECORDER_STOP));
       return;
     }
     throw new Error('Recorder tab is not available');
@@ -887,7 +930,7 @@ export class RecordingService {
     message: Record<string, unknown>,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     _sender: { id?: string }
-  ): Promise<{ ok: boolean; error?: string } | null> {
+  ): Promise<{ ok: boolean; error?: string | null } | null> {
     // Sender validation, schema validation, and rate limiting are performed
     // in src/background.ts before this is called. Do not duplicate them here.
 
@@ -924,7 +967,7 @@ export class RecordingService {
 
       case 'OFFSCREEN_ERROR':
         await this.handleOffscreenError(
-          message.error as string,
+          message.error as string | StructuredError,
           message.code as string | undefined,
           message.recordingId as string | undefined
         );
@@ -932,7 +975,7 @@ export class RecordingService {
 
       case 'RECORDER_ERROR':
         await this.handleRecorderError(
-          message.error as string,
+          message.error as string | StructuredError,
           message.recordingId as string | undefined
         );
         return { ok: true };

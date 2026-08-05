@@ -8,6 +8,7 @@
     "skipLibCheck": true,
     "noEmit": true,
     "strict": false,
+    "strictNullChecks": true,
     "forceConsistentCasingInFileNames": true
   },
   "include": ["src/**/*.ts", "tests/unit/**/*.ts"],

@@ -13,7 +13,12 @@ import { createLogger } from './logger.js';
 import { AUTO_DELETE_AGE_MS } from './lib/constants.js';
 import { hasChunks, markRecordingRecoverable } from './lib/chunkStorage.js';
 import { SESSION_SNAPSHOT_KEY } from './machines/types.js';
-import { validateMessageStrict, schemas } from './messages.js';
+import {
+  validateMessageStrict,
+  schemas,
+  OUTBOUND_CONTROL_MESSAGES,
+  type ExtensionMessage,
+} from './messages.js';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CONSTANTS & GLOBALS
@@ -25,12 +30,6 @@ const logger = createLogger('Background');
 const rateLimitMap = new Map<string, { count: number; windowStart: number }>();
 const RATE_LIMIT_WINDOW_MS = 1000;
 const RATE_LIMIT_MAX = 50;
-const OUTBOUND_CONTROL_MESSAGES = new Set([
-  'OFFSCREEN_START',
-  'OFFSCREEN_STOP',
-  'RECORDER_STOP',
-  'OFFSCREEN_TEST',
-]);
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CHROME API WRAPPER
@@ -48,7 +47,7 @@ const chromeAPI = {
     remove: (tabId: number) => chrome.tabs.remove(tabId),
     update: (tabId: number, options: { active: boolean }) => chrome.tabs.update(tabId, options),
     get: (tabId: number) => chrome.tabs.get(tabId),
-    sendMessage: (tabId: number, message: Record<string, unknown>) =>
+    sendMessage: (tabId: number, message: ExtensionMessage) =>
       chrome.tabs.sendMessage(tabId, message),
   },
   scripting: {
@@ -72,7 +71,7 @@ const chromeAPI = {
   },
   runtime: {
     getURL: (path: string) => chrome.runtime.getURL(path),
-    sendMessage: (message: Record<string, unknown>) => chrome.runtime.sendMessage(message),
+    sendMessage: (message: ExtensionMessage) => chrome.runtime.sendMessage(message),
     id: chrome.runtime.id,
   },
   windows: {

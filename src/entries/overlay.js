@@ -1,7 +1,9 @@
 // Injected overlay with a Stop button. Minimal footprint, avoids interfering with page.
 // Task 4.9: State-aware overlay — shows different states based on background status
+// Bundled by esbuild as an IIFE (build/overlay.js), so module imports are fine here.
 
-// Constants (duplicated from constants.js since content scripts can't import modules easily)
+import { MSG_GET_STATE, MSG_STOP, MSG_STATE_UPDATE, MSG_OVERLAY_REMOVE } from '../messages.js';
+
 const ERROR_DISPLAY_DURATION_MS = 2000;
 
 (function () {
@@ -56,7 +58,36 @@ const ERROR_DISPLAY_DURATION_MS = 2000;
    * and are always lowercase ('idle', 'starting', 'recording', 'stopping', 'saved', 'failed', 'recoverable').
    * @param {string} status - Current status from GET_STATE
    */
+  let startingPollTimer = null;
+  let renderedStatus = null;
+  let overlayRemoved = false;
+  let stateGeneration = 0;
+  let stateQueryInFlight = false;
+
+  function clearStartingPoll() {
+    clearTimeout(startingPollTimer);
+    startingPollTimer = null;
+  }
+
+  function scheduleStartingPoll() {
+    if (
+      overlayRemoved ||
+      renderedStatus !== 'starting' ||
+      startingPollTimer !== null ||
+      stateQueryInFlight
+    ) {
+      return;
+    }
+    startingPollTimer = setTimeout(() => {
+      startingPollTimer = null;
+      queryState();
+    }, 1000);
+  }
+
   function updateButtonState(status) {
+    if (overlayRemoved) return;
+    stateGeneration += 1;
+    renderedStatus = status;
     if (status === 'stopping') {
       btn.disabled = true;
       btn.textContent = 'Saving…';
@@ -67,35 +98,51 @@ const ERROR_DISPLAY_DURATION_MS = 2000;
       btn.textContent = 'Starting…';
       btn.style.opacity = '0.7';
       btn.style.cursor = 'wait';
+      // Backstop: the background pushes STATE_UPDATE on transitions, but if
+      // that push is missed (injection timing, dropped message) the button
+      // would be stuck disabled. Re-query until the machine leaves `starting`
+      // (CONFIRMATION_TIMEOUT guarantees that within ~5s).
+      scheduleStartingPoll();
+      return;
     } else {
       btn.disabled = false;
       btn.textContent = 'Stop';
       btn.style.opacity = '1';
       btn.style.cursor = 'pointer';
     }
+    clearStartingPoll();
+  }
+
+  function queryState() {
+    if (overlayRemoved || stateQueryInFlight) return;
+
+    const queryGeneration = stateGeneration;
+    stateQueryInFlight = true;
+    chrome.runtime
+      .sendMessage({ type: MSG_GET_STATE })
+      .then((state) => {
+        if (overlayRemoved || queryGeneration !== stateGeneration) return;
+        if (state && typeof state.status === 'string' && state.status.length > 0) {
+          updateButtonState(state.status);
+        }
+      })
+      .catch(() => {
+        // Retry scheduling is centralized in finally.
+      })
+      .finally(() => {
+        stateQueryInFlight = false;
+        scheduleStartingPoll();
+      });
   }
 
   // Query initial state from background
-  chrome.runtime
-    .sendMessage({ type: 'GET_STATE' })
-    .then((state) => {
-      if (state && state.status) {
-        updateButtonState(state.status);
-      }
-    })
-    .catch(() => {
-      // Ignore errors, overlay will use default Stop button
-    });
+  queryState();
 
   btn.addEventListener('click', async () => {
-    // Prevent multiple clicks and provide visual feedback
-    btn.disabled = true;
-    btn.textContent = 'Saving…';
-    btn.style.opacity = '0.7';
-    btn.style.cursor = 'wait';
+    updateButtonState('stopping');
 
     try {
-      const response = await chrome.runtime.sendMessage({ type: 'STOP' });
+      const response = await chrome.runtime.sendMessage({ type: MSG_STOP });
       if (!response || !response.ok) {
         console.error('[CaptureCast Overlay] Stop failed:', response?.error);
         btn.textContent = 'Error!';
@@ -116,7 +163,10 @@ const ERROR_DISPLAY_DURATION_MS = 2000;
   // Allow background to request removal explicitly (extra safety)
   try {
     chrome.runtime.onMessage.addListener((msg) => {
-      if (msg && msg.type === 'OVERLAY_REMOVE') {
+      if (msg && msg.type === MSG_OVERLAY_REMOVE) {
+        overlayRemoved = true;
+        stateGeneration += 1;
+        clearStartingPoll();
         try {
           root.remove();
         } catch (e) {
@@ -124,7 +174,7 @@ const ERROR_DISPLAY_DURATION_MS = 2000;
         }
       }
       // Handle state updates from background
-      if (msg && msg.type === 'STATE_UPDATE') {
+      if (msg && msg.type === MSG_STATE_UPDATE) {
         updateButtonState(msg.status);
       }
     });

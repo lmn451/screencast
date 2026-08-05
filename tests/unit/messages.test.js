@@ -17,8 +17,13 @@ import {
   MSG_OFFSCREEN_ERROR,
   MSG_OFFSCREEN_TEST,
   MSG_RECOVERY_DISCARD,
+  MSG_STATE_UPDATE,
+  MSG_OVERLAY_REMOVE,
+  RECORDING_STATUSES,
+  OUTBOUND_CONTROL_MESSAGES,
   schemas,
   validateMessage,
+  buildMessage,
 } from '../../src/messages.js';
 
 const VALID_UUID = '550e8400-e29b-41d4-a716-446655440000';
@@ -283,6 +288,87 @@ describe('messages.js', () => {
       const requiredFields = schemas[MSG_RECOVERY_DISCARD].required.map(([field]) => field);
       expect(requiredFields).toContain('type');
       expect(requiredFields).toContain('recordingId');
+    });
+
+    it('should have STATE_UPDATE schema restricted to machine statuses', () => {
+      expect(schemas[MSG_STATE_UPDATE]).toBeDefined();
+      const [, , allowed] = schemas[MSG_STATE_UPDATE].required.find(([f]) => f === 'status');
+      expect(allowed).toEqual(RECORDING_STATUSES);
+      expect(RECORDING_STATUSES).toContain('starting');
+      expect(RECORDING_STATUSES).toContain('recording');
+      expect(RECORDING_STATUSES).toContain('stopping');
+    });
+
+    it('should have OVERLAY_REMOVE schema', () => {
+      expect(schemas[MSG_OVERLAY_REMOVE]).toBeDefined();
+      expect(schemas[MSG_OVERLAY_REMOVE].required.map(([f]) => f)).toContain('type');
+    });
+  });
+
+  describe('constants ↔ schemas parity', () => {
+    it('every MSG_ constant has a schema and every schema key has a constant', async () => {
+      const mod = await import('../../src/messages.js');
+      const constantValues = Object.entries(mod)
+        .filter(([name]) => name.startsWith('MSG_'))
+        .map(([, value]) => value);
+      const schemaKeys = Object.keys(mod.schemas).filter((key) => key !== 'UNKNOWN');
+
+      // Both directions: a constant without a schema means senders can build
+      // messages every receiver rejects; a schema without a constant means
+      // receivers accept messages nobody can send without a magic string.
+      expect([...constantValues].sort()).toEqual([...schemaKeys].sort());
+    });
+
+    it('OUTBOUND_CONTROL_MESSAGES only contains registered message types', () => {
+      for (const type of OUTBOUND_CONTROL_MESSAGES) {
+        expect(schemas[type]).toBeDefined();
+      }
+    });
+  });
+
+  describe('buildMessage', () => {
+    it('builds and validates a STATE_UPDATE message', () => {
+      expect(buildMessage(MSG_STATE_UPDATE, { status: 'recording' })).toEqual({
+        type: MSG_STATE_UPDATE,
+        status: 'recording',
+      });
+    });
+
+    it('builds field-less messages without a fields argument', () => {
+      expect(buildMessage(MSG_OVERLAY_REMOVE)).toEqual({ type: MSG_OVERLAY_REMOVE });
+    });
+
+    it('throws on a status outside the machine contract', () => {
+      expect(() => buildMessage(MSG_STATE_UPDATE, { status: 'exploding' })).toThrow(
+        /buildMessage\(STATE_UPDATE\)/
+      );
+    });
+
+    it('throws when required fields are missing', () => {
+      expect(() => buildMessage(MSG_OFFSCREEN_DATA, { mimeType: 'video/webm' })).toThrow(
+        /Missing required field: recordingId/
+      );
+    });
+
+    it('throws on unregistered message types', () => {
+      expect(() => buildMessage('NOT_A_REAL_TYPE')).toThrow(/Unknown message type/);
+    });
+
+    it('omits undefined optional fields instead of failing validation', () => {
+      const msg = buildMessage(MSG_OFFSCREEN_START, {
+        mode: 'tab',
+        recordingId: VALID_UUID,
+        includeAudio: false,
+        bestQuality: false,
+        targetTabId: undefined,
+      });
+      expect('targetTabId' in msg).toBe(false);
+    });
+
+    it('rejects fields outside the schema', () => {
+      expect(() => buildMessage(MSG_STOP, { recordingId: VALID_UUID })).toThrow(
+        /Unknown field: recordingId/
+      );
     });
   });
 });

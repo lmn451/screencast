@@ -10,6 +10,13 @@ import {
   BEST_QUALITY_VIDEO_BITS_PER_SECOND,
 } from '../lib/media-recorder-utils.js';
 import { createError, CODES } from '../error-codes.js';
+import {
+  MSG_RECORDER_STARTED,
+  MSG_RECORDER_DATA,
+  MSG_RECORDER_ERROR,
+  MSG_RECORDER_STOP,
+  buildMessage,
+} from '../messages.js';
 
 const logger = createLogger('Recorder');
 
@@ -44,11 +51,9 @@ async function notifyRecorderStartError(captureError, isPermissionDenied) {
         : 'Failed to start screen capture: ' + (captureError.message || captureError),
       captureError.message || String(captureError)
     );
-    await chrome.runtime.sendMessage({
-      type: 'RECORDER_ERROR',
-      error: payload,
-      recordingId,
-    });
+    await chrome.runtime.sendMessage(
+      buildMessage(MSG_RECORDER_ERROR, { error: payload, recordingId })
+    );
   } catch (sendErr) {
     logger.error('Failed to send RECORDER_ERROR to background:', sendErr);
   }
@@ -193,11 +198,9 @@ async function start() {
           await finishRecording(recordingId, mimeType, duration, totalSize, status);
           logger.log('Finished recording in DB');
 
-          await chrome.runtime.sendMessage({
-            type: 'RECORDER_DATA',
-            recordingId,
-            mimeType,
-          });
+          await chrome.runtime.sendMessage(
+            buildMessage(MSG_RECORDER_DATA, { recordingId, mimeType })
+          );
         } catch (dbError) {
           logger.error('Failed to finish recording in DB:', dbError);
           const structuredError = createError(
@@ -205,11 +208,9 @@ async function start() {
             'Failed to save recording',
             dbError.message || String(dbError)
           );
-          await chrome.runtime.sendMessage({
-            type: 'RECORDER_ERROR',
-            error: structuredError,
-            recordingId,
-          });
+          await chrome.runtime.sendMessage(
+            buildMessage(MSG_RECORDER_ERROR, { error: structuredError, recordingId })
+          );
           alert('Failed to save recording: ' + dbError.message);
           return;
         } finally {
@@ -250,10 +251,7 @@ async function start() {
 
     mediaRecorder.start(CHUNK_INTERVAL_MS);
     try {
-      await chrome.runtime.sendMessage({
-        type: 'RECORDER_STARTED',
-        recordingId,
-      });
+      await chrome.runtime.sendMessage(buildMessage(MSG_RECORDER_STARTED, { recordingId }));
     } catch (e) {
       logger.warn('Failed to send RECORDER_STARTED message, continuing anyway:', e);
     }
@@ -312,12 +310,12 @@ window.addEventListener('DOMContentLoaded', () => {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (sender.id !== chrome.runtime.id) return false;
-  if (message.type !== 'RECORDER_STOP') {
+  if (message.type !== MSG_RECORDER_STOP) {
     return false;
   }
 
   (async () => {
-    if (message.type === 'RECORDER_STOP') {
+    if (message.type === MSG_RECORDER_STOP) {
       try {
         await stop();
         sendResponse({ ok: true });

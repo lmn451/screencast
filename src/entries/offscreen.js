@@ -10,6 +10,15 @@ import {
 } from '../lib/media-recorder-utils.js';
 import { createError, CODES } from '../error-codes.js';
 import { openDB } from '../lib/db-shared.js';
+import {
+  MSG_OFFSCREEN_TEST,
+  MSG_OFFSCREEN_STARTED,
+  MSG_OFFSCREEN_DATA,
+  MSG_OFFSCREEN_ERROR,
+  MSG_OFFSCREEN_START,
+  MSG_OFFSCREEN_STOP,
+  buildMessage,
+} from '../messages.js';
 
 // Offscreen document script to handle getDisplayMedia + MediaRecorder
 
@@ -29,9 +38,7 @@ logger.log('Document loaded and script executing');
 (async () => {
   try {
     logger.log('Testing message communication...');
-    const response = await chrome.runtime.sendMessage({
-      type: 'OFFSCREEN_TEST',
-    });
+    const response = await chrome.runtime.sendMessage(buildMessage(MSG_OFFSCREEN_TEST));
     logger.log('Test message response:', response);
   } catch (error) {
     logger.error('Test message failed:', error);
@@ -136,11 +143,12 @@ async function startCapture(mode, recordingId, includeAudio, bestQuality = false
 
           // Send data to background script
           try {
-            const response = await chrome.runtime.sendMessage({
-              type: 'OFFSCREEN_DATA',
-              recordingId: currentId,
-              mimeType: mimeType,
-            });
+            const response = await chrome.runtime.sendMessage(
+              buildMessage(MSG_OFFSCREEN_DATA, {
+                recordingId: currentId,
+                mimeType: mimeType,
+              })
+            );
             logger.log('OFFSCREEN_DATA response:', response);
           } catch (error) {
             logger.error('Failed to send OFFSCREEN_DATA:', error);
@@ -152,12 +160,13 @@ async function startCapture(mode, recordingId, includeAudio, bestQuality = false
             'Failed to save recording',
             dbError.message || String(dbError)
           );
-          chrome.runtime.sendMessage({
-            type: 'OFFSCREEN_ERROR',
-            error: structuredError,
-            code: CODES.SAVE_FAILED,
-            recordingId: currentId,
-          });
+          chrome.runtime.sendMessage(
+            buildMessage(MSG_OFFSCREEN_ERROR, {
+              error: structuredError,
+              code: CODES.SAVE_FAILED,
+              recordingId: currentId,
+            })
+          );
           throw dbError;
         } finally {
           cleanup();
@@ -192,10 +201,9 @@ async function startCapture(mode, recordingId, includeAudio, bestQuality = false
 
     mediaRecorder.start(CHUNK_INTERVAL_MS);
     try {
-      await chrome.runtime.sendMessage({
-        type: 'OFFSCREEN_STARTED',
-        recordingId: currentId,
-      });
+      await chrome.runtime.sendMessage(
+        buildMessage(MSG_OFFSCREEN_STARTED, { recordingId: currentId })
+      );
     } catch (e) {
       logger.warn('Failed to send OFFSCREEN_STARTED message (non-critical):', e);
     }
@@ -210,18 +218,27 @@ async function startCapture(mode, recordingId, includeAudio, bestQuality = false
     }
     cleanup();
 
-    // Notify background about the failure so it can reset state and inform the user
+    // Notify background about the failure so it can reset state and inform the
+    // user. The error must be a structured createError payload: the schema for
+    // OFFSCREEN_ERROR requires `error` to be an object, and the background's
+    // strict validation silently rejected the previous bare-string form —
+    // leaving the machine stuck in `starting` after a denied permission.
     const isPermissionDenied = error.name === 'NotAllowedError' || error.name === 'AbortError';
     const userMessage = isPermissionDenied
       ? 'Screen capture permission was denied. Please allow access and try again.'
       : 'Failed to start screen capture: ' + (error.message || error);
     try {
-      await chrome.runtime.sendMessage({
-        type: 'OFFSCREEN_ERROR',
-        error: userMessage,
-        code: isPermissionDenied ? 'PERMISSION_DENIED' : 'CAPTURE_FAILED',
-        recordingId,
-      });
+      await chrome.runtime.sendMessage(
+        buildMessage(MSG_OFFSCREEN_ERROR, {
+          error: createError(
+            isPermissionDenied ? CODES.SCREEN_PERMISSION_DENIED : CODES.SCREEN_PERMISSION_CANCELLED,
+            userMessage,
+            error.message || String(error)
+          ),
+          code: isPermissionDenied ? 'PERMISSION_DENIED' : 'CAPTURE_FAILED',
+          recordingId,
+        })
+      );
     } catch (sendErr) {
       logger.error('Failed to send OFFSCREEN_ERROR to background:', sendErr);
     }
@@ -258,12 +275,12 @@ async function stopCapture() {
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (sender.id !== chrome.runtime.id) return false;
-  if (message.type !== 'OFFSCREEN_START' && message.type !== 'OFFSCREEN_STOP') {
+  if (message.type !== MSG_OFFSCREEN_START && message.type !== MSG_OFFSCREEN_STOP) {
     return false;
   }
 
   (async () => {
-    if (message.type === 'OFFSCREEN_START') {
+    if (message.type === MSG_OFFSCREEN_START) {
       try {
         logger.log('Received START message:', message);
         await startCapture(
@@ -278,7 +295,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         logger.error('startCapture failed:', e);
         sendResponse({ ok: false, error: String(e) });
       }
-    } else if (message.type === 'OFFSCREEN_STOP') {
+    } else if (message.type === MSG_OFFSCREEN_STOP) {
       try {
         logger.log('Received STOP message');
         await stopCapture();

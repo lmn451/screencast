@@ -32,6 +32,12 @@ jest.unstable_mockModule('../../src/logger.js', () => ({
 jest.unstable_mockModule('../../src/messages.js', () => ({
   schemas: {},
   validateMessageStrict: jest.fn(() => ({ valid: true, errors: [] })),
+  OUTBOUND_CONTROL_MESSAGES: new Set([
+    'OFFSCREEN_START',
+    'OFFSCREEN_STOP',
+    'RECORDER_STOP',
+    'OFFSCREEN_TEST',
+  ]),
 }));
 
 function makeChrome() {
