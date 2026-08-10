@@ -16,6 +16,7 @@ jest.unstable_mockModule('../../src/services/recordingService.js', () => ({
     handleMessage: jest.fn(),
     handleCheckpointAlarm: jest.fn(async () => undefined),
     handleTabClosing,
+    restoreSession: jest.fn(async () => false),
   })),
 }));
 jest.unstable_mockModule('../../src/lib/db.js', () => ({

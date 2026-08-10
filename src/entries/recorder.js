@@ -15,6 +15,7 @@ import {
   MSG_RECORDER_DATA,
   MSG_RECORDER_ERROR,
   MSG_RECORDER_STOP,
+  MSG_HEARTBEAT,
   buildMessage,
 } from '../messages.js';
 
@@ -41,6 +42,29 @@ function isValidUUID(str) {
 let mediaStream = null;
 let mediaRecorder = null;
 let recordingId = null;
+let heartbeatTimer = null;
+
+// Heartbeat cadence. MV3 terminates the background service worker after ~30s
+// of inactivity, wiping its in-memory recording state even though this page
+// keeps capturing. Pinging every 20s keeps the SW awake for the whole recording
+// and doubles as the post-restart session-recovery trigger.
+const HEARTBEAT_INTERVAL_MS = 20_000;
+
+function startHeartbeat() {
+  stopHeartbeat();
+  heartbeatTimer = setInterval(() => {
+    chrome.runtime.sendMessage(buildMessage(MSG_HEARTBEAT, { recordingId })).catch((error) => {
+      logger.warn('Heartbeat send failed (non-fatal):', error);
+    });
+  }, HEARTBEAT_INTERVAL_MS);
+}
+
+function stopHeartbeat() {
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
+}
 
 async function notifyRecorderStartError(captureError, isPermissionDenied) {
   try {
@@ -214,6 +238,7 @@ async function start() {
           alert('Failed to save recording: ' + dbError.message);
           return;
         } finally {
+          stopHeartbeat();
           try {
             mediaStream?.getTracks().forEach((t) => t.stop());
           } catch (e) {
@@ -250,6 +275,7 @@ async function start() {
     setupAutoStop(mediaStream, mediaRecorder);
 
     mediaRecorder.start(CHUNK_INTERVAL_MS);
+    startHeartbeat();
     try {
       await chrome.runtime.sendMessage(buildMessage(MSG_RECORDER_STARTED, { recordingId }));
     } catch (e) {
@@ -269,6 +295,7 @@ async function start() {
     });
     // Stop any acquired capture tracks so a failure in recorder creation/start
     // doesn't leak the screen-share/mic indicator.
+    stopHeartbeat();
     try {
       displayStream?.getTracks().forEach((t) => t.stop());
     } catch (stopErr) {

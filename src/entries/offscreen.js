@@ -17,6 +17,7 @@ import {
   MSG_OFFSCREEN_ERROR,
   MSG_OFFSCREEN_START,
   MSG_OFFSCREEN_STOP,
+  MSG_HEARTBEAT,
   buildMessage,
 } from '../messages.js';
 
@@ -58,6 +59,29 @@ logger.log('Document loaded and script executing');
 let mediaStream = null;
 let mediaRecorder = null;
 let currentId = null;
+let heartbeatTimer = null;
+
+// Heartbeat cadence. MV3 terminates the background service worker after ~30s
+// of inactivity, which wipes its in-memory recording state even though this
+// offscreen document keeps capturing. Pinging every 20s keeps the SW awake for
+// the whole recording and doubles as the post-restart session-recovery trigger.
+const HEARTBEAT_INTERVAL_MS = 20_000;
+
+function startHeartbeat(recordingId) {
+  stopHeartbeat();
+  heartbeatTimer = setInterval(() => {
+    chrome.runtime.sendMessage(buildMessage(MSG_HEARTBEAT, { recordingId })).catch((error) => {
+      logger.warn('Heartbeat send failed (non-fatal):', error);
+    });
+  }, HEARTBEAT_INTERVAL_MS);
+}
+
+function stopHeartbeat() {
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
+}
 
 /**
  * Attempt to save partial recording data before unload.
@@ -200,6 +224,7 @@ async function startCapture(mode, recordingId, includeAudio, bestQuality = false
     setupAutoStop(mediaStream, mediaRecorder);
 
     mediaRecorder.start(CHUNK_INTERVAL_MS);
+    startHeartbeat(currentId);
     try {
       await chrome.runtime.sendMessage(
         buildMessage(MSG_OFFSCREEN_STARTED, { recordingId: currentId })
@@ -247,6 +272,7 @@ async function startCapture(mode, recordingId, includeAudio, bestQuality = false
 }
 
 function cleanup() {
+  stopHeartbeat();
   try {
     mediaRecorder?.stream?.getTracks().forEach((t) => t.stop());
   } catch (e) {

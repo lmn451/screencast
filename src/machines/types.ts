@@ -72,7 +72,8 @@ export type RecordingEvent =
   | { type: 'TAB_CLOSING'; tabId: number }
   | { type: 'PREVIEW_READY'; recordingId?: string }
   | { type: 'CHUNK_FAILED'; chunkIndex: number }
-  | { type: 'UPDATE_STATE'; status: RecordingStatus };
+  | { type: 'UPDATE_STATE'; status: RecordingStatus }
+  | { type: 'RESTORE'; snapshot: SessionSnapshot };
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SESSION SNAPSHOT (for persistence)

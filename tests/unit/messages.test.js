@@ -17,6 +17,7 @@ import {
   MSG_OFFSCREEN_ERROR,
   MSG_OFFSCREEN_TEST,
   MSG_RECOVERY_DISCARD,
+  MSG_HEARTBEAT,
   MSG_STATE_UPDATE,
   MSG_OVERLAY_REMOVE,
   RECORDING_STATUSES,
@@ -288,6 +289,11 @@ describe('messages.js', () => {
       const requiredFields = schemas[MSG_RECOVERY_DISCARD].required.map(([field]) => field);
       expect(requiredFields).toContain('type');
       expect(requiredFields).toContain('recordingId');
+    });
+
+    it('should have a HEARTBEAT schema with required recordingId', () => {
+      const requiredFields = schemas[MSG_HEARTBEAT].required.map(([field]) => field);
+      expect(requiredFields).toEqual(['type', 'recordingId']);
     });
 
     it('should have STATE_UPDATE schema restricted to machine statuses', () => {

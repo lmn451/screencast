@@ -88,6 +88,32 @@ function acknowledgeRecorder(svc) {
   return svc.handleRecorderStarted(svc.getState().recordingId);
 }
 
+// A chrome stub whose storage.local actually retains written values, so a
+// "service-worker restart" (fresh service over the same chrome) can read back
+// the session snapshot a previous instance persisted.
+function makeStorageBackedChrome(overrides = {}) {
+  const store = {};
+  const chrome = makeStubChrome({
+    storage: {
+      get: jest.fn(async (key) => ({ [key]: store[key] })),
+      set: jest.fn(async (data) => Object.assign(store, data)),
+      remove: jest.fn(async (key) => {
+        delete store[key];
+      }),
+    },
+    ...overrides,
+  });
+  return { chrome, store };
+}
+
+// Simulate the SW being terminated + restarted mid-recording: a brand-new
+// RecordingService over the same chrome stub, whose machine starts fresh in
+// `idle` with no in-memory knowledge of the live capture.
+function simulateServiceWorkerRestart(chrome) {
+  __resetRecordingServiceForTests();
+  return createRecordingService(chrome);
+}
+
 beforeEach(() => {
   __resetRecordingServiceForTests();
   storageUtils.checkStorageQuota.mockClear();
@@ -707,6 +733,114 @@ describe('state projection and recovery exits', () => {
     await checkpoint;
 
     expect(chrome.alarms.create).not.toHaveBeenCalled();
+  });
+});
+
+describe('session restore & heartbeat (service-worker restart recovery)', () => {
+  async function startAndPersist(chrome) {
+    const svc = createRecordingService(chrome);
+    await svc.startRecording('tab', false, false);
+    acknowledgeOffscreen(svc);
+    expect(svc.getState().status).toBe('recording');
+    const recordingId = svc.getState().recordingId;
+    await flushMicrotasks(); // let the queued snapshot persist settle
+    return { svc, recordingId };
+  }
+
+  it('accepts heartbeats for the active session', async () => {
+    const chrome = makeStorageBackedChrome().chrome;
+    const { svc, recordingId } = await startAndPersist(chrome);
+
+    const result = await svc.handleHeartbeat(recordingId);
+
+    expect(result).toEqual({ ok: true });
+    expect(svc.getState().status).toBe('recording');
+  });
+
+  it('rejects heartbeats with an invalid id', async () => {
+    const chrome = makeStorageBackedChrome().chrome;
+    const svc = createRecordingService(chrome);
+    const result = await svc.handleHeartbeat('not-a-uuid');
+    expect(result).toEqual({ ok: false, error: 'Invalid recording ID' });
+  });
+
+  it('restores a live offscreen session after a service-worker restart', async () => {
+    const { chrome } = makeStorageBackedChrome({
+      offscreen: { ...makeStubChrome().offscreen, hasDocument: jest.fn(async () => true) },
+    });
+    const { recordingId } = await startAndPersist(chrome);
+
+    const restarted = simulateServiceWorkerRestart(chrome);
+    expect(restarted.getState().status).toBe('idle');
+
+    const result = await restarted.handleHeartbeat(recordingId);
+
+    expect(result).toEqual({ ok: true });
+    expect(restarted.getState().status).toBe('recording');
+    expect(restarted.getState().recordingId).toBe(recordingId);
+  });
+
+  it('does not restore when the offscreen document is gone', async () => {
+    const { chrome } = makeStorageBackedChrome(); // hasDocument → false
+    const { recordingId } = await startAndPersist(chrome);
+
+    const restarted = simulateServiceWorkerRestart(chrome);
+    const result = await restarted.handleHeartbeat(recordingId);
+
+    expect(result.ok).toBe(false);
+    expect(restarted.getState().status).toBe('idle');
+  });
+
+  it('accepts late OFFSCREEN_DATA for a live session after restart', async () => {
+    const { chrome } = makeStorageBackedChrome({
+      offscreen: { ...makeStubChrome().offscreen, hasDocument: jest.fn(async () => true) },
+    });
+    const { recordingId } = await startAndPersist(chrome);
+
+    const restarted = simulateServiceWorkerRestart(chrome);
+    await restarted.handleOffscreenData(recordingId, 'video/webm');
+
+    expect(restarted.getState().status).toBe('saved');
+    expect(chrome.tabs.create).toHaveBeenCalledWith({
+      url: `chrome-extension://test/preview.html?id=${encodeURIComponent(recordingId)}`,
+    });
+  });
+
+  it('rejects a new START while a live session is reclaimed after restart', async () => {
+    const { chrome } = makeStorageBackedChrome({
+      offscreen: { ...makeStubChrome().offscreen, hasDocument: jest.fn(async () => true) },
+    });
+    const { recordingId } = await startAndPersist(chrome);
+
+    const restarted = simulateServiceWorkerRestart(chrome);
+    const result = await restarted.startRecording('tab', false, false);
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/already in progress/);
+    expect(restarted.getState().recordingId).toBe(recordingId);
+  });
+
+  it('restores a live recorder-tab session after a service-worker restart', async () => {
+    const { chrome } = makeStorageBackedChrome();
+    const svc = createRecordingService(chrome);
+    await svc.startRecording('tab', true, false); // mic → page strategy
+    acknowledgeRecorder(svc);
+    const recordingId = svc.getState().recordingId;
+    await flushMicrotasks(); // let the queued snapshot persist settle
+
+    chrome.tabs.query.mockResolvedValue([
+      { id: 99, windowId: 1, url: `chrome-extension://test/recorder.html?id=${recordingId}` },
+    ]);
+
+    const restarted = simulateServiceWorkerRestart(chrome);
+    const result = await restarted.handleHeartbeat(recordingId);
+
+    expect(result).toEqual({ ok: true });
+    expect(restarted.getState().status).toBe('recording');
+    expect(restarted.recorderTabId).toBe(99);
+
+    await restarted.stopRecording();
+    expect(chrome.tabs.sendMessage).toHaveBeenCalledWith(99, { type: 'RECORDER_STOP' });
   });
 });
 

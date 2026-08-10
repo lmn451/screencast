@@ -10,7 +10,11 @@
  */
 
 import { createActor } from 'xstate';
-import { recordingMachine, type RecordingContext } from '../machines/recordingMachine.js';
+import {
+  recordingMachine,
+  type RecordingContext,
+  type SessionSnapshot,
+} from '../machines/recordingMachine.js';
 import {
   MSG_RECOVERY_DISCARD,
   MSG_STATE_UPDATE,
@@ -18,6 +22,7 @@ import {
   MSG_OFFSCREEN_START,
   MSG_OFFSCREEN_STOP,
   MSG_RECORDER_STOP,
+  MSG_HEARTBEAT,
   buildMessage,
   type ExtensionMessage,
   type RecordingMode,
@@ -40,7 +45,7 @@ interface ChromeAPI {
     query: (query: {
       active?: boolean;
       currentWindow?: boolean;
-    }) => Promise<Array<{ id?: number; windowId?: number }>>;
+    }) => Promise<Array<{ id?: number; windowId?: number; url?: string }>>;
     create: (options: { url: string; active?: boolean }) => Promise<{ id?: number }>;
     remove: (tabId: number) => Promise<void>;
     update: (tabId: number, options: { active: boolean }) => Promise<unknown>;
@@ -180,8 +185,9 @@ export class RecordingService {
       }
     }
 
-    // Session persistence based on state
-    if (state === 'recording' || state === 'stopping') {
+    // Session persistence based on state. Persist from `starting` onward so a
+    // service-worker restart during startup still leaves a restorable snapshot.
+    if (state === 'starting' || state === 'recording' || state === 'stopping') {
       await this.persistSessionSnapshot(context);
     } else if (
       state === 'idle' ||
@@ -232,7 +238,11 @@ export class RecordingService {
     if (!context.recordingId) return;
     const current = this.actor.getSnapshot();
     if (
-      !(current.matches('recording') || current.matches('stopping')) ||
+      !(
+        current.matches('starting') ||
+        current.matches('recording') ||
+        current.matches('stopping')
+      ) ||
       current.context.recordingId !== context.recordingId
     ) {
       return;
@@ -413,6 +423,13 @@ export class RecordingService {
    * active state.
    */
   async handleCheckpointAlarm(): Promise<void> {
+    if (!this.checkpointActive) {
+      // This alarm fired after a service-worker restart. The in-memory machine
+      // was lost; if a live capture still exists, reclaim it before deciding
+      // whether to persist and re-arm.
+      await this.restoreSession();
+    }
+
     const snapshot = this.actor.getSnapshot();
     const state = snapshot.value;
     const isActiveState = state === 'recording' || state === 'stopping';
@@ -460,9 +477,14 @@ export class RecordingService {
     if (this.startInProgress) {
       return { ok: false, error: 'Cannot start: initialization already in progress' };
     }
-
     this.startInProgress = true;
     try {
+      // A service-worker restart loses the in-memory machine. If a live capture
+      // from a previous session still exists (offscreen document / recorder tab),
+      // reclaim it instead of silently starting a second recording on top.
+      if (await this.restoreSession()) {
+        return { ok: false, error: 'A recording is already in progress' };
+      }
       return await this.initializeRecording(mode, includeMic, includeSystemAudio, bestQuality);
     } finally {
       this.startInProgress = false;
@@ -682,11 +704,16 @@ export class RecordingService {
       return;
     }
     if (!this.isCurrentRecording(recordingId)) {
-      console.warn(
-        '[RecordingService] Ignoring OFFSCREEN_DATA for non-active recording:',
-        recordingId
-      );
-      return;
+      // The SW may have restarted mid-recording. Reclaim the live session from
+      // the persisted snapshot before deciding this data is truly stale.
+      await this.restoreSession();
+      if (!this.isCurrentRecording(recordingId)) {
+        console.warn(
+          '[RecordingService] Ignoring OFFSCREEN_DATA for non-active recording:',
+          recordingId
+        );
+        return;
+      }
     }
 
     this.clearTimers();
@@ -708,11 +735,15 @@ export class RecordingService {
       return;
     }
     if (!this.isCurrentRecording(recordingId)) {
-      console.warn(
-        '[RecordingService] Ignoring RECORDER_DATA for non-active recording:',
-        recordingId
-      );
-      return;
+      // Same restart-recovery path as handleOffscreenData.
+      await this.restoreSession();
+      if (!this.isCurrentRecording(recordingId)) {
+        console.warn(
+          '[RecordingService] Ignoring RECORDER_DATA for non-active recording:',
+          recordingId
+        );
+        return;
+      }
     }
 
     this.clearTimers();
@@ -734,11 +765,14 @@ export class RecordingService {
     recordingId?: string
   ): Promise<void> {
     if (recordingId && !this.isCurrentRecording(recordingId)) {
-      console.warn(
-        '[RecordingService] Ignoring OFFSCREEN_ERROR for non-active recording:',
-        recordingId
-      );
-      return;
+      await this.restoreSession();
+      if (recordingId && !this.isCurrentRecording(recordingId)) {
+        console.warn(
+          '[RecordingService] Ignoring OFFSCREEN_ERROR for non-active recording:',
+          recordingId
+        );
+        return;
+      }
     }
     this.clearTimers();
     this.actor.send({
@@ -752,11 +786,14 @@ export class RecordingService {
 
   async handleRecorderError(error: string | StructuredError, recordingId?: string): Promise<void> {
     if (recordingId && !this.isCurrentRecording(recordingId)) {
-      console.warn(
-        '[RecordingService] Ignoring RECORDER_ERROR for non-active recording:',
-        recordingId
-      );
-      return;
+      await this.restoreSession();
+      if (recordingId && !this.isCurrentRecording(recordingId)) {
+        console.warn(
+          '[RecordingService] Ignoring RECORDER_ERROR for non-active recording:',
+          recordingId
+        );
+        return;
+      }
     }
     this.clearTimers();
     this.actor.send({ type: 'RECORDER_ERROR', error: toErrorText(error) });
@@ -812,6 +849,124 @@ export class RecordingService {
     this.actor.send({ type: 'RECOVERY_DISCARD', recordingId });
     await this.cleanup();
     return true;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // SESSION RESTORE & HEARTBEAT
+  //
+  // MV3 terminates the service worker after ~30s of inactivity, which destroys
+  // the in-memory XState machine mid-recording. The offscreen/recorder context
+  // keeps capturing independently and saves chunks to IndexedDB, so the capture
+  // survives — only the SW's tracking dies. Two mechanisms repair that:
+  //   1. The capture context heartbeats every ~20s (under the 30s suspension
+  //      floor), keeping the SW awake so its machine never restarts.
+  //   2. If a restart still happens, restoreSession() reclaims the live session
+  //      from the persisted snapshot so late OFFSCREEN_DATA/ERROR/STOP messages
+  //      are accepted instead of silently dropped.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Reclaim a still-live recording session after a service-worker restart.
+   * Verifies the capture is actually alive (offscreen document present, or the
+   * recorder tab still open for the same recordingId) before restoring the
+   * machine to `recording`.
+   *
+   * @returns true when an active session is being tracked (either it never
+   *          stopped, or it was successfully restored from the snapshot).
+   */
+  async restoreSession(): Promise<boolean> {
+    const machine = this.actor.getSnapshot();
+    if (machine.matches('recording') || machine.matches('stopping')) {
+      return true;
+    }
+
+    let persisted: SessionSnapshot | undefined;
+    try {
+      const result = await this.chrome.storage.get(STORAGE_KEYS.SESSION_SNAPSHOT);
+      persisted = result[STORAGE_KEYS.SESSION_SNAPSHOT] as SessionSnapshot | undefined;
+    } catch (e) {
+      console.warn('[RecordingService] Failed to read session snapshot for restore:', e);
+      return false;
+    }
+
+    if (!persisted || !isValidUUID(persisted.recordingId)) {
+      return false;
+    }
+
+    if (persisted.strategy === 'offscreen') {
+      let docAlive = false;
+      try {
+        docAlive = await this.chrome.offscreen.hasDocument();
+      } catch (e) {
+        console.warn('[RecordingService] Offscreen liveness check failed:', e);
+      }
+      if (!docAlive) {
+        return false;
+      }
+    } else if (persisted.strategy === 'page') {
+      const recorderTabId = await this.findRecorderTabId(persisted.recordingId);
+      if (recorderTabId == null) {
+        return false;
+      }
+      this.recorderTabId = recorderTabId;
+      this.actor.send({ type: 'SET_RECORDER_TAB_ID', tabId: recorderTabId });
+    } else {
+      return false;
+    }
+
+    this.actor.send({ type: 'RESTORE', snapshot: persisted });
+    this.startCheckpointTimer();
+    return true;
+  }
+
+  /**
+   * Handle a keepalive heartbeat from the capture context (offscreen document
+   * or recorder tab) while a recording is active. Each delivery wakes the
+   * service worker and resets its 30s idle suspension timer; on a post-restart
+   * SW the heartbeat also triggers session restore.
+   */
+  async handleHeartbeat(recordingId: string): Promise<{ ok: boolean; error?: string }> {
+    if (!isValidUUID(recordingId)) {
+      return { ok: false, error: 'Invalid recording ID' };
+    }
+
+    if (!this.isCurrentRecording(recordingId)) {
+      const restored = await this.restoreSession();
+      if (!restored && !this.isCurrentRecording(recordingId)) {
+        return { ok: false, error: 'Heartbeat for unknown session' };
+      }
+    }
+
+    if (this.actor.getSnapshot().matches('recording')) {
+      // Refresh lastActivityAt and keep the checkpoint alarm armed as a
+      // backstop if the heartbeat stream ever stalls.
+      this.actor.send({ type: 'UPDATE_STATE', status: 'recording' });
+      this.startCheckpointTimer();
+    }
+    return { ok: true };
+  }
+
+  private async findRecorderTabId(recordingId: string): Promise<number | null> {
+    try {
+      const tabs = await this.chrome.tabs.query({});
+      for (const tab of tabs) {
+        if (!tab.url) continue;
+        try {
+          const parsed = new URL(tab.url);
+          if (
+            parsed.pathname.endsWith('/recorder.html') &&
+            parsed.searchParams.get('id') === recordingId
+          ) {
+            return tab.id ?? null;
+          }
+        } catch {
+          // Malformed URL — not our recorder tab.
+        }
+      }
+    } catch (e) {
+      console.warn('[RecordingService] Failed to locate recorder tab:', e);
+    }
+    return null;
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -995,6 +1150,9 @@ export class RecordingService {
         return (await this.handleRecoveryDiscard(message.recordingId as string))
           ? { ok: true }
           : { ok: false, error: 'Stale or invalid recovery discard' };
+
+      case MSG_HEARTBEAT:
+        return await this.handleHeartbeat(message.recordingId as string);
 
       // These are messages the background itself broadcasts via
       // chrome.runtime.sendMessage to other extension contexts (offscreen

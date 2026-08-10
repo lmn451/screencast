@@ -12,7 +12,12 @@
  */
 
 import { setup, assign } from 'xstate';
-import type { RecordingContext, RecordingEvent, RecordingMode } from './types.js';
+import type {
+  RecordingContext,
+  RecordingEvent,
+  RecordingMode,
+  SessionSnapshot,
+} from './types.js';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // INITIAL CONTEXT
@@ -153,6 +158,25 @@ export const recordingMachine = setup({
               includeSystemAudio:
                 (event as { type: 'START'; systemAudio?: boolean }).systemAudio ?? false,
               bestQuality: (event as { type: 'START'; bestQuality?: boolean }).bestQuality ?? false,
+            }),
+            error: () => null,
+            failedChunkCount: () => 0,
+          }),
+        },
+        RESTORE: {
+          target: 'recording',
+          actions: assign({
+            recordingId: ({ event }) =>
+              (event as { type: 'RESTORE'; snapshot: SessionSnapshot }).snapshot.recordingId,
+            correlationId: ({ event }) =>
+              (event as { type: 'RESTORE'; snapshot: SessionSnapshot }).snapshot.correlationId,
+            strategy: ({ event }) =>
+              (event as { type: 'RESTORE'; snapshot: SessionSnapshot }).snapshot.strategy,
+            startedAt: ({ event }) =>
+              (event as { type: 'RESTORE'; snapshot: SessionSnapshot }).snapshot.startedAt,
+            lastActivityAt: () => Date.now(),
+            options: ({ event }) => ({
+              ...(event as { type: 'RESTORE'; snapshot: SessionSnapshot }).snapshot.options,
             }),
             error: () => null,
             failedChunkCount: () => 0,

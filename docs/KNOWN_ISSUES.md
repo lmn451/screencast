@@ -104,7 +104,7 @@
 
 ### 4. Service Worker Suspension (MV3)
 
-**Status**: Potential future issue
+**Status**: Fixed (v0.2.x)
 
 **Issue**: Chrome MV3 service workers can be suspended after 30 seconds of inactivity.
 
@@ -116,13 +116,9 @@
 
 **Current Mitigation**:
 
-- State is in memory only
-- Recording process keeps service worker alive
-
-**Future Fix** (v0.3+):
-
-- Persist state to `chrome.storage.session`
-- Restore state on service worker wake
+- Capture contexts (offscreen document / recorder tab) send a keepalive heartbeat every 20s, keeping the service worker awake for the whole recording.
+- If a restart still happens, the live session is reclaimed from the persisted snapshot (`RESTORE` machine event): late `OFFSCREEN_DATA`/`RECORDER_DATA`/error/stop messages are accepted instead of silently dropped, and a duplicate `START` is rejected.
+- Session snapshot is persisted from `starting` onward so a restart during startup is recoverable.
 
 ### 5. Codec Compatibility
 

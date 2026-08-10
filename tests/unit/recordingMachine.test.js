@@ -345,6 +345,42 @@ describe('recordingMachine — recoverable state guards', () => {
   });
 });
 
+describe('recordingMachine — RESTORE (service-worker restart recovery)', () => {
+  const snapshot = {
+    recordingId: VALID_UUID,
+    status: 'recording',
+    startedAt: 1234,
+    lastActivityAt: 5678,
+    options: { mode: 'window', includeMic: false, includeSystemAudio: true, bestQuality: true },
+    strategy: 'offscreen',
+    correlationId: '550e8400-e29b-41d4-a716-446655440001',
+  };
+
+  it('restores idle → recording with the snapshot context', () => {
+    const actor = startActor();
+    actor.send({ type: 'RESTORE', snapshot });
+    const restored = actor.getSnapshot();
+    expect(restored.value).toBe('recording');
+    expect(restored.context.recordingId).toBe(VALID_UUID);
+    expect(restored.context.correlationId).toBe(snapshot.correlationId);
+    expect(restored.context.strategy).toBe('offscreen');
+    expect(restored.context.startedAt).toBe(1234);
+    expect(restored.context.options).toEqual(snapshot.options);
+    expect(restored.context.error).toBeNull();
+    expect(restored.context.failedChunkCount).toBe(0);
+    actor.stop();
+  });
+
+  it('is ignored outside idle', () => {
+    const actor = startActor();
+    actor.send({ type: 'START', mode: 'tab' });
+    actor.send({ type: 'RESTORE', snapshot });
+    expect(actor.getSnapshot().value).toBe('starting');
+    expect(actor.getSnapshot().context.recordingId).not.toBe(VALID_UUID);
+    actor.stop();
+  });
+});
+
 describe('recordingMachine — failed state', () => {
   function toFailed() {
     const actor = startActor();

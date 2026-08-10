@@ -212,6 +212,17 @@ async function reconcileUnfinishedSessions(): Promise<void> {
       skipRecordingId = snapshot?.recordingId ?? null;
     }
 
+    // A service-worker restart wipes the in-memory machine while the capture
+    // (offscreen document / recorder tab) keeps running. Reclaim the live
+    // session here so the periodic reconcile is itself a recovery path and the
+    // machine re-tracks a still-recording session without waiting for its next
+    // heartbeat.
+    if (snapshot?.recordingId && (await service.restoreSession())) {
+      logger.log('Reclaimed live recording session after service worker restart', {
+        recordingId: snapshot.recordingId,
+      });
+    }
+
     recoveredOrphanCount = await recoverOrphanedRecordings(skipRecordingId);
 
     if (snapshot?.status && snapshot.status !== 'idle') {

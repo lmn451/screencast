@@ -18,6 +18,7 @@ export const MSG_OFFSCREEN_ERROR = 'OFFSCREEN_ERROR';
 export const MSG_RECORDER_ERROR = 'RECORDER_ERROR';
 export const MSG_OFFSCREEN_TEST = 'OFFSCREEN_TEST';
 export const MSG_RECOVERY_DISCARD = 'RECOVERY_DISCARD';
+export const MSG_HEARTBEAT = 'HEARTBEAT';
 // Outbound (background → overlay content script, via chrome.tabs.sendMessage)
 export const MSG_STATE_UPDATE = 'STATE_UPDATE';
 export const MSG_OVERLAY_REMOVE = 'OVERLAY_REMOVE';
@@ -149,6 +150,13 @@ export const schemas = {
     optional: [],
   },
   [MSG_RECOVERY_DISCARD]: {
+    required: [
+      ['type', 'string'],
+      ['recordingId', 'string'],
+    ],
+    optional: [],
+  },
+  [MSG_HEARTBEAT]: {
     required: [
       ['type', 'string'],
       ['recordingId', 'string'],

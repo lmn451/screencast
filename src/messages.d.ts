@@ -98,6 +98,10 @@ export interface RecorderErrorMessage {
 export interface OffscreenTestMessage {
   type: 'OFFSCREEN_TEST';
 }
+export interface HeartbeatMessage {
+  type: 'HEARTBEAT';
+  recordingId: string;
+}
 
 // ── background → recorder contexts (chrome.runtime.sendMessage broadcast) ────
 export interface OffscreenStartMessage {
@@ -138,6 +142,7 @@ export type ExtensionMessage =
   | OffscreenErrorMessage
   | RecorderErrorMessage
   | OffscreenTestMessage
+  | HeartbeatMessage
   | OffscreenStartMessage
   | OffscreenStopMessage
   | RecorderStopMessage
@@ -167,6 +172,7 @@ export declare const MSG_PREVIEW_READY: 'PREVIEW_READY';
 export declare const MSG_OFFSCREEN_ERROR: 'OFFSCREEN_ERROR';
 export declare const MSG_RECORDER_ERROR: 'RECORDER_ERROR';
 export declare const MSG_OFFSCREEN_TEST: 'OFFSCREEN_TEST';
+export declare const MSG_HEARTBEAT: 'HEARTBEAT';
 export declare const MSG_RECOVERY_DISCARD: 'RECOVERY_DISCARD';
 export declare const MSG_STATE_UPDATE: 'STATE_UPDATE';
 export declare const MSG_OVERLAY_REMOVE: 'OVERLAY_REMOVE';
