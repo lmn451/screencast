@@ -4,8 +4,6 @@
 
 ### 1. Memory Exhaustion Risk for Long Recordings
 
-**Status**: Known limitation, not yet fixed
-
 **Issue**: The entire recording is buffered in RAM before being saved to IndexedDB.
 
 **Technical Details**:
@@ -301,10 +299,10 @@ If you encounter issues not listed here:
 
 ### v0.3.0 (Next Release)
 
-- [ ] Incremental save to prevent OOM
+- [x] Incremental save to prevent OOM
 - [ ] Save progress indicator
 - [ ] Recording time limit option
-- [ ] State persistence for MV3
+- [x] State persistence for MV3
 
 ### v0.4.0
 
@@ -320,4 +318,4 @@ If you encounter issues not listed here:
 
 ---
 
-Last Updated: v0.2.0
+Last Updated: v0.2.x
