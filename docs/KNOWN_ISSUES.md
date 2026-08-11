@@ -2,38 +2,7 @@
 
 ## Critical Issues Identified
 
-### 1. Memory Exhaustion Risk for Long Recordings
-
-**Issue**: The entire recording is buffered in RAM before being saved to IndexedDB.
-
-**Technical Details**:
-
-- `offscreen.js` and `recorder.js` use `let chunks = []` to accumulate video data
-- All chunks are held in memory until recording stops
-- Final blob is created by `new Blob(chunks, { type: ... })`
-
-**Impact**:
-
-- Long recordings (> 30 minutes) at high resolution can consume 2GB+ RAM
-- May cause extension process to crash (OOM error)
-- Complete loss of recording if crash occurs
-- Particularly affects:
-  - 1080p recordings > 20 minutes
-  - 4K recordings > 5 minutes
-  - Systems with limited RAM
-
-**Risk Level**: High for power users
-
-**Status**: ✅ FIXED in v0.2.0 - Chunked storage now saves incrementally
-
-**Solution Implemented**:
-
-- `media-recorder-utils.js` saves chunks directly to IndexedDB as they arrive
-- No memory accumulation regardless of recording length
-- Partial recordings preserved even if extension crashes
-- Safe for 60+ minute recordings at any resolution
-
-### 2. Race Condition with Concurrent Recordings
+### 1. Race Condition with Concurrent Recordings
 
 **Status**: Partially mitigated in v0.2.0
 
@@ -73,7 +42,7 @@
 - Implement save progress indicator
 - Add "recording in progress" lock during save
 
-### 3. No Progress Feedback During Save
+### 2. No Progress Feedback During Save
 
 **Status**: Known limitation
 
@@ -100,25 +69,7 @@
 
 ## Medium Priority Issues
 
-### 4. Service Worker Suspension (MV3)
-
-**Status**: Fixed (v0.2.x)
-
-**Issue**: Chrome MV3 service workers can be suspended after 30 seconds of inactivity.
-
-**Impact**:
-
-- Recording state could be lost if service worker suspended
-- Messages might not be delivered
-- May affect long recording sessions
-
-**Current Mitigation**:
-
-- Capture contexts (offscreen document / recorder tab) send a keepalive heartbeat every 20s, keeping the service worker awake for the whole recording.
-- If a restart still happens, the live session is reclaimed from the persisted snapshot (`RESTORE` machine event): late `OFFSCREEN_DATA`/`RECORDER_DATA`/error/stop messages are accepted instead of silently dropped, and a duplicate `START` is rejected.
-- Session snapshot is persisted from `starting` onward so a restart during startup is recoverable.
-
-### 5. Codec Compatibility
+### 3. Codec Compatibility
 
 **Status**: Low risk, handled
 
@@ -136,7 +87,7 @@
 - VP9: Chrome 29+, Edge 79+
 - VP8: All Chromium browsers
 
-### 6. Overlay Injection Failures
+### 4. Overlay Injection Failures
 
 **Status**: Expected behavior
 
@@ -158,7 +109,7 @@
 
 ## Low Priority Issues
 
-### 7. No Recording Size Limit
+### 5. No Recording Size Limit
 
 **Status**: By design, but risky
 
@@ -176,7 +127,7 @@
 - Show storage usage in preview
 - Warn when approaching quota
 
-### 8. IndexedDB Quota
+### 6. IndexedDB Quota
 
 **Status**: Browser-dependent
 
@@ -199,7 +150,7 @@
 - Show available storage
 - Offer direct-to-download option (skip IndexedDB)
 
-### 9. No Encryption
+### 7. No Encryption
 
 **Status**: By design, privacy by architecture
 
@@ -218,7 +169,7 @@
 
 ## Performance Limitations
 
-### 10. Recording Performance
+### 8. Recording Performance
 
 **Factors Affecting Performance**:
 
@@ -299,10 +250,8 @@ If you encounter issues not listed here:
 
 ### v0.3.0 (Next Release)
 
-- [x] Incremental save to prevent OOM
 - [ ] Save progress indicator
 - [ ] Recording time limit option
-- [x] State persistence for MV3
 
 ### v0.4.0
 
@@ -318,4 +267,4 @@ If you encounter issues not listed here:
 
 ---
 
-Last Updated: v0.2.x
+Last Updated: v0.2.2
