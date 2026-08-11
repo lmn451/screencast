@@ -125,6 +125,10 @@ export class RecordingService {
   private overlayTabId: number | null = null;
   private recorderTabId: number | null = null;
   private lastActorState: string | null = null;
+  // Ticks the action badge once per second with the live recording duration
+  // while the machine is in `recording`. The badge text is owned by the browser,
+  // so it survives a service-worker eviction; the timer is re-armed on restore.
+  private badgeTimer: ReturnType<typeof setInterval> | null = null;
   // Serializes onStateChange so persist/clear/close/badge side effects cannot
   // interleave across rapid transitions (notably saved→idle).
   private stateChangeQueue: Promise<void> = Promise.resolve();
@@ -166,6 +170,15 @@ export class RecordingService {
 
     // Badge management
     await this.updateBadge(state);
+
+    // Keep the duration badge ticking once per second while recording. The
+    // badge timer is a secondary keepalive; the capture-context heartbeat
+    // remains the primary one and also re-arms this timer after a restart.
+    if (state === 'recording') {
+      this.startBadgeTimer();
+    } else {
+      this.stopBadgeTimer();
+    }
 
     // Push the new status to the overlay button. The overlay's initial
     // GET_STATE races the recorder acknowledgment: if it resolves during
@@ -221,7 +234,7 @@ export class RecordingService {
 
       if (state === 'recording') {
         color = '#d93025';
-        text = 'REC';
+        text = this.formatBadgeDuration();
       } else if (state === 'stopping') {
         color = '#f9ab00';
         text = 'SAVE';
@@ -231,6 +244,30 @@ export class RecordingService {
       await this.chrome.action.setBadgeText({ text });
     } catch (e) {
       // Non-critical
+    }
+  }
+
+  /** Elapsed recording time as `M:SS` (fits Chrome's ~4-char badge budget). */
+  private formatBadgeDuration(): string {
+    const startedAt = this.actor.getSnapshot().context.startedAt;
+    if (!startedAt) return 'REC';
+    const totalSeconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes}:${String(seconds).padStart(2, '0')}`;
+  }
+
+  private startBadgeTimer(): void {
+    if (this.badgeTimer) return;
+    this.badgeTimer = setInterval(() => {
+      void this.updateBadge('recording');
+    }, 1000);
+  }
+
+  private stopBadgeTimer(): void {
+    if (this.badgeTimer) {
+      clearInterval(this.badgeTimer);
+      this.badgeTimer = null;
     }
   }
 
@@ -942,6 +979,10 @@ export class RecordingService {
       // backstop if the heartbeat stream ever stalls.
       this.actor.send({ type: 'UPDATE_STATE', status: 'recording' });
       this.startCheckpointTimer();
+      // Re-arm the duration badge after a potential service-worker restart and
+      // refresh it immediately (no waiting for the next 1s tick).
+      this.startBadgeTimer();
+      await this.updateBadge('recording');
     }
     return { ok: true };
   }

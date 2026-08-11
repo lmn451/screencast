@@ -844,6 +844,73 @@ describe('session restore & heartbeat (service-worker restart recovery)', () => 
   });
 });
 
+describe('recording duration badge', () => {
+  it('shows a ticking elapsed-time badge while recording', async () => {
+    const chrome = makeStubChrome();
+    const svc = createRecordingService(chrome);
+
+    await svc.startRecording('tab', false, false);
+    acknowledgeOffscreen(svc);
+    expect(svc.getState().status).toBe('recording');
+    await flushMicrotasks();
+
+    // Entering `recording` writes the elapsed time immediately.
+    expect(chrome.action.setBadgeText).toHaveBeenLastCalledWith({ text: '0:00' });
+
+    // The 1s badge interval keeps the duration fresh.
+    jest.advanceTimersByTime(1500);
+    await flushMicrotasks();
+    expect(chrome.action.setBadgeText).toHaveBeenLastCalledWith({ text: '0:01' });
+
+    jest.advanceTimersByTime(65_000);
+    await flushMicrotasks();
+    expect(chrome.action.setBadgeText).toHaveBeenLastCalledWith({ text: '1:06' });
+  });
+
+  it('stops updating the badge once recording ends', async () => {
+    const chrome = makeStubChrome();
+    const svc = createRecordingService(chrome);
+
+    await svc.startRecording('tab', false, false);
+    acknowledgeOffscreen(svc);
+    await flushMicrotasks();
+
+    await svc.stopRecording();
+    await flushMicrotasks();
+
+    // Leaving `recording` flips the badge to SAVE and clears the ticker.
+    expect(chrome.action.setBadgeText).toHaveBeenLastCalledWith({ text: 'SAVE' });
+    const writesAfterStop = chrome.action.setBadgeText.mock.calls.length;
+
+    // No further badge writes: the 1s ticker was cleared.
+    jest.advanceTimersByTime(3000);
+    await flushMicrotasks();
+    expect(chrome.action.setBadgeText.mock.calls.length).toBe(writesAfterStop);
+  });
+
+  it('re-arms and refreshes the duration badge after a service-worker restart', async () => {
+    const { chrome } = makeStorageBackedChrome({
+      offscreen: { ...makeStubChrome().offscreen, hasDocument: jest.fn(async () => true) },
+    });
+    const svc = createRecordingService(chrome);
+    await svc.startRecording('tab', false, false);
+    acknowledgeOffscreen(svc);
+    const recordingId = svc.getState().recordingId;
+    await flushMicrotasks(); // let the queued snapshot persist settle
+
+    const restarted = simulateServiceWorkerRestart(chrome);
+    await restarted.handleHeartbeat(recordingId);
+
+    expect(restarted.getState().status).toBe('recording');
+    // The heartbeat writes the badge immediately and restarts the ticker.
+    expect(chrome.action.setBadgeText).toHaveBeenLastCalledWith({ text: '0:00' });
+
+    jest.advanceTimersByTime(1500);
+    await flushMicrotasks();
+    expect(chrome.action.setBadgeText).toHaveBeenLastCalledWith({ text: '0:01' });
+  });
+});
+
 describe('overlay STATE_UPDATE push', () => {
   it('pushes starting→recording transitions to the overlay tab', async () => {
     const chrome = makeStubChrome();
