@@ -5,6 +5,14 @@
   "version": "0.2.2",
   "description": "Private, local screen recording for Chromium browsers",
   "license": "MIT",
+  "homepage": "https://subagentura.tech/screencast/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lmn451/screencast.git"
+  },
+  "bugs": {
+    "url": "https://github.com/lmn451/screencast/issues"
+  },
   "scripts": {
     "build": "node esbuild.config.js",
     "package": "pnpm run build && ./scripts/package.sh",

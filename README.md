@@ -4,6 +4,8 @@ ScreenSilo is a private, local screen recorder for Chromium browsers. It records
 a user-selected tab, window, or screen without an account, upload service, or
 analytics pipeline.
 
+[Product site](https://subagentura.tech/screencast/) · [Privacy policy](https://subagentura.tech/screencast/privacy/) · [Support](mailto:hello@subagentura.tech)
+
 ## Load ScreenSilo unpacked
 
 These instructions show how to load ScreenSilo as an unpacked browser extension in Chromium-based browsers (Chrome, Edge, Brave, Opera, Vivaldi).
