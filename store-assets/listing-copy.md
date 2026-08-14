@@ -1,8 +1,8 @@
 Short description (<=132 chars)
-Simple, privacy-first screen recorder. Capture this tab, a window, or your entire screen—download instantly.
+Private, local screen recorder for a tab, window, or entire screen. No account, uploads, tracking, or watermarks.
 
 Long description (store listing)
-CaptureCast is the simplest way to record your screen right from your browser. No sign-in. No uploads. 100% local.
+ScreenSilo records a tab, window, or entire screen directly in your browser. No sign-in, cloud upload, tracking, or watermark.
 
 What you can do
 
@@ -10,7 +10,7 @@ What you can do
 - Stop anytime via the toolbar popup or the on-page Stop button
 - Preview your recording instantly and download as WebM
 
-Why CaptureCast
+Why ScreenSilo
 
 - Privacy-first: recordings never leave your device
 - Fast and reliable: built on native browser APIs (getDisplayMedia + MediaRecorder)
@@ -25,11 +25,14 @@ How it works
 
 Permissions
 
-- activeTab & tabs: detect the current tab and open the preview page
-- scripting: show a small Stop overlay on the page
-- offscreen: capture and record in a lightweight background context
+- activeTab: temporarily access the active tab after your click so recording controls can appear
+- scripting: show and remove the small in-page Stop overlay
+- offscreen: keep local capture and encoding running outside the popup
+- storage: save minimal local recovery state for interrupted recordings
+- alarms: run local checkpoints and service-worker recovery checks
 
 Support
 
-- Email: support@example.com
-- Privacy Policy: https://example.com/privacy
+- Email: hello@subagentura.tech
+- Homepage: https://subagentura.tech/screencast/
+- Privacy Policy: https://subagentura.tech/screencast/privacy/

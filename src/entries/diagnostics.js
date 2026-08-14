@@ -1,4 +1,4 @@
-// Diagnostics page for CaptureCast
+// Diagnostics page for ScreenSilo
 // Exports structured diagnostic logs from IndexedDB
 
 import { DIAG_STORE, openDB } from '../lib/db-shared.js';
@@ -19,6 +19,17 @@ function formatTimestamp(ts) {
   return new Date(ts).toLocaleString();
 }
 
+function createTextElement(tagName, className, text) {
+  const element = document.createElement(tagName);
+  element.className = className;
+  element.textContent = text;
+  return element;
+}
+
+function showEmpty(listEl, message) {
+  listEl.replaceChildren(createTextElement('div', 'empty', message));
+}
+
 function renderEntries(entries) {
   const listEl = document.getElementById('log-list');
   const totalEl = document.getElementById('total-count');
@@ -26,7 +37,7 @@ function renderEntries(entries) {
   const exportBtn = document.getElementById('btn-export');
 
   if (entries.length === 0) {
-    listEl.innerHTML = '<div class="empty">No diagnostic entries yet.</div>';
+    showEmpty(listEl, 'No diagnostic entries yet.');
     totalEl.textContent = '0';
     latestEl.textContent = '—';
     exportBtn.disabled = true;
@@ -43,30 +54,28 @@ function renderEntries(entries) {
     .sort((a, b) => b.ts - a.ts)
     .slice(0, 200);
 
-  listEl.innerHTML = shown
-    .map(
-      (e) => `
-      <div class="log-entry">
-        <div class="log-meta">
-          <span class="log-level ${escapeHtml(e.level)}">${escapeHtml(
-        String(e.level).toUpperCase()
-      )}</span>
-          <span class="log-code">${escapeHtml(e.eventCode || '—')}</span>
-          <span class="log-ts">${formatTimestamp(e.ts)}</span>
-        </div>
-        <div class="log-user">${escapeHtml(e.userMessage || '')}</div>
-        ${e.technicalMessage ? `<div class="log-tech">${escapeHtml(e.technicalMessage)}</div>` : ''}
-      </div>`
-    )
-    .join('');
-}
+  listEl.replaceChildren();
+  for (const entry of shown) {
+    const row = document.createElement('div');
+    row.className = 'log-entry';
+    const meta = document.createElement('div');
+    meta.className = 'log-meta';
 
-function escapeHtml(str) {
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+    const level = createTextElement('span', 'log-level', String(entry.level).toUpperCase());
+    const levelClass = String(entry.level).match(/^[a-z0-9_-]+$/i) ? entry.level : 'unknown';
+    level.classList.add(levelClass);
+    meta.append(
+      level,
+      createTextElement('span', 'log-code', entry.eventCode || '—'),
+      createTextElement('span', 'log-ts', formatTimestamp(entry.ts))
+    );
+
+    row.append(meta, createTextElement('div', 'log-user', entry.userMessage || ''));
+    if (entry.technicalMessage) {
+      row.append(createTextElement('div', 'log-tech', entry.technicalMessage));
+    }
+    listEl.appendChild(row);
+  }
 }
 
 function downloadJSON(data) {
@@ -74,7 +83,7 @@ function downloadJSON(data) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `capturecast-diagnostics-${Date.now()}.json`;
+  a.download = `screensilo-diagnostics-${Date.now()}.json`;
   document.body.appendChild(a);
   a.click();
   setTimeout(() => {
@@ -109,7 +118,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
       } catch (e) {
         console.error('[Diagnostics] Export failed:', e);
-        alert('CaptureCast: Failed to export diagnostics: ' + (e.message || e));
+        alert('ScreenSilo: Failed to export diagnostics: ' + (e.message || e));
       }
     });
 
@@ -120,13 +129,11 @@ document.addEventListener('DOMContentLoaded', async () => {
           renderEntries([]);
         } catch (e) {
           console.error('[Diagnostics] Clear failed:', e);
-          alert('CaptureCast: Failed to clear diagnostics: ' + (e.message || e));
+          alert('ScreenSilo: Failed to clear diagnostics: ' + (e.message || e));
         }
       }
     });
   } catch (err) {
-    document.getElementById(
-      'log-list'
-    ).innerHTML = `<div class="empty">Failed to load diagnostics: ${escapeHtml(err.message)}</div>`;
+    showEmpty(document.getElementById('log-list'), `Failed to load diagnostics: ${err.message}`);
   }
 });

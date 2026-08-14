@@ -68,6 +68,9 @@ interface ChromeAPI {
     closeDocument: () => Promise<void>;
     hasDocument: () => Promise<boolean>;
   };
+  capabilities?: {
+    offscreen: boolean;
+  };
   action: {
     setBadgeBackgroundColor: (options: { color: string }) => Promise<void>;
     setBadgeText: (options: { text: string }) => Promise<void>;
@@ -106,7 +109,7 @@ function toErrorText(error: string | StructuredError): string {
  * which owns the chrome.alarms.onAlarm listener and dispatches to
  * RecordingService.handleCheckpointAlarm.
  */
-export const CHECKPOINT_ALARM_NAME = 'capturecast-checkpoint';
+export const CHECKPOINT_ALARM_NAME = 'screensilo-checkpoint';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // RECORDING SERVICE
@@ -552,6 +555,7 @@ export class RecordingService {
       mic: includeMic,
       systemAudio: includeSystemAudio,
       bestQuality,
+      strategy: this.chrome.capabilities?.offscreen === false ? 'page' : undefined,
     });
 
     const context = this.actor.getSnapshot().context;

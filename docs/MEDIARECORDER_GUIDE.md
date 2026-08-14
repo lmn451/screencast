@@ -1,6 +1,6 @@
 # MediaRecorder Failure Modes & Recovery Strategies
 
-A comprehensive guide for screen capture extensions based on the CaptureCast codebase and browser platform research.
+A comprehensive guide for screen capture extensions based on the ScreenSilo codebase and browser platform research.
 
 ---
 
@@ -606,4 +606,4 @@ const CODEC_PRIORITY = [
 
 ---
 
-_Generated from analysis of CaptureCast codebase and MDN/Chromium documentation._
+_Generated from analysis of ScreenSilo codebase and MDN/Chromium documentation._

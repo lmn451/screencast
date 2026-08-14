@@ -1,4 +1,4 @@
-// Message schemas and validation for CaptureCast
+// Message schemas and validation for ScreenSilo
 // Phase 0.5: must be defined before any message consumer
 
 // Message type constants

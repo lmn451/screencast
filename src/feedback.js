@@ -1,4 +1,4 @@
-// Non-intrusive user feedback utilities for CaptureCast
+// Non-intrusive user feedback utilities for ScreenSilo
 
 /**
  * Shows a toast notification.

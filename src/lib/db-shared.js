@@ -1,11 +1,13 @@
 // Shared IndexedDB constants and the canonical openDB() helper.
 //
-// All modules that need access to CaptureCast's IndexedDB MUST import openDB
+// All modules that need access to ScreenSilo's IndexedDB MUST import openDB
 // from here so the upgrade handler is defined in exactly one place and all
 // callers agree on schema. Hardcoded `indexedDB.open(...)` calls scattered
 // across the codebase are a recipe for VersionError races and silent data
 // loss; don't reintroduce them.
 
+// Keep the original database name across the public rebrand so extension
+// updates retain recordings created by earlier development builds.
 export const DB_NAME = 'CaptureCastDB';
 export const DB_VERSION = 3;
 export const STORE_RECORDINGS = 'recordings';
@@ -13,7 +15,7 @@ export const STORE_CHUNKS = 'chunks';
 export const DIAG_STORE = 'diagnostics';
 
 /**
- * Open the CaptureCast IndexedDB.
+ * Open the ScreenSilo IndexedDB.
  * Creates all three object stores (`recordings`, `chunks`, `diagnostics`) if
  * they don't already exist. Safe to call from any extension context.
  *

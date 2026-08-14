@@ -20,13 +20,21 @@
       "128": "icons/icon-128.png"
     }
   },
-  "permissions": ["activeTab", "scripting", "offscreen", "storage", "alarms"],
+  "permissions": ["activeTab", "scripting", "storage", "alarms"],
   "background": {
-    "service_worker": "build/background.js",
+    "scripts": ["build/background.js"],
     "type": "module"
   },
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'self'"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "screensilo@subagentura.tech",
+      "data_collection_permissions": {
+        "required": ["none"]
+      }
+    }
   },
   "web_accessible_resources": []
 }

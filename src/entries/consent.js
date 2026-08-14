@@ -1,4 +1,4 @@
-// Consent flow for CaptureCast
+// Consent flow for ScreenSilo
 // Shown before recording starts to inform users of what's being captured
 
 const MODE_LABELS = {
@@ -30,20 +30,20 @@ function buildCaptureList(mode, mic, systemAudio, bestQuality) {
   const items = [];
 
   // Screen/window/tab capture
-  items.push(`<strong>${MODE_LABELS[mode] || mode}</strong> will be captured`);
+  items.push({ emphasis: MODE_LABELS[mode] || mode, text: ' will be captured' });
 
   // Audio options
   if (mic && systemAudio) {
-    items.push('Microphone audio will be included');
-    items.push('System/tab audio will be included');
+    items.push({ text: 'Microphone audio will be included' });
+    items.push({ text: 'System/tab audio will be included' });
   } else if (mic) {
-    items.push('Microphone audio will be included');
+    items.push({ text: 'Microphone audio will be included' });
   } else if (systemAudio) {
-    items.push('System/tab audio will be included');
+    items.push({ text: 'System/tab audio will be included' });
   }
 
   if (bestQuality) {
-    items.push('Best quality enabled (source resolution, up to 60 FPS)');
+    items.push({ text: 'Best quality enabled (source resolution, up to 60 FPS)' });
   }
 
   return items;
@@ -80,12 +80,23 @@ async function init() {
 
     if (!listEl || !noteEl || !btnContinue || !btnCancel) {
       console.error('[Consent] Required DOM elements not found');
-      alert('CaptureCast: Consent page failed to load properly. Please try again.');
+      alert('ScreenSilo: Consent page failed to load properly. Please try again.');
       return;
     }
 
     const items = buildCaptureList(mode, mic, systemAudio, bestQuality);
-    listEl.innerHTML = items.map((item) => `<li>${item}</li>`).join('');
+    listEl.replaceChildren();
+    for (const item of items) {
+      const listItem = document.createElement('li');
+      if (item.emphasis) {
+        const emphasis = document.createElement('strong');
+        emphasis.textContent = item.emphasis;
+        listItem.append(emphasis, document.createTextNode(item.text));
+      } else {
+        listItem.textContent = item.text;
+      }
+      listEl.appendChild(listItem);
+    }
 
     // Render note
     noteEl.textContent = buildNote(mode, mic, systemAudio) || 'Everything stays on your device.';
@@ -122,7 +133,7 @@ async function init() {
               noteEl.style.color = '#c5221f';
               noteEl.textContent = `Error: ${errMsg}`;
               noteEl.style.background = '#fce8e6';
-              alert('CaptureCast: Failed to start recording — ' + errMsg);
+              alert('ScreenSilo: Failed to start recording — ' + errMsg);
               return;
             }
             if (res?.ok) {
@@ -133,7 +144,7 @@ async function init() {
               noteEl.style.color = '#c5221f';
               noteEl.textContent = `Error: ${errMsg}`;
               noteEl.style.background = '#fce8e6';
-              alert('CaptureCast: ' + errMsg);
+              alert('ScreenSilo: ' + errMsg);
               trackConsent('failed', { mode, mic, systemAudio, bestQuality, error: errMsg });
             }
           }
@@ -143,7 +154,7 @@ async function init() {
         noteEl.style.color = '#c5221f';
         noteEl.textContent = `Error: ${e.message || 'Failed to communicate with extension'}`;
         noteEl.style.background = '#fce8e6';
-        alert('CaptureCast: Failed to start recording. The extension may need to be reloaded.');
+        alert('ScreenSilo: Failed to start recording. The extension may need to be reloaded.');
       }
     });
 
@@ -154,7 +165,7 @@ async function init() {
     });
   } catch (e) {
     console.error('[Consent] Initialization failed:', e);
-    alert('CaptureCast: Consent page failed to initialize: ' + (e.message || e));
+    alert('ScreenSilo: Consent page failed to initialize: ' + (e.message || e));
   }
 }
 

@@ -1,6 +1,6 @@
-# Contributing to CaptureCast
+# Contributing to ScreenSilo
 
-Thank you for your interest in contributing to CaptureCast! This document provides guidelines and instructions for contributing.
+Thank you for your interest in contributing to ScreenSilo! This document provides guidelines and instructions for contributing.
 
 ## Code of Conduct
 
@@ -22,8 +22,8 @@ Thank you for your interest in contributing to CaptureCast! This document provid
 1. Fork and clone the repository:
 
 ```bash
-git clone https://github.com/yourusername/capturecast.git
-cd capturecast
+git clone https://github.com/lmn451/screencast.git
+cd screencast
 ```
 
 2. Install dependencies:
@@ -344,8 +344,9 @@ New permissions require:
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the same license as the project.
+By contributing, you agree that your contributions will be licensed under the
+project's [MIT License](LICENSE).
 
 ---
 
-Thank you for contributing to CaptureCast! 🚀
+Thank you for contributing to ScreenSilo! 🚀

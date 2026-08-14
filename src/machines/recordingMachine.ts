@@ -1,5 +1,5 @@
 /**
- * CaptureCast Recording State Machine
+ * ScreenSilo Recording State Machine
  * XState v5 Pure Implementation
  *
  * Key principle: The machine is PURE (state + assign only).
@@ -98,7 +98,12 @@ export const recordingMachine = setup({
     }),
 
     determineStrategy: assign({
-      strategy: ({ context }) => (context.options.includeMic ? 'page' : 'offscreen'),
+      strategy: ({ context, event }) =>
+        event.type === 'START' && event.strategy
+          ? event.strategy
+          : context.options.includeMic
+            ? 'page'
+            : 'offscreen',
     }),
 
     updateLastActivity: assign({

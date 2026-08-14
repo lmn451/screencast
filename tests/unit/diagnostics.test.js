@@ -17,7 +17,7 @@ import {
 import 'fake-indexeddb/auto';
 
 // Use the shared DB constants
-const DB_NAME = 'capturecast-db';
+const DB_NAME = 'screensilo-db';
 const DB_VERSION = 3;
 
 describe('diagnostics.js', () => {

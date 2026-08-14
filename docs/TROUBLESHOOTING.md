@@ -1,6 +1,6 @@
-# Troubleshooting CaptureCast
+# Troubleshooting ScreenSilo
 
-This guide helps you resolve common issues with CaptureCast.
+This guide helps you resolve common issues with ScreenSilo.
 
 ## Recording Issues
 
@@ -28,7 +28,7 @@ This guide helps you resolve common issues with CaptureCast.
    - Extension may have crashed or failed to load
    - **Solution**:
      - Go to `chrome://extensions/`
-     - Find CaptureCast
+     - Find ScreenSilo
      - Click the reload icon
      - Try again
 
@@ -227,7 +227,7 @@ This guide helps you resolve common issues with CaptureCast.
    - Other extensions consuming resources
    - **Solution**:
      - Disable other extensions temporarily
-     - Test in incognito with only CaptureCast enabled
+     - Test in incognito with only ScreenSilo enabled
 
 ### Browser Becomes Slow During Recording
 
@@ -246,12 +246,12 @@ This guide helps you resolve common issues with CaptureCast.
 
 ### Extension Icon Missing
 
-**Symptom**: Can't find CaptureCast icon in browser.
+**Symptom**: Can't find ScreenSilo icon in browser.
 
 **Solutions**:
 
 1. Click the puzzle piece icon (Extensions menu)
-2. Find CaptureCast and click the pin icon
+2. Find ScreenSilo and click the pin icon
 3. Icon will appear in toolbar
 
 ### Extension Not Loading
@@ -311,6 +311,9 @@ This guide helps you resolve common issues with CaptureCast.
 3. Clear browser data manually:
    - F12 → Application → IndexedDB → CaptureCastDB → Delete
 
+   `CaptureCastDB` is the intentionally preserved legacy storage identifier.
+   ScreenSilo keeps it so upgrades retain existing local recordings.
+
 ## Debugging
 
 ### Viewing Console Logs
@@ -320,7 +323,7 @@ For developers and advanced troubleshooting:
 1. **Background Service Worker**:
 
    - Go to `chrome://extensions/`
-   - Find CaptureCast
+   - Find ScreenSilo
    - Click "service worker" link
    - View console logs
 
@@ -382,8 +385,8 @@ When reporting issues, include:
 
 ### Where to Get Help
 
-- **GitHub Issues**: https://github.com/yourusername/capturecast/issues
-- **Discussions**: https://github.com/yourusername/capturecast/discussions
+- **GitHub Issues**: https://github.com/lmn451/screencast/issues
+- **Support email**: hello@subagentura.tech
 
 ### Reporting Bugs
 

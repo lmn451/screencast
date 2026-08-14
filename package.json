@@ -1,11 +1,16 @@
 {
-  "name": "screencast-e2e",
+  "name": "screensilo-extension",
   "type": "module",
   "private": true,
-  "version": "0.2.1",
-  "description": "Playwright E2E tests for CaptureCast stop feature",
+  "version": "0.2.2",
+  "description": "Private, local screen recording for Chromium browsers",
+  "license": "MIT",
   "scripts": {
     "build": "node esbuild.config.js",
+    "package": "pnpm run build && ./scripts/package.sh",
+    "package:firefox": "pnpm run build && ./scripts/package.sh firefox",
+    "package:all": "pnpm run build && ./scripts/package.sh && ./scripts/package.sh firefox && ./scripts/package-source.sh",
+    "package:source": "./scripts/package-source.sh",
     "dev": "node esbuild.config.js --watch",
     "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
     "test:unit": "node --experimental-vm-modules node_modules/jest/bin/jest.js tests/unit",
@@ -18,7 +23,8 @@
     "e2e:stop": "playwright test tests/e2e/stop -c tests/e2e/playwright.config.ts",
     "e2e": "playwright test -c tests/e2e/playwright.config.ts",
     "e2e:list": "playwright test -c tests/e2e/playwright.config.ts --list",
-    "e2e:ci": "xvfb-run -a --server-args='-screen 0 1920x1080x24' pnpm run e2e"
+    "e2e:ci": "xvfb-run -a --server-args='-screen 0 1920x1080x24' pnpm run e2e",
+    "store-assets": "node scripts/generate-store-assets.mjs"
   },
   "devDependencies": {
     "@playwright/test": "^1.55.0",

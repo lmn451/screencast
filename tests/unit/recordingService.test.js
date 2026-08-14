@@ -169,6 +169,24 @@ describe('startRecording', () => {
     });
   });
 
+  it('uses the recorder page when the browser does not support offscreen documents', async () => {
+    const chrome = makeStubChrome({ capabilities: { offscreen: false } });
+    const svc = createRecordingService(chrome);
+
+    const result = await svc.startRecording('screen', false, false);
+
+    expect(result.ok).toBe(true);
+    expect(svc.getState().strategy).toBe('page');
+    expect(svc.getState().options.includeMic).toBe(false);
+    expect(chrome.offscreen.createDocument).not.toHaveBeenCalled();
+    expect(chrome.tabs.create).toHaveBeenCalledWith({
+      url: expect.stringMatching(
+        /^chrome-extension:\/\/test\/recorder\.html\?id=[0-9a-f-]{36}&mode=screen&mic=0&sys=0&best=0$/i
+      ),
+      active: true,
+    });
+  });
+
   it('forwards best quality to the offscreen recorder and machine state', async () => {
     const chrome = makeStubChrome();
     const svc = createRecordingService(chrome);

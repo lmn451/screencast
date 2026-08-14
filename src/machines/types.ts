@@ -1,5 +1,5 @@
 /**
- * CaptureCast XState v5 Type Definitions
+ * ScreenSilo XState v5 Type Definitions
  * Phase: Implementation
  */
 
@@ -55,6 +55,7 @@ export type RecordingEvent =
       mic?: boolean;
       systemAudio?: boolean;
       bestQuality?: boolean;
+      strategy?: RecordingStrategy;
     }
   | { type: 'STOP' }
   | { type: 'OFFSCREEN_STARTED'; recordingId: string }

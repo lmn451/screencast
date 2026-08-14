@@ -2,6 +2,15 @@
 
 ## 0.2.2 (Unreleased)
 
+### Brand and Release
+
+- Renamed the extension from CaptureCast to ScreenSilo.
+- Updated visible UI, download names, documentation, and store metadata for the new brand.
+- Disabled verbose production logging.
+- Removed the unused optional `notifications` permission.
+- Added clean builds and an explicit production-bundle allowlist for store packages.
+- Preserved the legacy local database identifier so existing recordings remain available after updating.
+
 ### New Features
 
 - Added: Storage quota checking before starting recordings

@@ -1,4 +1,4 @@
-// Log redaction utilities for CaptureCast
+// Log redaction utilities for ScreenSilo
 // Phase 6: Ensure sensitive data is NEVER logged
 
 /**

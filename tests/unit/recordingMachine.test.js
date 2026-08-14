@@ -103,6 +103,14 @@ describe('recordingMachine — happy path (idle → starting → recording → s
     actor.stop();
   });
 
+  it('uses an explicitly requested page strategy without enabling the microphone', () => {
+    const actor = startActor();
+    actor.send({ type: 'START', mode: 'tab', mic: false, strategy: 'page' });
+    expect(actor.getSnapshot().context.strategy).toBe('page');
+    expect(actor.getSnapshot().context.options.includeMic).toBe(false);
+    actor.stop();
+  });
+
   it('RECORDER_DATA from stopping → saved (page strategy path)', () => {
     const actor = startActor();
     actor.send({ type: 'START', mode: 'tab', mic: true });

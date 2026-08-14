@@ -1,15 +1,14 @@
-# CaptureCast Chrome Extension Permission Matrix
+# ScreenSilo Chrome Extension Permission Matrix
 
 ## Current Manifest Permissions
 
 ```json
 {
-  "permissions": ["activeTab", "scripting", "offscreen"],
-  "optional_permissions": ["notifications"]
+  "permissions": ["activeTab", "scripting", "offscreen", "storage", "alarms"]
 }
 ```
 
-**Critical Finding**: The extension does NOT request `desktopCapture` permission, which is typically required for screen capture extensions. Instead, CaptureCast relies on `getDisplayMedia()` from the offscreen/recorder page contexts.
+**Critical Finding**: The extension does NOT request `desktopCapture` permission, which is typically required for screen capture extensions. Instead, ScreenSilo relies on `getDisplayMedia()` from the offscreen/recorder page contexts.
 
 ---
 
@@ -75,6 +74,8 @@ const useOffscreen = !STATE.includeMic && canUseOffscreen();
 | `getUserMedia({audio:true})`        | Recorder Page             | None                         | **YES** (first time)  | Graceful degradation (recording continues without mic) |
 | `chrome.scripting.executeScript()`  | Background Service Worker | `scripting`                  | No                    | Silent failure, overlay not injected                   |
 | `chrome.offscreen.createDocument()` | Background Service Worker | `offscreen`                  | No                    | `chrome.offscreen undefined`                           |
+| `chrome.storage.local.get/set()`    | Background Service Worker | `storage`                    | No                    | Recovery snapshot unavailable                          |
+| `chrome.alarms.create()`            | Background Service Worker | `alarms`                     | No                    | Periodic reconciliation unavailable                    |
 
 ---
 
@@ -334,15 +335,11 @@ case 'AbortError':
 
 ## Recommendations
 
-### 1. Add desktopCapture Permission (Optional)
+### 1. Keep capture user-controlled
 
-If you want more reliable screen capture, consider adding:
-
-```json
-"permissions": ["desktopCapture"]
-```
-
-This provides access to `chrome.desktopCapture.captureOffscreenTab()` which has different behavior.
+Continue using `getDisplayMedia()` so the browser presents its native picker
+for every capture. Do not add `desktopCapture`, `tabCapture`, or broad host
+permissions unless a future feature has a demonstrated need for them.
 
 ### 2. Pre-request Microphone Permission
 

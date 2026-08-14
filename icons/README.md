@@ -1,4 +1,4 @@
-# Icons for CaptureCast
+# Icons for ScreenSilo
 
 This folder should contain the packaged extension icons referenced in manifest.json:
 

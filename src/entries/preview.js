@@ -230,7 +230,7 @@ if (typeof window !== 'undefined' && window.location.search.includes('test')) {
       } catch (e) {
         logger.error('Failed to load from DB:', e);
         document.body.textContent = 'Failed to load recording: ' + e.message;
-        alert('CaptureCast: Failed to load recording — ' + e.message);
+        alert('ScreenSilo: Failed to load recording — ' + e.message);
         return;
       }
     }
@@ -242,7 +242,7 @@ if (typeof window !== 'undefined' && window.location.search.includes('test')) {
 
     if (!video) {
       logger.error('Video element not found');
-      alert('CaptureCast: Preview page is missing the video player. Please try again.');
+      alert('ScreenSilo: Preview page is missing the video player. Please try again.');
       return;
     }
 
@@ -255,7 +255,7 @@ if (typeof window !== 'undefined' && window.location.search.includes('test')) {
     // Prefer createdAt from DB; fall back to "now" only if missing (should be rare).
     const tsSource = recordCreatedAt ?? Date.now();
     const tsForName = new Date(tsSource).toISOString().replaceAll(/[:.]/g, '-');
-    const defaultBaseName = `CaptureCast-${tsForName}`;
+    const defaultBaseName = `ScreenSilo-${tsForName}`;
 
     // Show current filename base in the input: saved name if present, otherwise default.
     // (Input holds base name only, without extension)
@@ -281,7 +281,7 @@ if (typeof window !== 'undefined' && window.location.search.includes('test')) {
       url = URL.createObjectURL(blob);
     } catch (e) {
       logger.error('Failed to create object URL from blob:', e);
-      alert('CaptureCast: Failed to load video for preview. The recording may be corrupted.');
+      alert('ScreenSilo: Failed to load video for preview. The recording may be corrupted.');
       return;
     }
     video.src = url;
@@ -371,7 +371,7 @@ if (typeof window !== 'undefined' && window.location.search.includes('test')) {
           saveFile(blob, filename);
         } catch (e) {
           logger.error('Failed to save/download file:', e);
-          alert('CaptureCast: Failed to download recording: ' + (e.message || e));
+          alert('ScreenSilo: Failed to download recording: ' + (e.message || e));
         }
       });
     }
@@ -389,7 +389,7 @@ if (typeof window !== 'undefined' && window.location.search.includes('test')) {
           await deleteRecording(id);
           document.body.innerHTML = '<h1>Recording Deleted</h1><p>You can close this tab.</p>';
         } catch (e) {
-          alert('CaptureCast: Failed to delete recording: ' + e.message);
+          alert('ScreenSilo: Failed to delete recording: ' + e.message);
         }
       });
       actionsContainer.appendChild(deleteBtn);
@@ -402,13 +402,13 @@ if (typeof window !== 'undefined' && window.location.search.includes('test')) {
           chrome.tabs.create({ url: 'recordings.html' });
         } catch (e) {
           logger.error('Failed to open recordings page:', e);
-          alert('CaptureCast: Failed to open recordings page.');
+          alert('ScreenSilo: Failed to open recordings page.');
         }
       });
       actionsContainer.appendChild(viewAllBtn);
     }
   } catch (e) {
     logger.error('Preview page initialization failed:', e);
-    alert('CaptureCast: Preview page failed to load: ' + (e.message || e));
+    alert('ScreenSilo: Preview page failed to load: ' + (e.message || e));
   }
 })();

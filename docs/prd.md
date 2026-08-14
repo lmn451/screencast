@@ -1,4 +1,4 @@
-Product Requirements Document: CaptureCast Browser Extension
+Product Requirements Document: ScreenSilo Browser Extension
 Author: Lead Product Architect
 Status: Draft
 Version: 1.0

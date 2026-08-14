@@ -1,8 +1,8 @@
-# Overlay Injection Security Analysis - CaptureCast
+# Overlay Injection Security Analysis - ScreenSilo
 
 ## Executive Summary
 
-This document analyzes the security considerations of the overlay injection system in CaptureCast, a Chrome extension for screen recording. The overlay provides a "Stop" button injected into the user's active tab during recording.
+This document analyzes the security considerations of the overlay injection system in ScreenSilo, a Chrome extension for screen recording. The overlay provides a "Stop" button injected into the user's active tab during recording.
 
 ---
 

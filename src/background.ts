@@ -1,5 +1,5 @@
 /**
- * CaptureCast Background Service Worker Entry Point
+ * ScreenSilo Background Service Worker Entry Point
  * XState v5 with Recording Service
  *
  * Bundled by esbuild from this TypeScript source.
@@ -35,6 +35,11 @@ const RATE_LIMIT_MAX = 50;
 // CHROME API WRAPPER
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// Firefox does not implement chrome.offscreen. Resolve it dynamically so the
+// shared background bundle can feature-detect the Chromium-only API without
+// invoking or statically requiring it in Firefox.
+const optionalOffscreenAPI = Reflect.get(chrome, 'offscreen') as typeof chrome.offscreen | undefined;
+
 const chromeAPI = {
   storage: {
     get: (key: string) => chrome.storage.local.get(key),
@@ -60,9 +65,14 @@ const chromeAPI = {
       reasons: chrome.offscreen.CreateParameters['reasons'];
       justification: string;
     }) =>
-      chrome.offscreen.createDocument(options),
-    closeDocument: () => chrome.offscreen.closeDocument(),
-    hasDocument: () => chrome.offscreen.hasDocument(),
+      optionalOffscreenAPI
+        ? optionalOffscreenAPI.createDocument(options)
+        : Promise.reject(new Error('Offscreen documents are not supported by this browser')),
+    closeDocument: () => optionalOffscreenAPI?.closeDocument() ?? Promise.resolve(),
+    hasDocument: () => optionalOffscreenAPI?.hasDocument() ?? Promise.resolve(false),
+  },
+  capabilities: {
+    offscreen: typeof optionalOffscreenAPI?.hasDocument === 'function',
   },
   action: {
     setBadgeBackgroundColor: (options: { color: string }) =>
@@ -144,14 +154,16 @@ async function hasLiveRecorderTab(recordingId: string): Promise<boolean> {
   }
 }
 
-async function hasLikelyLiveSnapshot(snapshot: SessionSnapshotForReconcile | undefined): Promise<boolean> {
+async function hasLikelyLiveSnapshot(
+  snapshot: SessionSnapshotForReconcile | undefined
+): Promise<boolean> {
   if (!snapshot?.recordingId || snapshot.status === 'idle') {
     return false;
   }
 
   if (snapshot.strategy === 'offscreen') {
     try {
-      return await chrome.offscreen.hasDocument();
+      return (await optionalOffscreenAPI?.hasDocument()) ?? false;
     } catch {
       return false;
     }
@@ -204,9 +216,7 @@ async function reconcileUnfinishedSessions(): Promise<void> {
 
   try {
     result = await chrome.storage.local.get(SESSION_SNAPSHOT_KEY);
-    snapshot = result[SESSION_SNAPSHOT_KEY] as
-      | SessionSnapshotForReconcile
-      | undefined;
+    snapshot = result[SESSION_SNAPSHOT_KEY] as SessionSnapshotForReconcile | undefined;
 
     if (await hasLikelyLiveSnapshot(snapshot)) {
       skipRecordingId = snapshot?.recordingId ?? null;
@@ -363,7 +373,7 @@ chrome.runtime.onStartup.addListener(async () => {
 
 // Periodic reconciliation via chrome.alarms (setInterval does not survive MV3
 // service-worker suspension). A named periodic alarm fires every 5 minutes.
-const RECONCILE_ALARM_NAME = 'capturecast-reconcile';
+const RECONCILE_ALARM_NAME = 'screensilo-reconcile';
 chrome.alarms.create(RECONCILE_ALARM_NAME, { periodInMinutes: 5 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {

@@ -10,7 +10,7 @@ const hasChunks = jest.fn();
 const markRecordingRecoverable = jest.fn(async () => undefined);
 
 jest.unstable_mockModule('../../src/services/recordingService.js', () => ({
-  CHECKPOINT_ALARM_NAME: 'capturecast-checkpoint',
+  CHECKPOINT_ALARM_NAME: 'screensilo-checkpoint',
   createRecordingService: jest.fn(() => ({
     getState: () => serviceState,
     handleMessage: jest.fn(),

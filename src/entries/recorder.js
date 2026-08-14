@@ -93,13 +93,11 @@ async function requestDisplayStream(wantSys, bestQuality, status, startBtn) {
     const isPermissionDenied =
       captureError.name === 'NotAllowedError' || captureError.name === 'AbortError';
     if (isPermissionDenied) {
-      alert(
-        'CaptureCast: Screen capture permission was denied. Please allow access and try again.'
-      );
+      alert('ScreenSilo: Screen capture permission was denied. Please allow access and try again.');
       status.textContent = 'Screen capture permission denied.';
     } else {
       alert(
-        'CaptureCast: Failed to start screen capture: ' + (captureError.message || captureError)
+        'ScreenSilo: Failed to start screen capture: ' + (captureError.message || captureError)
       );
       status.textContent = 'Failed to capture screen: ' + captureError.message;
     }
@@ -150,7 +148,7 @@ async function start() {
 
   if (!status || !preview || !startBtn || !stopBtn) {
     logger.error('Required DOM elements not found');
-    alert('CaptureCast: Recorder page failed to load properly. Please close and try again.');
+    alert('ScreenSilo: Recorder page failed to load properly. Please close and try again.');
     return;
   }
 
@@ -192,7 +190,7 @@ async function start() {
         const micMsg = isMicDenied
           ? 'Microphone permission denied. Recording without mic.'
           : 'Microphone request failed. Recording without mic.';
-        alert('CaptureCast: ' + micMsg);
+        alert('ScreenSilo: ' + micMsg);
         status.textContent = micMsg;
       }
     }
@@ -308,7 +306,7 @@ async function start() {
     }
     mediaStream = null;
     mediaRecorder = null;
-    alert('CaptureCast: Recording failed to start — ' + details);
+    alert('ScreenSilo: Recording failed to start — ' + details);
     startBtn.classList.remove('hidden');
   }
 }

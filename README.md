@@ -1,6 +1,12 @@
-# Load This Extension Unpacked (Chromium Browsers)
+# ScreenSilo
 
-These instructions show how to load this project as an unpacked browser extension in Chromium-based browsers (Chrome, Edge, Brave, Opera, Vivaldi).
+ScreenSilo is a private, local screen recorder for Chromium browsers. It records
+a user-selected tab, window, or screen without an account, upload service, or
+analytics pipeline.
+
+## Load ScreenSilo unpacked
+
+These instructions show how to load ScreenSilo as an unpacked browser extension in Chromium-based browsers (Chrome, Edge, Brave, Opera, Vivaldi).
 
 The folder you will select is the one that contains `manifest.json` — the **root of this repository**.
 
@@ -15,7 +21,9 @@ pnpm run build       # bundles into build/
 pnpm run dev         # watch mode
 ```
 
-For a release zip, run `pnpm run build && ./scripts/package.sh`. The packager only includes `manifest.json`, the HTML pages at the root, `icons/`, and `build/*.js` (no sourcemaps, no source).
+For a release zip, run `pnpm run package`. The packager only includes
+`manifest.json`, the HTML pages at the root, `icons/`, and an explicit allowlist
+of production bundles (no sourcemaps, tests, or source).
 
 ## Repository Layout
 
@@ -151,3 +159,7 @@ For distribution, Chromium can pack your extension into a `.crx` plus a private 
 
 - Chrome: on `chrome://extensions`, click "Pack extension" (visible in Developer Mode) and follow the prompts.
 - Most dev workflows prefer unpacked during development and packed only for releases.
+
+## License
+
+ScreenSilo is available under the [MIT License](LICENSE).

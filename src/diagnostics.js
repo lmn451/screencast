@@ -1,4 +1,4 @@
-// Persistent diagnostics for CaptureCast
+// Persistent diagnostics for ScreenSilo
 // Stores structured diagnostic entries in IndexedDB for debugging
 
 import { DIAG_STORE, openDB } from './lib/db-shared.js';
