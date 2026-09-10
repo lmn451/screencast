@@ -292,7 +292,7 @@ async function seedGallery(page, posterUrl) {
     const previewVideo = new Blob(videoChunks, { type: preferredType });
 
     const db = await new Promise((resolve, reject) => {
-      const request = indexedDB.open('CaptureCastDB', 3);
+      const request = indexedDB.open('CaptureCastDB', 4);
       request.onerror = () => reject(request.error);
       request.onsuccess = () => resolve(request.result);
     });

@@ -1,17 +1,47 @@
 // Diagnostics page for ScreenSilo
 // Exports structured diagnostic logs from IndexedDB
 
-import { DIAG_STORE, openDB } from '../lib/db-shared.js';
+import { DIAG_ORDER_INDEX, DIAG_STORE, openDB } from '../lib/db-shared.js';
 import { redactDiagnosticsEntry } from '../diagnostics.js';
 
 async function getAllDiagnostics() {
   const db = await openDB();
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(DIAG_STORE, 'readonly');
-    const store = tx.objectStore(DIAG_STORE);
-    const req = store.getAll();
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
+    let tx;
+    let requestError;
+    let entries = [];
+    let settled = false;
+    const close = () => {
+      try {
+        db.close();
+      } catch {
+        // Ignore repeated closes during error handling.
+      }
+    };
+    const settle = (error) => {
+      if (settled) return;
+      settled = true;
+      close();
+      if (error) reject(error);
+      else resolve(entries);
+    };
+
+    try {
+      tx = db.transaction(DIAG_STORE, 'readonly');
+      tx.oncomplete = () => settle();
+      tx.onerror = () => settle(tx.error || requestError || new Error('Diagnostics read failed'));
+      tx.onabort = () => settle(tx.error || requestError || new Error('Diagnostics read aborted'));
+      const store = tx.objectStore(DIAG_STORE);
+      const req = store.index(DIAG_ORDER_INDEX).getAll();
+      req.onsuccess = () => {
+        entries = req.result || [];
+      };
+      req.onerror = () => {
+        requestError = req.error;
+      };
+    } catch (error) {
+      settle(error);
+    }
   });
 }
 
@@ -45,13 +75,22 @@ function renderEntries(entries) {
   }
 
   totalEl.textContent = String(entries.length);
-  latestEl.textContent = formatTimestamp(entries[entries.length - 1].ts);
+  const latest = entries.reduce(
+    (current, entry) =>
+      !current ||
+      entry.ts > current.ts ||
+      (entry.ts === current.ts && entry.sequence > current.sequence)
+        ? entry
+        : current,
+    null
+  );
+  latestEl.textContent = formatTimestamp(latest.ts);
   exportBtn.disabled = false;
 
   // Sort newest first, show last 200
   const shown = entries
     .slice()
-    .sort((a, b) => b.ts - a.ts)
+    .sort((a, b) => b.ts - a.ts || b.sequence - a.sequence)
     .slice(0, 200);
 
   listEl.replaceChildren();
@@ -95,11 +134,36 @@ function downloadJSON(data) {
 async function clearDiagnostics() {
   const db = await openDB();
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(DIAG_STORE, 'readwrite');
-    const store = tx.objectStore(DIAG_STORE);
-    const req = store.clear();
-    req.onsuccess = () => resolve();
-    req.onerror = () => reject(req.error);
+    let tx;
+    let requestError;
+    let settled = false;
+    const close = () => {
+      try {
+        db.close();
+      } catch {
+        // Ignore repeated closes during error handling.
+      }
+    };
+    const settle = (error) => {
+      if (settled) return;
+      settled = true;
+      close();
+      if (error) reject(error);
+      else resolve();
+    };
+
+    try {
+      tx = db.transaction(DIAG_STORE, 'readwrite');
+      tx.oncomplete = () => settle();
+      tx.onerror = () => settle(tx.error || requestError || new Error('Diagnostics clear failed'));
+      tx.onabort = () => settle(tx.error || requestError || new Error('Diagnostics clear aborted'));
+      const req = tx.objectStore(DIAG_STORE).clear();
+      req.onerror = () => {
+        requestError = req.error;
+      };
+    } catch (error) {
+      settle(error);
+    }
   });
 }
 

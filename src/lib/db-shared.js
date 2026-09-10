@@ -9,10 +9,29 @@
 // Keep the original database name across the public rebrand so extension
 // updates retain recordings created by earlier development builds.
 export const DB_NAME = 'CaptureCastDB';
-export const DB_VERSION = 3;
+export const DB_VERSION = 4;
 export const STORE_RECORDINGS = 'recordings';
 export const STORE_CHUNKS = 'chunks';
 export const DIAG_STORE = 'diagnostics';
+// Diagnostic entries are keyed by UUID, so use their timestamp for all
+// chronological reads and retention decisions.
+export const DIAG_TIMESTAMP_INDEX = 'ts';
+// A timestamp only has millisecond precision. Keep arrival order as data so
+// equal timestamps do not fall back to UUID ordering.
+export const DIAG_SEQUENCE_INDEX = 'sequence';
+export const DIAG_ORDER_INDEX = 'tsSequence';
+
+function compareLegacyDiagnostics(a, b) {
+  const aTs = Number.isFinite(a?.ts) ? a.ts : Number.NEGATIVE_INFINITY;
+  const bTs = Number.isFinite(b?.ts) ? b.ts : Number.NEGATIVE_INFINITY;
+  if (aTs !== bTs) return aTs - bTs;
+
+  const aId = String(a?.id ?? '');
+  const bId = String(b?.id ?? '');
+  if (aId < bId) return -1;
+  if (aId > bId) return 1;
+  return 0;
+}
 
 /**
  * Open the ScreenSilo IndexedDB.
@@ -40,9 +59,40 @@ export function openDB() {
         chunkStore.createIndex('recordingId', 'recordingId', { unique: false });
       }
 
+      let diagnosticsStore;
+      let createdDiagnosticsStore = false;
       if (!db.objectStoreNames.contains(DIAG_STORE)) {
         // Diagnostic entries set their own `id` (UUID string) via createDiagnosticEntry.
-        db.createObjectStore(DIAG_STORE, { keyPath: 'id' });
+        diagnosticsStore = db.createObjectStore(DIAG_STORE, { keyPath: 'id' });
+        createdDiagnosticsStore = true;
+      } else {
+        // Existing stores are upgraded in the version-change transaction. Do
+        // not recreate them: that would discard recordings, chunks, or logs.
+        const upgradeTransaction = event.target.transaction || event.transaction;
+        diagnosticsStore = upgradeTransaction.objectStore(DIAG_STORE);
+      }
+
+      if (!diagnosticsStore.indexNames.contains(DIAG_TIMESTAMP_INDEX)) {
+        diagnosticsStore.createIndex(DIAG_TIMESTAMP_INDEX, 'ts', { unique: false });
+      }
+      if (!diagnosticsStore.indexNames.contains(DIAG_SEQUENCE_INDEX)) {
+        diagnosticsStore.createIndex(DIAG_SEQUENCE_INDEX, 'sequence', { unique: false });
+      }
+      if (!diagnosticsStore.indexNames.contains(DIAG_ORDER_INDEX)) {
+        diagnosticsStore.createIndex(DIAG_ORDER_INDEX, ['ts', 'sequence'], { unique: false });
+      }
+
+      // Version 3 diagnostics have no insertion sequence. Millisecond arrival
+      // order cannot be recovered, so choose a stable (timestamp, UUID) order
+      // and retain every existing row while adding the new metadata.
+      if (!createdDiagnosticsStore) {
+        const migrateRequest = diagnosticsStore.getAll();
+        migrateRequest.onsuccess = () => {
+          const entries = (migrateRequest.result || []).sort(compareLegacyDiagnostics);
+          entries.forEach((entry, sequence) => {
+            diagnosticsStore.put({ ...entry, sequence });
+          });
+        };
       }
     };
   });

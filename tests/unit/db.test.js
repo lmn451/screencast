@@ -1,5 +1,4 @@
 import { setupIndexedDB, clearDatabase, teardownIndexedDB } from '../lib/indexeddb-mock.js';
-import indexedDB from 'fake-indexeddb';
 
 import {
   saveChunk,
@@ -8,6 +7,15 @@ import {
   deleteRecording,
   cleanupOldRecordings,
   getAllRecordings,
+  openDB,
+  DB_NAME,
+  DB_VERSION,
+  STORE_RECORDINGS,
+  STORE_CHUNKS,
+  DIAG_STORE,
+  DIAG_TIMESTAMP_INDEX,
+  DIAG_SEQUENCE_INDEX,
+  DIAG_ORDER_INDEX,
 } from '../../src/lib/db.js';
 
 beforeEach(async () => {
@@ -20,6 +28,106 @@ afterEach(() => {
 });
 
 describe('db.js (IndexedDB-backed) unit tests', () => {
+  test('versioned migration adds the timestamp index and preserves existing data', async () => {
+    const legacyVersion = DB_VERSION - 1;
+    const legacyDiagnostics = [
+      {
+        id: 'legacy-diagnostic-z',
+        ts: 123,
+        level: 'error',
+        eventCode: 'save-failed',
+        userMessage: 'Legacy diagnostic Z',
+      },
+      {
+        id: 'legacy-diagnostic-a',
+        ts: 123,
+        level: 'error',
+        eventCode: 'save-failed',
+        userMessage: 'Legacy diagnostic A',
+      },
+      {
+        id: 'legacy-diagnostic-m',
+        ts: 123,
+        level: 'error',
+        eventCode: 'save-failed',
+        userMessage: 'Legacy diagnostic M',
+      },
+    ];
+
+    await new Promise((resolve, reject) => {
+      const request = indexedDB.open(DB_NAME, legacyVersion);
+      request.onupgradeneeded = (event) => {
+        const db = event.target.result;
+        const recordings = db.createObjectStore(STORE_RECORDINGS, { keyPath: 'id' });
+        const chunks = db.createObjectStore(STORE_CHUNKS, {
+          keyPath: ['recordingId', 'index'],
+        });
+        chunks.createIndex('recordingId', 'recordingId', { unique: false });
+        const diagnostics = db.createObjectStore(DIAG_STORE, { keyPath: 'id' });
+
+        recordings.put({
+          id: 'legacy-recording',
+          mimeType: 'video/webm',
+          createdAt: 456,
+          status: 'saved',
+        });
+        chunks.put({
+          recordingId: 'legacy-recording',
+          index: 0,
+          chunk: new Blob(['legacy chunk']),
+        });
+        legacyDiagnostics.forEach((diagnostic) => diagnostics.put(diagnostic));
+      };
+      request.onsuccess = () => {
+        request.result.close();
+        resolve();
+      };
+      request.onerror = () => reject(request.error);
+    });
+
+    const db = await openDB();
+    expect(db.version).toBe(DB_VERSION);
+
+    const migrated = await new Promise((resolve, reject) => {
+      const tx = db.transaction([STORE_RECORDINGS, STORE_CHUNKS, DIAG_STORE], 'readonly');
+      const recordings = tx.objectStore(STORE_RECORDINGS);
+      const chunks = tx.objectStore(STORE_CHUNKS);
+      const diagnostics = tx.objectStore(DIAG_STORE);
+      const result = {};
+
+      expect(diagnostics.indexNames.contains(DIAG_TIMESTAMP_INDEX)).toBe(true);
+      expect(diagnostics.indexNames.contains(DIAG_SEQUENCE_INDEX)).toBe(true);
+      expect(diagnostics.indexNames.contains(DIAG_ORDER_INDEX)).toBe(true);
+      recordings.get('legacy-recording').onsuccess = (event) => {
+        result.recording = event.target.result;
+      };
+      chunks.index('recordingId').getAll('legacy-recording').onsuccess = (event) => {
+        result.chunks = event.target.result;
+      };
+      diagnostics.index(DIAG_ORDER_INDEX).getAll().onsuccess = (event) => {
+        result.diagnostics = event.target.result;
+      };
+      tx.oncomplete = () => resolve(result);
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
+    db.close();
+
+    expect(migrated.recording).toMatchObject({ id: 'legacy-recording', createdAt: 456 });
+    expect(migrated.chunks).toHaveLength(1);
+    expect(migrated.chunks[0]).toMatchObject({ recordingId: 'legacy-recording', index: 0 });
+    expect(migrated.diagnostics).toHaveLength(legacyDiagnostics.length);
+    expect(migrated.diagnostics.map((entry) => entry.id)).toEqual([
+      'legacy-diagnostic-a',
+      'legacy-diagnostic-m',
+      'legacy-diagnostic-z',
+    ]);
+    expect(migrated.diagnostics.map((entry) => entry.sequence)).toEqual([0, 1, 2]);
+    expect(migrated.diagnostics).toEqual(
+      expect.arrayContaining(legacyDiagnostics.map((entry) => expect.objectContaining(entry)))
+    );
+  });
+
   test('saveChunk + finishRecording + getRecording: saves chunks and reassembles blob in order', async () => {
     await finishRecording('rec1', 'video/webm', 1234, 999);
 
@@ -83,7 +191,7 @@ describe('db.js (IndexedDB-backed) unit tests', () => {
 
     // mutate the old recording's createdAt to a far past time
     await new Promise((resolve) => {
-      const req = indexedDB.open('CaptureCastDB', 3);
+      const req = indexedDB.open(DB_NAME, DB_VERSION);
       req.onsuccess = () => {
         const db = req.result;
         const tx = db.transaction('recordings', 'readwrite');
