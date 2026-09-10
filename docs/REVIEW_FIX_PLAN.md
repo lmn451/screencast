@@ -8,7 +8,7 @@ Target: ScreenSilo 0.2.3, based on the reviewed marketplace branch. The branch i
 2. **Restore sessions before idle cleanup.** Separate service initialization from a real transition to idle. Preserve existing snapshots and capture contexts until liveness checks decide whether to restore or recover. Test delayed heartbeats, GET_STATE/STOP wakeups, and orphan recovery.
 3. **Mix microphone and system audio.** Use Web Audio to combine both sources into one recorded audio track. Keep single-source recording working, and release original tracks and the audio context on stop or startup failure. Verify two distinct tones survive a native MediaRecorder round trip.
 4. **Allow retries after capture denial.** Provide a safe path from failed startup back to a new session without deleting recoverable data or accepting stale lifecycle messages. Test denial followed by successful retry.
-5. **Keep diagnostics in time order.** Add a timestamp index through a data-preserving schema migration. Trim oldest entries and retrieve newest entries using that index. Test UUID/time disagreement, existing database upgrades, committed writes, and bounded storage.
+5. **Keep diagnostics in time order.** Add timestamp ordering with a persisted insertion tie breaker through a data-preserving schema migration. Trim oldest entries and retrieve newest entries using that order. Test UUID/time disagreement, equal timestamps, existing database upgrades, committed writes, and bounded storage.
 
 Luna agents at maximum effort implement the lifecycle, audio, and diagnostics work in separate file ownership groups. Each group supplies focused regression tests.
 
@@ -27,5 +27,11 @@ Luna agents at maximum effort implement the lifecycle, audio, and diagnostics wo
 
 ## Progress
 
-- Plan created; implementation pending.
+- Audio mixing implemented and independently approved after adding a three-second resume timeout and cleanup for browser-blocked audio initialization.
+- Lifecycle fixes pass cancellation, retry, GET_STATE wake, and STOP wake regression tests. Independent review pending.
+- Diagnostics migration independently approved after adding a transactionally allocated insertion sequence to resolve equal timestamps. Adversarial review verified concurrent writers, migration preservation, bounded retention, and recovery after aborted writes.
+- Integrated validation: 348 unit/integration tests and 21 native Chromium E2E tests pass. Typecheck, production packaging, and lint pass; lint reports two existing unused-variable warnings in feedback tests.
+- Release archives pass version, production-file allowlist, and integrity checks. Firefox validation reports zero errors, warnings, or notices. The review-source archive rebuilds the same packaged code (esbuild dependency-path comments differ with checkout location).
+- Version 0.2.3 prepared in both manifests, package metadata, changelog, and Firefox source-build instructions.
+- GitHub publishing and the Chrome Web Store dashboard are available. Chrome has an existing public ScreenSilo 0.2.2 listing (`higbocdfimfmcjckomeggbbigcglpdje`). Firefox and Edge publisher dashboards still require local user sign-in.
 - Beads is unavailable in the current environment (`bd` is not installed); this document records the work plan and review outcome.

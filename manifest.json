@@ -3,7 +3,7 @@
   "name": "ScreenSilo",
   "short_name": "ScreenSilo",
   "description": "Private, local screen recording for a tab, window, or entire screen.",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "icons": {
     "16": "icons/icon-16.png",
     "32": "icons/icon-32.png",

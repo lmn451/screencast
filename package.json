@@ -2,7 +2,7 @@
   "name": "screensilo-extension",
   "type": "module",
   "private": true,
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Private, local screen recording for Chromium browsers",
   "license": "MIT",
   "homepage": "https://subagentura.tech/screencast/",
