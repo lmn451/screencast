@@ -94,6 +94,8 @@ export interface SessionSnapshot {
   };
   strategy: RecordingStrategy | null;
   correlationId: string;
+  /** Recorder page tab, when the page strategy is active. */
+  recorderTabId?: number | null;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

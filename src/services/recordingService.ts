@@ -111,6 +111,22 @@ function toErrorText(error: string | StructuredError): string {
  */
 export const CHECKPOINT_ALARM_NAME = 'screensilo-checkpoint';
 
+/** State owned by one asynchronous start attempt. */
+interface StartupAttempt {
+  recordingId: string;
+  strategy: RecordingContext['strategy'];
+  cancelled: boolean;
+  recorderTabId: number | null;
+  offscreenStartRequested: boolean;
+}
+
+class StartupCancelledError extends Error {
+  constructor() {
+    super('Recording start was cancelled during initialization');
+    this.name = 'StartupCancelledError';
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // RECORDING SERVICE
 //
@@ -137,12 +153,20 @@ export class RecordingService {
   private stateChangeQueue: Promise<void> = Promise.resolve();
   private checkpointActive = false;
   private startInProgress = false;
+  private startupAttempt: StartupAttempt | null = null;
 
   constructor(chrome: ChromeAPI) {
     this.chrome = chrome;
 
     // Create XState actor
     this.actor = createActor(recordingMachine);
+
+    // Start the actor before subscribing. XState publishes its initial idle
+    // snapshot to subscribers during start; treating that publication as a
+    // real idle transition would clear a persisted live session and close its
+    // offscreen document before the first heartbeat/GET_STATE can reclaim it.
+    this.actor.start();
+    this.lastActorState = this.actor.getSnapshot().value;
 
     // Subscribe to state changes for side effects (badge, persistence, overlay).
     // Chained through a promise queue so each onStateChange fully settles before
@@ -154,8 +178,6 @@ export class RecordingService {
           console.warn('[RecordingService] onStateChange failed:', e);
         });
     });
-
-    this.actor.start();
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -297,6 +319,7 @@ export class RecordingService {
         options: { ...context.options },
         strategy: context.strategy,
         correlationId: context.correlationId,
+        recorderTabId: context.recorderTabId,
       };
       await this.chrome.storage.set({ [STORAGE_KEYS.SESSION_SNAPSHOT]: snapshot });
     } catch (e) {
@@ -315,6 +338,110 @@ export class RecordingService {
   private async clearActiveSessionArtifacts(): Promise<void> {
     await this.clearSessionSnapshot();
     await this.updateBadge('idle');
+  }
+
+  /** Wait until all queued state side effects observed so far have settled. */
+  private async settleStateChanges(): Promise<void> {
+    await this.stateChangeQueue;
+  }
+
+  /**
+   * Return whether an asynchronous startup still owns the machine. The object
+   * identity check matters when a later recording has already begun: a late
+   * resolution from an older tab/document must never arm timers or publish a
+   * start acknowledgement for the new session.
+   */
+  private isCurrentStartup(attempt: StartupAttempt): boolean {
+    const snapshot = this.actor.getSnapshot();
+    return (
+      this.startupAttempt === attempt &&
+      !attempt.cancelled &&
+      (snapshot.matches('starting') || snapshot.matches('recording')) &&
+      snapshot.context.recordingId === attempt.recordingId
+    );
+  }
+
+  private isStoppingStartup(attempt: StartupAttempt): boolean {
+    const snapshot = this.actor.getSnapshot();
+    return (
+      !attempt.cancelled &&
+      snapshot.matches('stopping') &&
+      snapshot.context.recordingId === attempt.recordingId
+    );
+  }
+
+  /** Mark startup cancelled synchronously before any asynchronous teardown. */
+  private invalidateStartup(recordingId?: string): boolean {
+    const attempt = this.startupAttempt;
+    if (!attempt || (recordingId && attempt.recordingId !== recordingId)) {
+      return false;
+    }
+    attempt.cancelled = true;
+    return true;
+  }
+
+  private async sendStartupStop(attempt: StartupAttempt | null): Promise<void> {
+    const snapshot = this.actor.getSnapshot();
+    const strategy = attempt?.strategy ?? snapshot.context.strategy;
+
+    // A stop command is best effort here. In particular, OFFSCREEN_START or
+    // getDisplayMedia may still be awaiting a picker; waiting for that request
+    // would prevent cancellation from closing the context that owns it.
+    if (strategy === 'offscreen' && (attempt == null || attempt.offscreenStartRequested)) {
+      try {
+        await this.chrome.runtime.sendMessage(buildMessage(MSG_OFFSCREEN_STOP));
+      } catch (e) {
+        console.warn('[RecordingService] Startup offscreen stop failed:', e);
+      }
+      return;
+    }
+
+    const recorderTabId = attempt?.recorderTabId ?? this.recorderTabId;
+    if (strategy === 'page' && recorderTabId != null) {
+      try {
+        await this.chrome.tabs.sendMessage(recorderTabId, buildMessage(MSG_RECORDER_STOP));
+      } catch (e) {
+        // The tab may still be loading or may already have been closed. The
+        // subsequent tabs.remove call is what aborts a pending picker.
+      }
+    }
+  }
+
+  /**
+   * Cancel a startup and tear down every resource that may have been created
+   * before the cancellation arrived. The stop command is issued before the
+   * generic cleanup so a live recorder gets a chance to flush/stop, while
+   * tabs.remove/offscreen.closeDocument still abort a pending picker.
+   */
+  private async cancelStartup(attempt: StartupAttempt | null): Promise<void> {
+    const currentContext = this.actor.getSnapshot().context;
+    const stopAttempt =
+      attempt ??
+      ({
+        recordingId: currentContext.recordingId ?? '',
+        strategy: currentContext.strategy,
+        cancelled: true,
+        recorderTabId: this.recorderTabId,
+        offscreenStartRequested: false,
+      } satisfies StartupAttempt);
+    if (attempt) attempt.cancelled = true;
+    this.clearTimers();
+
+    // Mark the machine idle immediately so late acknowledgements are rejected;
+    // invalidateStartup above makes the in-flight initializer reject as soon
+    // as its pending Chrome call settles.
+    if (this.actor.getSnapshot().matches('starting')) {
+      this.actor.send({ type: 'STOP' });
+    }
+
+    // Do not wait for the acknowledgement: the start request itself may be
+    // waiting on a browser permission picker and a test or browser runtime can
+    // keep that request pending until the document is torn down. The command
+    // is invoked synchronously before cleanup, while cleanup owns the actual
+    // tab/document close that aborts the picker.
+    void this.sendStartupStop(stopAttempt);
+    await this.cleanup();
+    await this.settleStateChanges();
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -357,10 +484,12 @@ export class RecordingService {
     includeSystemAudio: boolean,
     bestQuality: boolean,
     recordingId: string,
-    targetTabId: number | null
+    targetTabId: number | null,
+    attempt: StartupAttempt
   ): Promise<void> {
     try {
       const existing = await this.chrome.offscreen.hasDocument();
+      if (!this.isCurrentStartup(attempt)) throw new StartupCancelledError();
       if (!existing) {
         await this.chrome.offscreen.createDocument({
           url: this.chrome.runtime.getURL('offscreen.html'),
@@ -370,7 +499,10 @@ export class RecordingService {
         });
       }
 
+      if (!this.isCurrentStartup(attempt)) throw new StartupCancelledError();
+
       // Send start message to offscreen
+      attempt.offscreenStartRequested = true;
       await this.chrome.runtime.sendMessage(
         buildMessage(MSG_OFFSCREEN_START, {
           mode,
@@ -380,7 +512,11 @@ export class RecordingService {
           targetTabId: targetTabId ?? undefined,
         })
       );
+      if (!this.isCurrentStartup(attempt)) throw new StartupCancelledError();
     } catch (e) {
+      if (e instanceof StartupCancelledError || !this.isCurrentStartup(attempt)) {
+        throw new StartupCancelledError();
+      }
       console.error('[RecordingService] Failed to create offscreen document:', e);
       throw e;
     }
@@ -391,7 +527,8 @@ export class RecordingService {
     includeMic: boolean,
     includeSystemAudio: boolean,
     bestQuality: boolean,
-    recordingId: string
+    recordingId: string,
+    attempt: StartupAttempt
   ): Promise<void> {
     const params = new URLSearchParams({
       id: recordingId,
@@ -410,13 +547,43 @@ export class RecordingService {
       throw new Error('Recorder tab was not created');
     }
 
-    // Verify the tab still exists before recording service ownership.
-    await this.chrome.tabs.get(recorderTabId);
+    // Record ownership as soon as tabs.create resolves. tabs.get can race a
+    // user cancellation (or a tab close), and cleanup still needs this ID to
+    // abort the page's pending getDisplayMedia picker.
+    attempt.recorderTabId = recorderTabId;
     this.recorderTabId = recorderTabId;
     this.actor.send({
       type: 'SET_RECORDER_TAB_ID',
       tabId: recorderTabId,
     });
+
+    if (!this.isCurrentStartup(attempt)) {
+      if (this.isStoppingStartup(attempt)) return;
+      try {
+        await this.chrome.tabs.remove(recorderTabId);
+      } catch (e) {
+        // The tab may have been removed by the cancellation path already.
+      }
+      throw new StartupCancelledError();
+    }
+
+    // Verify the tab still exists before recording service ownership.
+    try {
+      await this.chrome.tabs.get(recorderTabId);
+    } catch (e) {
+      if (!this.isCurrentStartup(attempt)) throw new StartupCancelledError();
+      throw e;
+    }
+
+    if (!this.isCurrentStartup(attempt)) {
+      if (this.isStoppingStartup(attempt)) return;
+      try {
+        await this.chrome.tabs.remove(recorderTabId);
+      } catch (e) {
+        // The tab may have been removed by the cancellation path already.
+      }
+      throw new StartupCancelledError();
+    }
   }
 
   private async closeOffscreenDocumentIfIdle(): Promise<void> {
@@ -510,15 +677,32 @@ export class RecordingService {
     includeSystemAudio: boolean,
     bestQuality = false
   ): Promise<{ ok: boolean; error?: string; overlayInjected?: boolean }> {
-    const currentState = this.actor.getSnapshot().value;
-    if (currentState !== 'idle') {
-      return { ok: false, error: `Cannot start: invalid state ${currentState}` };
-    }
     if (this.startInProgress) {
       return { ok: false, error: 'Cannot start: initialization already in progress' };
     }
+
+    // Claim the start slot before any cleanup or restore awaits. This also
+    // serializes retries issued while a failed startup is being torn down.
     this.startInProgress = true;
     try {
+      let currentState = this.actor.getSnapshot().value;
+      if (currentState === 'failed') {
+        // A failed startup has no live state-machine session, but its recorder
+        // context may still be around while the error message is being handled.
+        // Close that context before accepting a retry. cleanup only tears down
+        // browser resources; it deliberately leaves any partial DB data intact.
+        await this.cleanup();
+        // The failed transition clears the persisted session through the
+        // serialized state-change queue. Wait for that clear before consulting
+        // storage below, otherwise a retry can mistake its own stale snapshot
+        // for a live session during this same turn.
+        await this.settleStateChanges();
+        currentState = this.actor.getSnapshot().value;
+      }
+      if (currentState !== 'idle' && currentState !== 'failed') {
+        return { ok: false, error: `Cannot start: invalid state ${currentState}` };
+      }
+
       // A service-worker restart loses the in-memory machine. If a live capture
       // from a previous session still exists (offscreen document / recorder tab),
       // reclaim it instead of silently starting a second recording on top.
@@ -546,7 +730,6 @@ export class RecordingService {
     // Get active tab for overlay
     const [activeTab] = await this.chrome.tabs.query({ active: true, currentWindow: true });
     this.overlayTabId = activeTab?.id ?? null;
-    this.actor.send({ type: 'SET_OVERLAY_TAB_ID', tabId: this.overlayTabId });
 
     // Send START event to machine
     this.actor.send({
@@ -557,6 +740,7 @@ export class RecordingService {
       bestQuality,
       strategy: this.chrome.capabilities?.offscreen === false ? 'page' : undefined,
     });
+    this.actor.send({ type: 'SET_OVERLAY_TAB_ID', tabId: this.overlayTabId });
 
     const context = this.actor.getSnapshot().context;
     if (!context.recordingId) {
@@ -564,10 +748,26 @@ export class RecordingService {
       return { ok: false, error: 'Failed to initialize recording session' };
     }
 
+    const attempt: StartupAttempt = {
+      recordingId: context.recordingId,
+      strategy: context.strategy,
+      cancelled: false,
+      recorderTabId: null,
+      offscreenStartRequested: false,
+    };
+    this.startupAttempt = attempt;
+
     // Inject overlay
     let overlayInjected = false;
-    if (this.overlayTabId) {
+    if (this.overlayTabId != null) {
       overlayInjected = await this.injectOverlay(this.overlayTabId);
+    }
+
+    if (!this.isCurrentStartup(attempt)) {
+      this.clearTimers();
+      await this.cleanup();
+      await this.settleStateChanges();
+      return { ok: false, error: 'Recording start was cancelled during initialization' };
     }
 
     try {
@@ -577,7 +777,8 @@ export class RecordingService {
           includeSystemAudio,
           bestQuality,
           context.recordingId,
-          this.overlayTabId
+          this.overlayTabId,
+          attempt
         );
       } else {
         await this.openRecorderTab(
@@ -585,18 +786,39 @@ export class RecordingService {
           includeMic,
           includeSystemAudio,
           bestQuality,
-          context.recordingId
+          context.recordingId,
+          attempt
         );
       }
     } catch (e) {
-      this.actor.send({ type: 'RESET' });
-      this.clearTimers();
-      if (this.overlayTabId) {
-        await this.removeOverlay(this.overlayTabId);
-        this.actor.send({ type: 'SET_OVERLAY_TAB_ID', tabId: null });
-        this.overlayTabId = null;
+      const cancelled = e instanceof StartupCancelledError || !this.isCurrentStartup(attempt);
+      const stopOwnsSession =
+        !attempt.cancelled &&
+        this.actor.getSnapshot().matches('stopping') &&
+        this.actor.getSnapshot().context.recordingId === attempt.recordingId;
+      // The acknowledgement may have moved the machine to recording before
+      // the final tab/document lookup settled. A normal STOP then owns the
+      // stopping context; do not let this stale initializer close the page
+      // before its RECORDER_DATA/OFFSCREEN_DATA response arrives.
+      if (stopOwnsSession) {
+        if (this.startupAttempt === attempt) this.startupAttempt = null;
+        return { ok: false, error: 'Recording start was cancelled during initialization' };
       }
-      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      this.clearTimers();
+      if (!cancelled && this.actor.getSnapshot().matches('starting')) {
+        this.actor.send({ type: 'RESET' });
+      }
+      await this.cleanup();
+      await this.settleStateChanges();
+      if (this.startupAttempt === attempt) this.startupAttempt = null;
+      return {
+        ok: false,
+        error: cancelled
+          ? 'Recording start was cancelled during initialization'
+          : e instanceof Error
+          ? e.message
+          : String(e),
+      };
     }
 
     const startedSnapshot = this.actor.getSnapshot();
@@ -605,8 +827,18 @@ export class RecordingService {
       startedSnapshot.matches('starting') || startedSnapshot.matches('recording');
 
     if (!isSameSession || !isActiveStart) {
+      // An acknowledgement can move the machine to recording before this
+      // initializer's final await settles. If the user then issued a normal
+      // STOP, leave the stop→data flow in charge of the live context instead
+      // of closing it here.
+      if (isSameSession && startedSnapshot.matches('stopping') && !attempt.cancelled) {
+        if (this.startupAttempt === attempt) this.startupAttempt = null;
+        return { ok: false, error: 'Recording start was cancelled during initialization' };
+      }
       this.clearTimers();
       await this.cleanup();
+      await this.settleStateChanges();
+      if (this.startupAttempt === attempt) this.startupAttempt = null;
       return { ok: false, error: 'Recording start was cancelled during initialization' };
     }
 
@@ -620,11 +852,23 @@ export class RecordingService {
     // Start checkpoint timer
     this.startCheckpointTimer();
 
+    // The resources are now fully owned by the service fields and the machine;
+    // future STOP requests can tear them down from the normal starting path.
+    if (this.startupAttempt === attempt) this.startupAttempt = null;
+
     return { ok: true, overlayInjected };
   }
 
   async stopRecording(): Promise<{ ok: boolean; error?: string }> {
-    const state = this.actor.getSnapshot().value;
+    let state = this.actor.getSnapshot().value;
+
+    // A worker wakeup starts with a fresh idle machine while the capture page
+    // or offscreen document can still be alive. Reclaim that session before
+    // deciding that STOP has nothing to act on.
+    if (state === 'idle') {
+      await this.restoreSession();
+      state = this.actor.getSnapshot().value;
+    }
 
     // The machine handles STOP from `starting` (cancels start) and idempotently
     // from `stopping`. Only reject when there's nothing to stop.
@@ -635,18 +879,10 @@ export class RecordingService {
     // If user cancels during `starting`, just return to idle and skip the
     // save-timeout / outbound stop messages (there's nothing recording yet).
     if (state === 'starting') {
-      this.actor.send({ type: 'STOP' });
-      this.clearTimers();
-      if (this.overlayTabId) {
-        try {
-          await this.chrome.tabs.sendMessage(this.overlayTabId, buildMessage(MSG_OVERLAY_REMOVE));
-        } catch (e) {
-          // Non-critical
-        }
-        await this.removeOverlay(this.overlayTabId);
-        this.actor.send({ type: 'SET_OVERLAY_TAB_ID', tabId: null });
-        this.overlayTabId = null;
-      }
+      const attempt = this.startupAttempt;
+      this.invalidateStartup(this.actor.getSnapshot().context.recordingId ?? undefined);
+      await this.cancelStartup(attempt);
+      if (this.startupAttempt === attempt) this.startupAttempt = null;
       return { ok: true };
     }
 
@@ -805,6 +1041,7 @@ export class RecordingService {
     code?: string,
     recordingId?: string
   ): Promise<void> {
+    this.invalidateStartup(recordingId);
     if (recordingId && !this.isCurrentRecording(recordingId)) {
       await this.restoreSession();
       if (recordingId && !this.isCurrentRecording(recordingId)) {
@@ -823,9 +1060,11 @@ export class RecordingService {
     });
     await this.clearActiveSessionArtifacts();
     await this.cleanup();
+    await this.settleStateChanges();
   }
 
   async handleRecorderError(error: string | StructuredError, recordingId?: string): Promise<void> {
+    this.invalidateStartup(recordingId);
     if (recordingId && !this.isCurrentRecording(recordingId)) {
       await this.restoreSession();
       if (recordingId && !this.isCurrentRecording(recordingId)) {
@@ -840,6 +1079,7 @@ export class RecordingService {
     this.actor.send({ type: 'RECORDER_ERROR', error: toErrorText(error) });
     await this.clearActiveSessionArtifacts();
     await this.cleanup();
+    await this.settleStateChanges();
   }
 
   async handleTabClosing(tabId: number): Promise<boolean> {
@@ -853,6 +1093,9 @@ export class RecordingService {
       return false;
     }
 
+    if (state === 'starting') {
+      this.invalidateStartup(snapshot.context.recordingId ?? undefined);
+    }
     this.clearTimers();
     this.actor.send({ type: 'TAB_CLOSING', tabId });
 
@@ -889,6 +1132,7 @@ export class RecordingService {
     this.clearTimers();
     this.actor.send({ type: 'RECOVERY_DISCARD', recordingId });
     await this.cleanup();
+    await this.settleStateChanges();
     return true;
   }
 
@@ -921,6 +1165,13 @@ export class RecordingService {
       return true;
     }
 
+    // Only a fresh idle machine can consume a persisted session. A live
+    // starting/failed/recoverable transition belongs to the current lifecycle
+    // and must not be overwritten by a stale snapshot or wakeup.
+    if (!machine.matches('idle')) {
+      return false;
+    }
+
     let persisted: SessionSnapshot | undefined;
     try {
       const result = await this.chrome.storage.get(STORAGE_KEYS.SESSION_SNAPSHOT);
@@ -930,10 +1181,17 @@ export class RecordingService {
       return false;
     }
 
-    if (!persisted || !isValidUUID(persisted.recordingId)) {
+    if (
+      !persisted ||
+      !isValidUUID(persisted.recordingId) ||
+      (persisted.status !== 'starting' &&
+        persisted.status !== 'recording' &&
+        persisted.status !== 'stopping')
+    ) {
       return false;
     }
 
+    let restoredRecorderTabId: number | null = null;
     if (persisted.strategy === 'offscreen') {
       let docAlive = false;
       try {
@@ -945,17 +1203,38 @@ export class RecordingService {
         return false;
       }
     } else if (persisted.strategy === 'page') {
-      const recorderTabId = await this.findRecorderTabId(persisted.recordingId);
+      const recorderTabId = await this.findRecorderTabId(
+        persisted.recordingId,
+        persisted.recorderTabId
+      );
       if (recorderTabId == null) {
         return false;
       }
-      this.recorderTabId = recorderTabId;
-      this.actor.send({ type: 'SET_RECORDER_TAB_ID', tabId: recorderTabId });
+      restoredRecorderTabId = recorderTabId;
     } else {
       return false;
     }
 
+    // START/STOP/GET_STATE can race this liveness query. Do not let a late
+    // restore replace a newly-created session.
+    if (!this.actor.getSnapshot().matches('idle')) {
+      return false;
+    }
+
     this.actor.send({ type: 'RESTORE', snapshot: persisted });
+    if (
+      !this.actor.getSnapshot().matches('recording') ||
+      this.actor.getSnapshot().context.recordingId !== persisted.recordingId
+    ) {
+      return false;
+    }
+    // RESTORE carries the recorder tab ID into the recording context in the
+    // same synchronous transition. Assign the service field only after the
+    // final idle ownership check above, so a late page lookup cannot mutate a
+    // newer startup while the machine is still idle.
+    if (restoredRecorderTabId != null) {
+      this.recorderTabId = restoredRecorderTabId;
+    }
     this.startCheckpointTimer();
     return true;
   }
@@ -991,7 +1270,22 @@ export class RecordingService {
     return { ok: true };
   }
 
-  private async findRecorderTabId(recordingId: string): Promise<number | null> {
+  private async findRecorderTabId(
+    recordingId: string,
+    persistedTabId?: number | null
+  ): Promise<number | null> {
+    // Extension pages do not receive tab URLs without the broad `tabs`
+    // permission. Persisting the owned tab ID lets a worker restart reclaim a
+    // recorder page using the narrower tab access already granted here.
+    if (persistedTabId != null) {
+      try {
+        const tab = await this.chrome.tabs.get(persistedTabId);
+        if (tab) return persistedTabId;
+      } catch {
+        // Fall through to URL matching for older snapshots or a stale ID.
+      }
+    }
+
     try {
       const tabs = await this.chrome.tabs.query({});
       for (const tab of tabs) {
@@ -1039,6 +1333,7 @@ export class RecordingService {
   }
 
   reset(): void {
+    this.invalidateStartup(this.actor.getSnapshot().context.recordingId ?? undefined);
     this.clearTimers();
     this.actor.send({ type: 'RESET' });
     this.actor.send({ type: 'SET_OVERLAY_TAB_ID', tabId: null });
@@ -1098,7 +1393,7 @@ export class RecordingService {
     }
 
     // Close recorder tab without letting a stale/missing tab abort later cleanup.
-    if (recorderTabId) {
+    if (recorderTabId != null) {
       try {
         await this.chrome.tabs.remove(recorderTabId);
       } catch (e) {
@@ -1181,6 +1476,7 @@ export class RecordingService {
         return { ok: true };
 
       case 'GET_STATE':
+        await this.restoreSession();
         return { ok: true, ...this.getState() };
 
       case 'TAB_CLOSING':

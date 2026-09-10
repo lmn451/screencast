@@ -38,7 +38,9 @@ const RATE_LIMIT_MAX = 50;
 // Firefox does not implement chrome.offscreen. Resolve it dynamically so the
 // shared background bundle can feature-detect the Chromium-only API without
 // invoking or statically requiring it in Firefox.
-const optionalOffscreenAPI = Reflect.get(chrome, 'offscreen') as typeof chrome.offscreen | undefined;
+const optionalOffscreenAPI = Reflect.get(chrome, 'offscreen') as
+  | typeof chrome.offscreen
+  | undefined;
 
 const chromeAPI = {
   storage: {
@@ -132,9 +134,22 @@ type SessionSnapshotForReconcile = {
   recordingId?: string;
   status?: string;
   strategy?: 'offscreen' | 'page' | null;
+  recorderTabId?: number | null;
 };
 
-async function hasLiveRecorderTab(recordingId: string): Promise<boolean> {
+async function hasLiveRecorderTab(
+  recordingId: string,
+  persistedTabId?: number | null
+): Promise<boolean> {
+  if (persistedTabId != null) {
+    try {
+      const tab = await chrome.tabs.get(persistedTabId);
+      if (tab) return true;
+    } catch {
+      // Fall through to URL matching for older snapshots or a stale ID.
+    }
+  }
+
   try {
     const tabs = (await chrome.tabs.query({})) as Array<{ url?: string }>;
     return tabs.some((tab) => {
@@ -170,7 +185,7 @@ async function hasLikelyLiveSnapshot(
   }
 
   if (snapshot.strategy === 'page') {
-    return hasLiveRecorderTab(snapshot.recordingId);
+    return hasLiveRecorderTab(snapshot.recordingId, snapshot.recorderTabId);
   }
 
   return false;
@@ -206,13 +221,12 @@ async function reconcileUnfinishedSessions(): Promise<void> {
   let recoveredOrphanCount = 0;
   let result: Record<string, unknown>;
   let snapshot: SessionSnapshotForReconcile | undefined;
-  let skipRecordingId: string | null = null;
-
-  // Periodic reconciliation also runs while this service worker is alive. Do
-  // not mistake the current in-memory recording for an interrupted session.
-  if (currentState.recording) {
-    return;
-  }
+  // Periodic reconciliation also runs while this service worker is alive. Keep
+  // the current in-memory session out of the orphan sweep, while still
+  // recovering unrelated active rows left by an older worker.
+  let skipRecordingId: string | null = currentState.recording
+    ? currentState.recordingId ?? null
+    : null;
 
   try {
     result = await chrome.storage.local.get(SESSION_SNAPSHOT_KEY);
@@ -227,10 +241,11 @@ async function reconcileUnfinishedSessions(): Promise<void> {
     // session here so the periodic reconcile is itself a recovery path and the
     // machine re-tracks a still-recording session without waiting for its next
     // heartbeat.
-    if (snapshot?.recordingId && (await service.restoreSession())) {
+    if (!currentState.recording && snapshot?.recordingId && (await service.restoreSession())) {
       logger.log('Reclaimed live recording session after service worker restart', {
         recordingId: snapshot.recordingId,
       });
+      skipRecordingId = snapshot.recordingId;
     }
 
     recoveredOrphanCount = await recoverOrphanedRecordings(skipRecordingId);

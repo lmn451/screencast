@@ -326,6 +326,129 @@ describe('startRecording', () => {
     expect(replacementStart.ok).toBe(true);
   });
 
+  it('cancels an offscreen start whose picker acknowledgement is still pending', async () => {
+    const chrome = makeStubChrome();
+    let releaseStart;
+    let firstStartMessage = true;
+    const pendingStart = new Promise((resolve) => {
+      releaseStart = resolve;
+    });
+    chrome.offscreen.hasDocument.mockResolvedValue(true);
+    chrome.runtime.sendMessage.mockImplementation(async (message) => {
+      if (message.type === 'OFFSCREEN_START' && firstStartMessage) {
+        firstStartMessage = false;
+        return pendingStart;
+      }
+      return undefined;
+    });
+    const svc = createRecordingService(chrome);
+
+    const firstStart = svc.startRecording('tab', false, false);
+    await flushMicrotasks();
+    expect(chrome.runtime.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'OFFSCREEN_START' })
+    );
+
+    const stopResult = await svc.stopRecording();
+
+    expect(stopResult).toEqual({ ok: true });
+    expect(svc.getState().status).toBe('idle');
+    expect(chrome.runtime.sendMessage).toHaveBeenCalledWith({ type: 'OFFSCREEN_STOP' });
+    expect(chrome.offscreen.closeDocument).toHaveBeenCalled();
+
+    releaseStart();
+    await expect(firstStart).resolves.toEqual({
+      ok: false,
+      error: 'Recording start was cancelled during initialization',
+    });
+
+    const retry = await svc.startRecording('tab', false, false);
+    expect(retry.ok).toBe(true);
+  });
+
+  it('removes a page recorder tab when cancellation races its first lookup', async () => {
+    const chrome = makeStubChrome();
+    let releaseTabLookup;
+    const pendingTabLookup = new Promise((resolve) => {
+      releaseTabLookup = resolve;
+    });
+    chrome.tabs.get.mockImplementationOnce(() => pendingTabLookup);
+    const svc = createRecordingService(chrome);
+
+    const firstStart = svc.startRecording('tab', true, false);
+    await flushMicrotasks();
+    expect(chrome.tabs.create).toHaveBeenCalled();
+    expect(chrome.tabs.get).toHaveBeenCalledWith(99);
+
+    const stopResult = await svc.stopRecording();
+
+    expect(stopResult).toEqual({ ok: true });
+    expect(svc.getState().status).toBe('idle');
+    expect(chrome.tabs.sendMessage).toHaveBeenCalledWith(99, { type: 'RECORDER_STOP' });
+    expect(chrome.tabs.remove).toHaveBeenCalledWith(99);
+
+    releaseTabLookup({ windowId: 1 });
+    await expect(firstStart).resolves.toEqual({
+      ok: false,
+      error: 'Recording start was cancelled during initialization',
+    });
+  });
+
+  it('leaves an acknowledged page recording to the normal STOP flow', async () => {
+    const chrome = makeStubChrome();
+    let releaseTabLookup;
+    const pendingTabLookup = new Promise((resolve) => {
+      releaseTabLookup = resolve;
+    });
+    chrome.tabs.get.mockImplementationOnce(() => pendingTabLookup);
+    const svc = createRecordingService(chrome);
+
+    const firstStart = svc.startRecording('tab', true, false);
+    await flushMicrotasks();
+    acknowledgeRecorder(svc);
+    expect(svc.getState().status).toBe('recording');
+
+    const stopResult = await svc.stopRecording();
+    expect(stopResult).toEqual({ ok: true });
+    expect(svc.getState().status).toBe('stopping');
+    expect(chrome.tabs.sendMessage).toHaveBeenCalledWith(99, { type: 'RECORDER_STOP' });
+    expect(chrome.tabs.remove).not.toHaveBeenCalledWith(99);
+
+    releaseTabLookup({ windowId: 1 });
+    await expect(firstStart).resolves.toEqual({
+      ok: false,
+      error: 'Recording start was cancelled during initialization',
+    });
+    expect(chrome.tabs.remove).not.toHaveBeenCalledWith(99);
+  });
+
+  it('serializes retries while failed startup cleanup is pending', async () => {
+    const chrome = makeStubChrome();
+    const svc = createRecordingService(chrome);
+    await svc.startRecording('tab', false, false);
+    acknowledgeOffscreen(svc);
+    await svc.handleOffscreenError('Permission denied', 'PERMISSION_DENIED');
+    expect(svc.getState().status).toBe('failed');
+
+    let releaseCleanup;
+    const pendingCleanup = new Promise((resolve) => {
+      releaseCleanup = resolve;
+    });
+    chrome.offscreen.hasDocument.mockImplementationOnce(() => pendingCleanup);
+
+    const firstRetry = svc.startRecording('tab', false, false);
+    await flushMicrotasks();
+    const secondRetry = await svc.startRecording('tab', false, false);
+
+    expect(secondRetry).toEqual({
+      ok: false,
+      error: 'Cannot start: initialization already in progress',
+    });
+
+    releaseCleanup(false);
+    await expect(firstRetry).resolves.toEqual(expect.objectContaining({ ok: true }));
+  });
+
   it('ignores a stale acknowledgment without cancelling the current start timeout', async () => {
     const chrome = makeStubChrome();
     const svc = createRecordingService(chrome);
@@ -798,6 +921,43 @@ describe('session restore & heartbeat (service-worker restart recovery)', () => 
     expect(restarted.getState().recordingId).toBe(recordingId);
   });
 
+  it('does not clear a persisted session when a fresh actor starts in idle', async () => {
+    const { chrome } = makeStorageBackedChrome({
+      offscreen: { ...makeStubChrome().offscreen, hasDocument: jest.fn(async () => true) },
+    });
+    const { recordingId } = await startAndPersist(chrome);
+    const removeCountBeforeRestart = chrome.storage.remove.mock.calls.length;
+    const closeCountBeforeRestart = chrome.offscreen.closeDocument.mock.calls.length;
+
+    const restarted = simulateServiceWorkerRestart(chrome);
+    await flushMicrotasks();
+
+    expect(restarted.getState().status).toBe('idle');
+    expect(chrome.storage.remove.mock.calls.length).toBe(removeCountBeforeRestart);
+    expect(chrome.offscreen.closeDocument.mock.calls.length).toBe(closeCountBeforeRestart);
+
+    const state = await restarted.handleMessage({ type: 'GET_STATE' }, { id: chrome.runtime.id });
+    expect(state).toEqual(expect.objectContaining({ ok: true, status: 'recording', recordingId }));
+    expect(chrome.storage.remove.mock.calls.length).toBe(removeCountBeforeRestart);
+    expect(chrome.offscreen.closeDocument.mock.calls.length).toBe(closeCountBeforeRestart);
+  });
+
+  it('restores before handling STOP on a fresh worker', async () => {
+    const { chrome } = makeStorageBackedChrome({
+      offscreen: { ...makeStubChrome().offscreen, hasDocument: jest.fn(async () => true) },
+    });
+    const { recordingId } = await startAndPersist(chrome);
+    const restarted = simulateServiceWorkerRestart(chrome);
+
+    const result = await restarted.handleMessage({ type: 'STOP' }, { id: chrome.runtime.id });
+
+    expect(result).toEqual({ ok: true });
+    expect(restarted.getState()).toEqual(
+      expect.objectContaining({ status: 'stopping', recordingId })
+    );
+    expect(chrome.runtime.sendMessage).toHaveBeenCalledWith({ type: 'OFFSCREEN_STOP' });
+  });
+
   it('does not restore when the offscreen document is gone', async () => {
     const { chrome } = makeStorageBackedChrome(); // hasDocument → false
     const { recordingId } = await startAndPersist(chrome);
@@ -836,6 +996,22 @@ describe('session restore & heartbeat (service-worker restart recovery)', () => 
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/already in progress/);
     expect(restarted.getState().recordingId).toBe(recordingId);
+  });
+
+  it('accepts a new START after a permission failure without a worker restart', async () => {
+    const chrome = makeStubChrome();
+    const svc = createRecordingService(chrome);
+    await svc.startRecording('tab', false, false);
+    acknowledgeOffscreen(svc);
+
+    await svc.handleOffscreenError('Permission denied', 'PERMISSION_DENIED');
+    expect(svc.getState().status).toBe('failed');
+
+    const retry = await svc.startRecording('tab', false, false);
+
+    expect(retry.ok).toBe(true);
+    expect(svc.getState().status).toBe('starting');
+    expect(svc.getState().recordingId).not.toBeNull();
   });
 
   it('restores a live recorder-tab session after a service-worker restart', async () => {

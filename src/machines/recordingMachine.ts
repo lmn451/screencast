@@ -12,12 +12,7 @@
  */
 
 import { setup, assign } from 'xstate';
-import type {
-  RecordingContext,
-  RecordingEvent,
-  RecordingMode,
-  SessionSnapshot,
-} from './types.js';
+import type { RecordingContext, RecordingEvent, RecordingMode, SessionSnapshot } from './types.js';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // INITIAL CONTEXT
@@ -97,13 +92,32 @@ export const recordingMachine = setup({
       failedChunkCount: () => 0,
     }),
 
+    startNewRecording: assign({
+      recordingId: () => crypto.randomUUID(),
+      correlationId: () => crypto.randomUUID(),
+      strategy: () => null,
+      overlayTabId: () => null,
+      recorderTabId: () => null,
+      startedAt: () => Date.now(),
+      lastActivityAt: () => Date.now(),
+      options: ({ event }) => ({
+        mode: (event as { type: 'START'; mode: RecordingMode }).mode,
+        includeMic: (event as { type: 'START'; mic?: boolean }).mic ?? false,
+        includeSystemAudio:
+          (event as { type: 'START'; systemAudio?: boolean }).systemAudio ?? false,
+        bestQuality: (event as { type: 'START'; bestQuality?: boolean }).bestQuality ?? false,
+      }),
+      error: () => null,
+      failedChunkCount: () => 0,
+    }),
+
     determineStrategy: assign({
       strategy: ({ context, event }) =>
         event.type === 'START' && event.strategy
           ? event.strategy
           : context.options.includeMic
-            ? 'page'
-            : 'offscreen',
+          ? 'page'
+          : 'offscreen',
     }),
 
     updateLastActivity: assign({
@@ -152,21 +166,7 @@ export const recordingMachine = setup({
       on: {
         START: {
           target: 'starting',
-          actions: assign({
-            recordingId: () => crypto.randomUUID(),
-            correlationId: () => crypto.randomUUID(),
-            startedAt: () => Date.now(),
-            lastActivityAt: () => Date.now(),
-            options: ({ event }) => ({
-              mode: (event as { type: 'START'; mode: RecordingMode }).mode,
-              includeMic: (event as { type: 'START'; mic?: boolean }).mic ?? false,
-              includeSystemAudio:
-                (event as { type: 'START'; systemAudio?: boolean }).systemAudio ?? false,
-              bestQuality: (event as { type: 'START'; bestQuality?: boolean }).bestQuality ?? false,
-            }),
-            error: () => null,
-            failedChunkCount: () => 0,
-          }),
+          actions: 'startNewRecording',
         },
         RESTORE: {
           target: 'recording',
@@ -183,6 +183,9 @@ export const recordingMachine = setup({
             options: ({ event }) => ({
               ...(event as { type: 'RESTORE'; snapshot: SessionSnapshot }).snapshot.options,
             }),
+            recorderTabId: ({ event }) =>
+              (event as { type: 'RESTORE'; snapshot: SessionSnapshot }).snapshot.recorderTabId ??
+              null,
             error: () => null,
             failedChunkCount: () => 0,
           }),
@@ -314,6 +317,10 @@ export const recordingMachine = setup({
     failed: {
       entry: 'updateLastActivity',
       on: {
+        START: {
+          target: 'starting',
+          actions: 'startNewRecording',
+        },
         RESET: { target: 'idle' },
         RECOVERY_DISCARD: {
           guard: 'isCurrentRecordingId',
