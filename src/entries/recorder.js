@@ -4,6 +4,8 @@ import {
   createMediaRecorder,
   applyContentHints,
   combineStreams,
+  waitForCombinedStreamReady,
+  cleanupCombinedStream,
   setupAutoStop,
   getDisplayVideoConstraints,
   CHUNK_INTERVAL_MS,
@@ -115,6 +117,7 @@ async function requestDisplayStream(wantSys, bestQuality, status, startBtn) {
  * and the start-time metadata stub, not from this handler.
  */
 function attemptPartialSave() {
+  const streamAtUnload = mediaStream;
   if (mediaRecorder && mediaRecorder.state !== 'inactive') {
     logger.log('Attempting partial save before unload');
     try {
@@ -125,6 +128,15 @@ function attemptPartialSave() {
     } catch (err) {
       logger.warn('Partial save failed:', err);
     }
+  }
+
+  // A mixed stream owns the original screen/microphone audio tracks and its
+  // AudioContext. Release those resources even when the document is closing
+  // before MediaRecorder's asynchronous stop callback can run.
+  if (streamAtUnload) {
+    void cleanupCombinedStream(streamAtUnload).catch((err) => {
+      logger.warn('Failed to clean up mixed audio before unload:', err);
+    });
   }
 }
 
@@ -196,6 +208,11 @@ async function start() {
     }
 
     mediaStream = combineStreams({ displayStream, micStream });
+    // A newly-created AudioContext is allowed to begin suspended. Do not let
+    // MediaRecorder start until the mixer is running, or a successful-looking
+    // recording could contain silence. Resume failures propagate to the
+    // startup cleanup path instead of falling back to a single audio source.
+    await waitForCombinedStreamReady(mediaStream);
     preview.srcObject = mediaStream;
     preview.classList.remove('hidden');
     stopBtn.classList.remove('hidden');
@@ -238,10 +255,12 @@ async function start() {
         } finally {
           stopHeartbeat();
           try {
-            mediaStream?.getTracks().forEach((t) => t.stop());
+            await cleanupCombinedStream(mediaStream);
           } catch (e) {
             logger.log('Error stopping tracks (non-fatal):', e);
           }
+          mediaStream = null;
+          mediaRecorder = null;
           window.close();
         }
       },
@@ -291,9 +310,21 @@ async function start() {
       message: e?.message,
       toString: e?.toString?.(),
     });
+    // Mixer construction/resume failures happen after display capture has
+    // succeeded, so they do not pass through requestDisplayStream's error
+    // notification. Report them here with the active recording ID so the
+    // background lifecycle can leave `starting` immediately.
+    if (recordingId && isValidUUID(recordingId)) {
+      await notifyRecorderStartError(e, false);
+    }
     // Stop any acquired capture tracks so a failure in recorder creation/start
     // doesn't leak the screen-share/mic indicator.
     stopHeartbeat();
+    try {
+      await cleanupCombinedStream(mediaStream);
+    } catch (cleanupErr) {
+      logger.log('Error cleaning up combined stream after failed start (non-fatal):', cleanupErr);
+    }
     try {
       displayStream?.getTracks().forEach((t) => t.stop());
     } catch (stopErr) {
