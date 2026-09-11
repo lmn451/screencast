@@ -1,6 +1,6 @@
 # Publishing ScreenSilo
 
-This doc covers GitHub releases and manual Chrome, Edge, and Firefox store submissions.
+This doc covers GitHub releases, automated Chrome and Firefox submissions, and manual Chrome, Edge, and Firefox store submissions.
 
 Prereqs
 
@@ -18,13 +18,21 @@ Packaging
 - Validate: Load unpacked in Chrome/Edge to smoke test
 - Inspect the ZIP and confirm that it contains no source maps, tests, or development bundles
 
-GitHub release steps
+GitHub release steps for a new version
+
+Use these steps for future versions. The current Firefox automation rollout
+reuses the existing `v0.2.3` release described below.
 
 1. Complete code review and CI, then merge the approved changes to master.
 2. Build the packages from the merged revision and verify their versions and contents.
 3. Create a `v<version>` tag and GitHub release targeting that revision.
 4. Attach the Chromium package, Firefox package, Firefox review-source archive, and SHA-256 checksums.
 5. Use the changelog for release notes. Record store submissions separately from store approval or publication.
+
+For this Firefox automation rollout, the published `v0.2.3` release already
+points to commit `d9536255495ca1077b5b8db97545d52531cae3f9`, with successful
+master push CI run `34579352421`. Reuse that release and its exact assets after
+the publishing automation is merged; do not rebuild or recreate `v0.2.3`.
 
 Automated Chrome Web Store publishing from CI
 
@@ -154,6 +162,60 @@ The workflow uses the v2 upload, status, and publish contracts documented in
 [publishers.items.fetchStatus](https://developer.chrome.com/docs/webstore/api/reference/rest/v2/publishers.items/fetchStatus),
 and [publishers.items.publish](https://developer.chrome.com/docs/webstore/api/reference/rest/v2/publishers.items/publish).
 
+Automated Firefox Add-ons publishing from CI
+
+Firefox publishing uses the existing ScreenSilo listing on AMO. The
+`publish-firefox.yml` workflow uses the AMO API v5 with a short-lived 60-second
+HS256 JWT generated from the long-lived `AMO_JWT_ISSUER` and
+`AMO_JWT_SECRET` environment credentials. It does not use a Google service
+account or a service-account key. Mozilla documents the JWT claims and signing
+rules in its [external API authentication guide](https://mozilla.github.io/addons-server/topics/api/auth.html).
+
+Dispatch the workflow from `master` and enter an existing published release tag,
+such as `v0.2.3`. The script downloads the release's
+`screensilo-firefox-mv3-<version>.zip`,
+`screensilo-firefox-source-<version>.zip`, and `SHA256SUMS` assets from GitHub.
+Before it contacts AMO it verifies that:
+
+1. The release is published, non-prerelease, and has exactly one expected Firefox package, source archive, and checksum asset.
+2. The tag resolves to a commit that is an ancestor of the current `master` branch.
+3. The same commit has a successful completed `push` run of `.github/workflows/ci.yml` on `master` (for this rollout, run `34579352421` for commit `d9536255495ca1077b5b8db97545d52531cae3f9`).
+4. The package and source checksums and the root `manifest.json` version match the release tag.
+
+The target listing is ScreenSilo's existing public add-on:
+
+- GUID: `screensilo@subagentura.tech`
+- AMO numeric ID reference: `3054016`
+- Slug reference: `screensilo`
+- Current public version: `0.2.2`
+
+The publisher resolves the listing by its globally unique GUID and rejects a
+missing, mismatched, or disabled listing. The numeric ID and slug above are
+references for the AMO listing, not independent identity checks. It creates a
+listed version for the existing add-on only, uploads the Firefox package to
+AMO, waits for validation, then sends the upload UUID and
+`screensilo-firefox-source-<version>.zip` as `upload` and `source` fields in a
+single multipart version-create request. The source archive is attached as
+part of version creation, so the package and its review source are submitted
+together. Mozilla documents this multipart `source` field in the [Add-ons API
+reference](https://mozilla.github.io/addons-server/topics/api/addons.html).
+
+The AMO upload and version-create requests do not use unsafe automatic
+retries. An ambiguous result stops the run for a status check before any
+rerun; read-only validation/status polling may continue within the workflow
+timeout. The publisher never prints the JWT credentials.
+
+The workflow uses the `firefox-store` environment. Restrict that environment's
+deployment branch policy to `master`, then verify these long-lived environment
+credentials in the repository settings:
+
+- `AMO_JWT_ISSUER`: the AMO API key/issuer
+- `AMO_JWT_SECRET`: the matching AMO API secret
+
+The built-in GitHub token has only read-only `contents` and `actions` access
+for release and CI provenance checks. The complete target, provenance gates,
+and execution sequence are recorded in [`FIREFOX_PUBLISH_PLAN.md`](FIREFOX_PUBLISH_PLAN.md).
+
 Manual Chrome Web Store steps
 
 1. https://chrome.google.com/webstore/devconsole
@@ -176,7 +238,7 @@ Edge Add-ons steps
 Firefox Add-ons steps
 
 1. https://addons.mozilla.org/developers/
-2. Select the existing ScreenSilo add-on and upload `dist/screensilo-firefox-mv3-<version>.zip` as a new version.
+2. Select the existing ScreenSilo add-on (`screensilo`, GUID `screensilo@subagentura.tech`, AMO ID `3054016`) and upload `dist/screensilo-firefox-mv3-<version>.zip` as a new version.
 3. Supply `dist/screensilo-firefox-source-<version>.zip` when asked for source code. The archive includes `SOURCE_BUILD.md` with reproduction instructions.
 4. Review the automated validation results, release notes, and existing listing disclosures.
 5. Submit for Mozilla review and signing. The local Firefox package remains unsigned until Mozilla signs it.
