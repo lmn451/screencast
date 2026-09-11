@@ -9,6 +9,11 @@ const getAllRecordings = jest.fn();
 const hasChunks = jest.fn();
 const markRecordingRecoverable = jest.fn(async () => undefined);
 const clearInterruptedSessionSnapshot = jest.fn(async () => true);
+const restoreSession = jest.fn(async () => false);
+const getPersistedSessionSnapshot = jest.fn(async () => {
+  const result = await chrome.storage.local.get('sessionSnapshot');
+  return result.sessionSnapshot;
+});
 
 jest.unstable_mockModule('../../src/services/recordingService.js', () => ({
   CHECKPOINT_ALARM_NAME: 'screensilo-checkpoint',
@@ -17,8 +22,9 @@ jest.unstable_mockModule('../../src/services/recordingService.js', () => ({
     handleMessage: jest.fn(),
     handleCheckpointAlarm: jest.fn(async () => undefined),
     handleTabClosing,
-    restoreSession: jest.fn(async () => false),
+    restoreSession,
     clearInterruptedSessionSnapshot,
+    getPersistedSessionSnapshot,
   })),
 }));
 jest.unstable_mockModule('../../src/lib/db.js', () => ({
@@ -90,6 +96,11 @@ beforeEach(() => {
   hasChunks.mockResolvedValue(false);
   clearInterruptedSessionSnapshot.mockReset();
   clearInterruptedSessionSnapshot.mockResolvedValue(true);
+  getPersistedSessionSnapshot.mockClear();
+  getPersistedSessionSnapshot.mockImplementation(async () => {
+    const result = await chrome.storage.local.get('sessionSnapshot');
+    return result.sessionSnapshot;
+  });
   chrome.storage.local.get.mockResolvedValue({});
 });
 
@@ -223,4 +234,30 @@ it('registers a tab removed listener wired to TAB_CLOSING handling', async () =>
   await onRemovedListener(123, { isWindowClosing: false });
 
   expect(handleTabClosing).toHaveBeenCalledWith(123);
+});
+
+it('runs retirement cleanup even when no live snapshot exists', async () => {
+  await reconcileUnfinishedSessions();
+  expect(restoreSession).toHaveBeenCalled();
+});
+
+it('defers orphan recovery when canonical session metadata cannot be read', async () => {
+  getPersistedSessionSnapshot.mockRejectedValueOnce(new Error('Storage unavailable'));
+  getAllRecordings.mockResolvedValue([{ id: 'live-recording', status: 'active' }]);
+  await reconcileUnfinishedSessions();
+  expect(markRecordingRecoverable).not.toHaveBeenCalled();
+  expect(getAllRecordings).not.toHaveBeenCalled();
+});
+
+it('defers orphan recovery when capture liveness is unknown', async () => {
+  getPersistedSessionSnapshot.mockResolvedValueOnce({
+    recordingId: 'live-recording',
+    status: 'recording',
+    strategy: 'offscreen',
+  });
+  chrome.offscreen.hasDocument.mockRejectedValueOnce(new Error('Browser unavailable'));
+  getAllRecordings.mockResolvedValue([{ id: 'live-recording', status: 'active' }]);
+  await reconcileUnfinishedSessions();
+  expect(markRecordingRecoverable).not.toHaveBeenCalled();
+  expect(getAllRecordings).not.toHaveBeenCalled();
 });

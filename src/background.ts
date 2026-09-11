@@ -1,3 +1,4 @@
+import { findRecorderContextTabIds } from './lib/recorder-context.js';
 /**
  * ScreenSilo Background Service Worker Entry Point
  * XState v5 with Recording Service
@@ -12,7 +13,6 @@ import { getAllRecordings } from './lib/recording.js';
 import { createLogger } from './logger.js';
 import { AUTO_DELETE_AGE_MS } from './lib/constants.js';
 import { hasChunks, markRecordingRecoverable } from './lib/chunkStorage.js';
-import { SESSION_SNAPSHOT_KEY } from './machines/types.js';
 import {
   validateMessageStrict,
   schemas,
@@ -44,9 +44,9 @@ const optionalOffscreenAPI = Reflect.get(chrome, 'offscreen') as
 
 const chromeAPI = {
   storage: {
-    get: (key: string) => chrome.storage.local.get(key),
+    get: (key: string | string[] | null) => chrome.storage.local.get(key),
     set: (data: Record<string, unknown>) => chrome.storage.local.set(data),
-    remove: (key: string) => chrome.storage.local.remove(key),
+    remove: (key: string | string[]) => chrome.storage.local.remove(key),
   },
   tabs: {
     query: (query: { active?: boolean; currentWindow?: boolean }) => chrome.tabs.query(query),
@@ -82,6 +82,7 @@ const chromeAPI = {
     setBadgeText: (options: { text: string }) => chrome.action.setBadgeText(options),
   },
   runtime: {
+    findRecorderTabIds: findRecorderContextTabIds,
     getURL: (path: string) => chrome.runtime.getURL(path),
     sendMessage: (message: ExtensionMessage) => chrome.runtime.sendMessage(message),
     id: chrome.runtime.id,
@@ -137,36 +138,8 @@ type SessionSnapshotForReconcile = {
   recorderTabId?: number | null;
 };
 
-async function hasLiveRecorderTab(
-  recordingId: string,
-  persistedTabId?: number | null
-): Promise<boolean> {
-  if (persistedTabId != null) {
-    try {
-      const tab = await chrome.tabs.get(persistedTabId);
-      if (tab) return true;
-    } catch {
-      // Fall through to URL matching for older snapshots or a stale ID.
-    }
-  }
-
-  try {
-    const tabs = (await chrome.tabs.query({})) as Array<{ url?: string }>;
-    return tabs.some((tab) => {
-      if (!tab.url || typeof tab.url !== 'string') return false;
-      try {
-        const parsed = new URL(tab.url);
-        return (
-          parsed.pathname.endsWith('/recorder.html') &&
-          parsed.searchParams.get('id') === recordingId
-        );
-      } catch {
-        return false;
-      }
-    });
-  } catch {
-    return false;
-  }
+async function hasLiveRecorderTab(recordingId: string): Promise<boolean> {
+  return (await findRecorderContextTabIds(recordingId)).length > 0;
 }
 
 async function hasLikelyLiveSnapshot(
@@ -179,13 +152,13 @@ async function hasLikelyLiveSnapshot(
   if (snapshot.strategy === 'offscreen') {
     try {
       return (await optionalOffscreenAPI?.hasDocument()) ?? false;
-    } catch {
-      return false;
+    } catch (error) {
+      throw new Error('Offscreen liveness is unavailable', { cause: error });
     }
   }
 
   if (snapshot.strategy === 'page') {
-    return hasLiveRecorderTab(snapshot.recordingId, snapshot.recorderTabId);
+    return hasLiveRecorderTab(snapshot.recordingId);
   }
 
   return false;
@@ -229,7 +202,6 @@ async function recoverOrphanedRecordings(protectedRecordingIds: Set<string>): Pr
 async function reconcileUnfinishedSessions(): Promise<void> {
   const currentState = service.getState();
   let recoveredOrphanCount = 0;
-  let result: Record<string, unknown>;
   let snapshot: SessionSnapshotForReconcile | undefined;
   // Periodic reconciliation also runs while this service worker is alive. Keep
   // the current in-memory session out of the orphan sweep, while still
@@ -239,8 +211,13 @@ async function reconcileUnfinishedSessions(): Promise<void> {
     : null;
 
   try {
-    result = await chrome.storage.local.get(SESSION_SNAPSHOT_KEY);
-    snapshot = result[SESSION_SNAPSHOT_KEY] as SessionSnapshotForReconcile | undefined;
+    // Session metadata is owned by RecordingService so it can read the
+    // per-recording keys, retirement markers, and durable owner fence as one
+    // recovery decision. The service also retains compatibility reads for the
+    // legacy singleton snapshot during upgrades.
+    snapshot = (await service.getPersistedSessionSnapshot()) as
+      | SessionSnapshotForReconcile
+      | undefined;
 
     if (await hasLikelyLiveSnapshot(snapshot)) {
       skipRecordingId = snapshot?.recordingId ?? null;
@@ -251,11 +228,12 @@ async function reconcileUnfinishedSessions(): Promise<void> {
     // session here so the periodic reconcile is itself a recovery path and the
     // machine re-tracks a still-recording session without waiting for its next
     // heartbeat.
-    if (!currentState.recording && snapshot?.recordingId && (await service.restoreSession())) {
+    if (!currentState.recording && (await service.restoreSession())) {
+      const restoredState = service.getState();
       logger.log('Reclaimed live recording session after service worker restart', {
-        recordingId: snapshot.recordingId,
+        recordingId: restoredState.recordingId,
       });
-      skipRecordingId = snapshot.recordingId;
+      skipRecordingId = restoredState.recordingId ?? null;
     }
 
     const protectedRecordingIds = new Set<string>();

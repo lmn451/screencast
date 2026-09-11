@@ -137,6 +137,8 @@ export const recordingMachine = setup({
       }),
       recorderTabId: ({ event }) =>
         (event as { type: 'RESTORE'; snapshot: SessionSnapshot }).snapshot.recorderTabId ?? null,
+      overlayTabId: ({ event }) =>
+        (event as { type: 'RESTORE'; snapshot: SessionSnapshot }).snapshot.overlayTabId ?? null,
       error: () => null,
       failedChunkCount: () => 0,
     }),

@@ -8,6 +8,8 @@
  */
 
 import { jest } from '@jest/globals';
+import indexedDB from 'fake-indexeddb';
+import { setImmediate as realSetImmediate } from 'node:timers';
 
 const VALID_UUID = '550e8400-e29b-41d4-a716-446655440000';
 
@@ -21,6 +23,7 @@ let __resetRecordingServiceForTests;
 let storageUtils;
 
 beforeAll(async () => {
+  global.indexedDB = indexedDB;
   storageUtils = await import('../../src/lib/storage-utils.js');
   const mod = await import('../../src/services/recordingService.ts');
   createRecordingService = mod.createRecordingService;
@@ -78,6 +81,12 @@ async function flushMicrotasks(times = 20) {
   for (let i = 0; i < times; i++) {
     await Promise.resolve();
   }
+  // The coordination store uses fake-indexeddb, whose transaction callbacks
+  // run on a task queue rather than a promise microtask. Let one task run so
+  // startup assertions observe the same point as the browser implementation.
+  for (let i = 0; i < 50; i++) {
+    await new Promise((resolve) => realSetImmediate(resolve));
+  }
 }
 
 function acknowledgeOffscreen(svc) {
@@ -95,15 +104,25 @@ function makeStorageBackedChrome(overrides = {}) {
   const store = {};
   const chrome = makeStubChrome({
     storage: {
-      get: jest.fn(async (key) => ({ [key]: store[key] })),
+      get: jest.fn(async (key) => {
+        if (key == null) return { ...store };
+        if (Array.isArray(key)) {
+          return Object.fromEntries(key.map((name) => [name, store[name]]));
+        }
+        return { [key]: store[key] };
+      }),
       set: jest.fn(async (data) => Object.assign(store, data)),
       remove: jest.fn(async (key) => {
-        delete store[key];
+        for (const name of Array.isArray(key) ? key : [key]) delete store[name];
       }),
     },
     ...overrides,
   });
   return { chrome, store };
+}
+
+function snapshotFor(store, recordingId) {
+  return store[`sessionSnapshot:${recordingId}`] ?? store.sessionSnapshot;
 }
 
 // Simulate the SW being terminated + restarted mid-recording: a brand-new
@@ -114,7 +133,19 @@ function simulateServiceWorkerRestart(chrome) {
   return createRecordingService(chrome);
 }
 
-beforeEach(() => {
+async function clearSessionMetadataDatabase() {
+  await new Promise((resolve) => {
+    const request = indexedDB.deleteDatabase('CaptureCastSessionMetadata');
+    request.onsuccess = resolve;
+    request.onerror = resolve;
+    // Wait for existing per-operation connections to close rather than
+    // allowing the next test to reopen the old owner record after a blocked
+    // delete request.
+  });
+}
+
+beforeEach(async () => {
+  await clearSessionMetadataDatabase();
   __resetRecordingServiceForTests();
   storageUtils.checkStorageQuota.mockClear();
   storageUtils.checkStorageQuota.mockResolvedValue({ ok: true });
@@ -430,7 +461,7 @@ describe('startRecording', () => {
 
       const recordingId = svc.getState().recordingId;
       expect(svc.getState().status).toBe('starting');
-      expect(store.sessionSnapshot).toEqual(
+      expect(snapshotFor(store, recordingId)).toEqual(
         expect.objectContaining({ recordingId, status: 'starting' })
       );
 
@@ -447,8 +478,8 @@ describe('startRecording', () => {
       await flushMicrotasks(100);
 
       expect(svc.getState().status).toBe('idle');
-      expect(chrome.storage.remove).toHaveBeenCalledWith('sessionSnapshot');
-      expect(store.sessionSnapshot).toEqual(expect.objectContaining({ recordingId }));
+      expect(chrome.storage.remove).toHaveBeenCalledWith(`sessionSnapshot:${recordingId}`);
+      expect(snapshotFor(store, recordingId)).toEqual(expect.objectContaining({ recordingId }));
 
       const lateAcknowledgement = await svc.handleMessage(
         { type: acknowledgementType, recordingId },
@@ -508,7 +539,7 @@ describe('startRecording', () => {
 
       const recordingId = svc.getState().recordingId;
       expect(svc.getState().status).toBe('starting');
-      expect(store.sessionSnapshot).toEqual(
+      expect(snapshotFor(store, recordingId)).toEqual(
         expect.objectContaining({ recordingId, status: 'starting' })
       );
 
@@ -516,7 +547,7 @@ describe('startRecording', () => {
       const pendingRemoval = new Promise((resolve) => {
         releaseRemoval = resolve;
       });
-      chrome.storage.remove.mockImplementation(async (key) => {
+      chrome.storage.remove.mockImplementationOnce(async (key) => {
         await pendingRemoval;
         delete store[key];
       });
@@ -525,9 +556,9 @@ describe('startRecording', () => {
       await flushMicrotasks(100);
 
       expect(svc.getState().status).toBe('idle');
-      expect(chrome.storage.remove).toHaveBeenCalledWith('sessionSnapshot');
-      expect(store.sessionSnapshot).toEqual(
-        expect.objectContaining({ recordingId, status: 'idle' })
+      expect(chrome.storage.remove).toHaveBeenCalledWith(`sessionSnapshot:${recordingId}`);
+      expect(snapshotFor(store, recordingId)).toEqual(
+        expect.objectContaining({ recordingId, status: 'starting' })
       );
 
       const recorderTabRemovalsBeforeRestart = chrome.tabs.remove.mock.calls.length;
@@ -592,7 +623,9 @@ describe('startRecording', () => {
         releaseStartingWrite = resolve;
       });
       chrome.storage.set.mockImplementation(async (data) => {
-        const snapshot = data.sessionSnapshot;
+        const snapshot = Object.entries(data).find(
+          ([key, value]) => key.startsWith('sessionSnapshot:') && value?.status === 'starting'
+        )?.[1];
         if (snapshot?.status === 'starting') {
           startingWrites += 1;
           if (startingWrites === 2) await pendingStartingWrite;
@@ -608,7 +641,7 @@ describe('startRecording', () => {
       const recordingId = svc.getState().recordingId;
       expect(startingWrites).toBeGreaterThanOrEqual(2);
       expect(svc.getState().status).toBe('starting');
-      expect(store.sessionSnapshot).toEqual(
+      expect(snapshotFor(store, recordingId)).toEqual(
         expect.objectContaining({ recordingId, status: 'starting' })
       );
 
@@ -616,10 +649,12 @@ describe('startRecording', () => {
       await flushMicrotasks(100);
 
       expect(svc.getState().status).toBe('idle');
-      expect(store.sessionSnapshot).toEqual(
+      expect(snapshotFor(store, recordingId)).toEqual(
         expect.objectContaining({ recordingId, status: 'starting' })
       );
-      expect(store.sessionRetirement).toEqual(expect.objectContaining({ recordingId, strategy }));
+      expect(store[`sessionRetirement:${recordingId}`]).toEqual(
+        expect.objectContaining({ recordingId, strategy })
+      );
 
       const recorderTabRemovalsBeforeRestart = chrome.tabs.remove.mock.calls.length;
       const offscreenClosuresBeforeRestart = chrome.offscreen.closeDocument.mock.calls.length;
@@ -964,7 +999,7 @@ describe('handleOffscreenData / handleRecorderData', () => {
       const newRecordingId = svc.getState().recordingId;
       expect(newRecordingId).not.toBe(oldRecordingId);
       await flushMicrotasks(100);
-      expect(store.sessionSnapshot).toEqual(
+      expect(snapshotFor(store, newRecordingId)).toEqual(
         expect.objectContaining({ recordingId: newRecordingId })
       );
 
@@ -982,7 +1017,7 @@ describe('handleOffscreenData / handleRecorderData', () => {
       expect(chrome.offscreen.closeDocument.mock.calls.length).toBe(
         offscreenClosuresBeforeOldPreviewResolves
       );
-      expect(store.sessionSnapshot).toEqual(
+      expect(snapshotFor(store, newRecordingId)).toEqual(
         expect.objectContaining({ recordingId: newRecordingId })
       );
     }
@@ -1144,7 +1179,7 @@ describe('state projection and recovery exits', () => {
     expect(svc.getState().status).toBe('idle');
     expect(svc.getState().recording).toBe(false);
     await flushMicrotasks();
-    expect(chrome.storage.remove).toHaveBeenCalledWith('sessionSnapshot');
+    expect(chrome.storage.remove).toHaveBeenCalledWith(`sessionSnapshot:${recordingId}`);
   });
 
   it('rejects a stale recovery discard without touching the active session', async () => {
@@ -1238,7 +1273,7 @@ describe('session restore & heartbeat (service-worker restart recovery)', () => 
       await original.startRecording('tab', false, false);
       await flushMicrotasks(100);
       const recordingId = original.getState().recordingId;
-      expect(store.sessionSnapshot.status).toBe('starting');
+      expect(snapshotFor(store, recordingId).status).toBe('starting');
       const restarted = simulateServiceWorkerRestart(chrome);
 
       expect(
@@ -1258,7 +1293,7 @@ describe('session restore & heartbeat (service-worker restart recovery)', () => 
 
   it('serializes interrupted snapshot removal before a new session snapshot', async () => {
     const { chrome, store } = makeStorageBackedChrome();
-    store.sessionSnapshot = { recordingId: VALID_UUID, status: 'failed' };
+    store[`sessionSnapshot:${VALID_UUID}`] = { recordingId: VALID_UUID, status: 'failed' };
     const svc = createRecordingService(chrome);
     let releaseRemoval;
     const pendingRemoval = new Promise((resolve) => {
@@ -1271,16 +1306,16 @@ describe('session restore & heartbeat (service-worker restart recovery)', () => 
     const clearing = svc.clearInterruptedSessionSnapshot(VALID_UUID);
     await flushMicrotasks(100);
     expect(chrome.storage.remove).toHaveBeenCalled();
-    expect(await svc.startRecording('tab', false, false)).toEqual(
-      expect.objectContaining({ ok: true })
-    );
-    const newId = svc.getState().recordingId;
+    const starting = svc.startRecording('tab', false, false);
+    await flushMicrotasks();
     releaseRemoval();
     expect(await clearing).toBe(true);
+    expect(await starting).toEqual(expect.objectContaining({ ok: true }));
+    const newId = svc.getState().recordingId;
     await flushMicrotasks(100);
-    expect(store.sessionSnapshot.recordingId).toBe(newId);
+    expect(snapshotFor(store, newId).recordingId).toBe(newId);
     expect(await svc.clearInterruptedSessionSnapshot(newId)).toBe(false);
-    expect(store.sessionSnapshot.recordingId).toBe(newId);
+    expect(snapshotFor(store, newId).recordingId).toBe(newId);
   });
 
   it('accepts a page acknowledgement after restoring startup without microphone', async () => {
@@ -1329,8 +1364,10 @@ describe('session restore & heartbeat (service-worker restart recovery)', () => 
     await error;
     expect(await retry).toEqual(expect.objectContaining({ ok: true }));
     await flushMicrotasks(100);
-    expect(store.sessionSnapshot.recordingId).toBe(svc.getState().recordingId);
-    expect(store.sessionSnapshot.recordingId).not.toBe(oldId);
+    expect(snapshotFor(store, svc.getState().recordingId).recordingId).toBe(
+      svc.getState().recordingId
+    );
+    expect(snapshotFor(store, svc.getState().recordingId).recordingId).not.toBe(oldId);
     expect(chrome.tabs.remove).not.toHaveBeenCalledWith(100);
   });
 
@@ -1627,5 +1664,140 @@ describe('overlay STATE_UPDATE push', () => {
     await flushMicrotasks();
 
     expect(svc.getState().status).toBe('recording');
+  });
+});
+
+describe('durable session ownership across workers', () => {
+  function liveOffscreen() {
+    const backed = makeStorageBackedChrome();
+    let documentOpen = false;
+    backed.chrome.offscreen.hasDocument.mockImplementation(async () => documentOpen);
+    backed.chrome.offscreen.createDocument.mockImplementation(async () => {
+      documentOpen = true;
+    });
+    backed.chrome.offscreen.closeDocument.mockImplementation(async () => {
+      documentOpen = false;
+    });
+    return { ...backed, isOpen: () => documentOpen };
+  }
+
+  it.each(['offscreen', 'page'])(
+    'cleans a %s retirement with no session snapshot',
+    async (strategy) => {
+      const { chrome, store } = makeStorageBackedChrome();
+      let open = true;
+      chrome.offscreen.hasDocument.mockImplementation(async () => strategy === 'offscreen' && open);
+      chrome.offscreen.closeDocument.mockImplementation(async () => {
+        open = false;
+      });
+      chrome.tabs.remove.mockImplementation(async () => {
+        open = false;
+      });
+      store[`sessionRetirement:${VALID_UUID}`] = {
+        recordingId: VALID_UUID,
+        strategy,
+        recorderTabId: strategy === 'page' ? 99 : null,
+        overlayTabId: 42,
+      };
+      const service = createRecordingService(chrome);
+      expect(await service.restoreSession()).toBe(false);
+      expect(service.getState().recording).toBe(false);
+      expect(open).toBe(false);
+      expect(store[`sessionRetirement:${VALID_UUID}`]).toBeUndefined();
+    }
+  );
+
+  it('restores the durable snapshot when the Chrome storage snapshot is absent', async () => {
+    const { chrome, store, isOpen } = liveOffscreen();
+    const first = createRecordingService(chrome);
+    await first.startRecording('tab', false, false);
+    const recordingId = first.getState().recordingId;
+    await acknowledgeOffscreen(first);
+    await flushMicrotasks();
+    delete store[`sessionSnapshot:${recordingId}`];
+    const restarted = simulateServiceWorkerRestart(chrome);
+    expect(await restarted.restoreSession()).toBe(true);
+    expect(restarted.getState()).toMatchObject({ recordingId, status: 'recording' });
+    expect(isOpen()).toBe(true);
+  });
+
+  it.each(['write', 'remove'])(
+    'protects a newer recorder when an older worker finishes a delayed snapshot %s',
+    async (operation) => {
+      const { chrome, store, isOpen } = liveOffscreen();
+      let release;
+      const gate = new Promise((resolve) => {
+        release = resolve;
+      });
+      let held = false;
+      if (operation === 'write') {
+        chrome.storage.set.mockImplementation(async (data) => {
+          if (!held && Object.keys(data).some((key) => key.startsWith('sessionSnapshot:'))) {
+            held = true;
+            await gate;
+          }
+          Object.assign(store, data);
+        });
+      }
+      const oldWorker = createRecordingService(chrome);
+      try {
+        await oldWorker.startRecording('tab', false, false);
+        const oldId = oldWorker.getState().recordingId;
+        await flushMicrotasks();
+        if (operation === 'remove') {
+          chrome.storage.remove.mockImplementation(async (key) => {
+            if (!held && key === `sessionSnapshot:${oldId}`) {
+              held = true;
+              await gate;
+            }
+            delete store[key];
+          });
+        }
+        const stop = oldWorker.stopRecording();
+        await flushMicrotasks();
+        expect(held).toBe(true);
+        expect(oldWorker.getState().status).toBe('idle');
+        const newWorker = simulateServiceWorkerRestart(chrome);
+        await newWorker.restoreSession();
+        expect((await newWorker.startRecording('tab', false, false)).ok).toBe(true);
+        const newId = newWorker.getState().recordingId;
+        expect(newId).not.toBe(oldId);
+        await flushMicrotasks();
+        release();
+        await stop;
+        await flushMicrotasks();
+        expect(newWorker.getState()).toMatchObject({ recordingId: newId, status: 'starting' });
+        expect(await newWorker.getPersistedSessionSnapshot()).toMatchObject({ recordingId: newId });
+        expect(isOpen()).toBe(true);
+        expect(store[`sessionSnapshot:${newId}`]).toMatchObject({ recordingId: newId });
+      } finally {
+        release();
+        await flushMicrotasks();
+      }
+    }
+  );
+
+  it('retries marker-only cleanup after a transient browser close failure', async () => {
+    const { chrome, store } = makeStorageBackedChrome();
+    let open = true;
+    chrome.offscreen.hasDocument.mockImplementation(async () => open);
+    chrome.offscreen.closeDocument
+      .mockRejectedValueOnce(new Error('Browser busy'))
+      .mockImplementation(async () => {
+        open = false;
+      });
+    store[`sessionRetirement:${VALID_UUID}`] = {
+      recordingId: VALID_UUID,
+      strategy: 'offscreen',
+      recorderTabId: null,
+      overlayTabId: null,
+    };
+    const service = createRecordingService(chrome);
+    await service.restoreSession();
+    expect(open).toBe(true);
+    expect(store[`sessionRetirement:${VALID_UUID}`]).toBeDefined();
+    await service.restoreSession();
+    expect(open).toBe(false);
+    expect(store[`sessionRetirement:${VALID_UUID}`]).toBeUndefined();
   });
 });

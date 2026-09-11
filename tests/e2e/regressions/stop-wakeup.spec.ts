@@ -18,7 +18,11 @@ test('STOP reclaims and saves an offscreen recording when it wakes the worker', 
   await expect
     .poll(() =>
       control.evaluate(
-        async () => (await chrome.storage.local.get('sessionSnapshot')).sessionSnapshot
+        async (id) =>
+          (
+            await chrome.storage.local.get(`sessionSnapshot:${id}`)
+          )[`sessionSnapshot:${id}`],
+        before.recordingId
       )
     )
     .toMatchObject({ recordingId: before.recordingId, status: 'recording' });

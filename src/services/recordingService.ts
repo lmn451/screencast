@@ -29,7 +29,21 @@ import {
   type StructuredError,
 } from '../messages.js';
 import { checkStorageQuota } from '../lib/storage-utils.js';
-import { TIMEOUTS, STORAGE_KEYS, isValidUUID } from '../machines/types.js';
+import {
+  TIMEOUTS,
+  STORAGE_KEYS,
+  isValidUUID,
+  sessionSnapshotStorageKey,
+  sessionRetirementStorageKey,
+  type SessionRetirement,
+} from '../machines/types.js';
+import {
+  claimSessionOwner,
+  readSessionOwner,
+  retireSessionOwner,
+  updateSessionOwner,
+  type SessionOwner,
+} from '../lib/session-metadata.js';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CHROME API TYPES
@@ -37,9 +51,9 @@ import { TIMEOUTS, STORAGE_KEYS, isValidUUID } from '../machines/types.js';
 
 interface ChromeAPI {
   storage: {
-    get: (key: string) => Promise<Record<string, unknown>>;
+    get: (key: string | string[] | null) => Promise<Record<string, unknown>>;
     set: (data: Record<string, unknown>) => Promise<void>;
-    remove: (key: string) => Promise<void>;
+    remove: (key: string | string[]) => Promise<void>;
   };
   tabs: {
     query: (query: {
@@ -77,6 +91,7 @@ interface ChromeAPI {
   };
   runtime: {
     getURL: (path: string) => string;
+    findRecorderTabIds?: (recordingId: string) => Promise<number[]>;
     sendMessage: (message: ExtensionMessage) => Promise<unknown>;
     id: string;
   };
@@ -114,17 +129,73 @@ export const CHECKPOINT_ALARM_NAME = 'screensilo-checkpoint';
 /** State owned by one asynchronous start attempt. */
 interface StartupAttempt {
   recordingId: string;
+  generation: number;
   strategy: RecordingContext['strategy'];
   cancelled: boolean;
   recorderTabId: number | null;
   offscreenStartRequested: boolean;
 }
 
-interface SessionRetirement {
-  recordingId: string;
-  strategy: RecordingContext['strategy'];
-  recorderTabId: number | null;
-  overlayTabId: number | null;
+interface PersistedSessionState {
+  snapshots: SessionSnapshot[];
+  retirements: SessionRetirement[];
+}
+
+const LIVE_SESSION_STATUSES = new Set(['starting', 'recording', 'stopping']);
+const RESOURCE_LOCK_NAME = 'screensilo-recording-resources';
+let fallbackResourceLock: Promise<void> = Promise.resolve();
+
+/**
+ * Serialize browser-context creation and teardown across service workers. The
+ * IndexedDB owner fence protects metadata, while Web Locks closes the
+ * read/check/Chrome-call gap for the global offscreen document and tab IDs.
+ * The local queue is used by unit environments that do not expose
+ * navigator.locks; supported extension browsers use the cross-worker lock.
+ */
+function withResourceLock<T>(operation: () => Promise<T>): Promise<T> {
+  const locks = globalThis.navigator?.locks;
+  if (locks) {
+    return locks.request(RESOURCE_LOCK_NAME, operation);
+  }
+  const result = fallbackResourceLock.then(operation);
+  fallbackResourceLock = result.then(
+    () => undefined,
+    () => undefined
+  );
+  return result;
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function isPersistedSessionSnapshot(value: unknown): value is SessionSnapshot {
+  return (
+    isObject(value) &&
+    typeof value.recordingId === 'string' &&
+    isValidUUID(value.recordingId) &&
+    typeof value.status === 'string' &&
+    (value.startedAt === undefined || typeof value.startedAt === 'number') &&
+    (value.lastActivityAt === undefined || typeof value.lastActivityAt === 'number') &&
+    (value.options === undefined || isObject(value.options)) &&
+    (value.strategy === undefined ||
+      value.strategy === 'offscreen' ||
+      value.strategy === 'page' ||
+      value.strategy === null) &&
+    (value.correlationId === undefined || typeof value.correlationId === 'string') &&
+    (value.generation === undefined || typeof value.generation === 'number')
+  );
+}
+
+function isSessionRetirement(value: unknown): value is SessionRetirement {
+  return (
+    isObject(value) &&
+    typeof value.recordingId === 'string' &&
+    isValidUUID(value.recordingId) &&
+    (value.strategy === 'offscreen' || value.strategy === 'page' || value.strategy === null) &&
+    (value.recorderTabId === null || typeof value.recorderTabId === 'number') &&
+    (value.overlayTabId === null || typeof value.overlayTabId === 'number')
+  );
 }
 
 class StartupCancelledError extends Error {
@@ -166,6 +237,8 @@ export class RecordingService {
   // a wakeup in this worker reclaim a session it has already finished/cancelled.
   private readonly retiredRecordingIds = new Set<string>();
   private readonly retirementWrites = new Map<string, Promise<void>>();
+  private lastSessionRecordingId: string | null = null;
+  private sessionGeneration: number | null = null;
 
   constructor(chrome: ChromeAPI) {
     this.chrome = chrome;
@@ -184,6 +257,8 @@ export class RecordingService {
     // Chained through a promise queue so each onStateChange fully settles before
     // the next runs, preventing interleaved storage/offscreen operations.
     this.actor.subscribe((snapshot) => {
+      const recordingId = snapshot.context.recordingId ?? this.lastSessionRecordingId;
+      if (snapshot.context.recordingId) this.lastSessionRecordingId = snapshot.context.recordingId;
       if (
         snapshot.matches('saved') ||
         snapshot.matches('failed') ||
@@ -192,7 +267,7 @@ export class RecordingService {
         void this.retireRecording(snapshot.context.recordingId);
       }
       this.stateChangeQueue = this.stateChangeQueue
-        .then(() => this.onStateChange(snapshot))
+        .then(() => this.onStateChange(snapshot, recordingId))
         .catch((e) => {
           console.warn('[RecordingService] onStateChange failed:', e);
         });
@@ -203,10 +278,13 @@ export class RecordingService {
   // STATE CHANGE HANDLER (Chrome API side effects)
   // ═══════════════════════════════════════════════════════════════════════════
 
-  private async onStateChange(snapshot: {
-    value: string;
-    context: RecordingContext;
-  }): Promise<void> {
+  private async onStateChange(
+    snapshot: {
+      value: string;
+      context: RecordingContext;
+    },
+    recordingId: string | null
+  ): Promise<void> {
     const state = snapshot.value;
     const context = snapshot.context;
     const previousState = this.lastActorState;
@@ -255,22 +333,32 @@ export class RecordingService {
       state === 'failed' ||
       state === 'recoverable'
     ) {
-      await this.clearSessionSnapshot();
+      await this.clearSessionSnapshot(recordingId);
     }
 
     // Overlay removal on transition back to idle.
     // (Injection is driven explicitly from startRecording, not from state changes,
     // since overlayTabId is owned by the service instance, not the machine context.)
     if (state === 'idle' && this.overlayTabId && previousState && previousState !== 'idle') {
-      await this.removeOverlay(this.overlayTabId);
-      this.overlayTabId = null;
+      const overlayTabId = this.overlayTabId;
+      await withResourceLock(async () => {
+        const owner = await this.readDurableOwner();
+        const protectedByAnotherOwner =
+          owner === undefined ||
+          (owner?.status === 'active' &&
+            owner.recordingId !== recordingId &&
+            owner.overlayTabId === overlayTabId);
+        if (!protectedByAnotherOwner) await this.removeOverlay(overlayTabId);
+        if (this.overlayTabId === overlayTabId) this.overlayTabId = null;
+      });
     }
 
     // Offscreen document lifecycle
     if (state === 'idle') {
-      await this.closeOffscreenDocumentIfIdle();
+      await this.closeOffscreenDocumentIfIdle(recordingId);
     } else if (state === 'recoverable' || state === 'failed') {
-      await this.cleanupResources();
+      await this.cleanupResources(recordingId);
+      if (recordingId) await this.finishRetirement(recordingId);
     }
   }
 
@@ -327,12 +415,189 @@ export class RecordingService {
     return result;
   }
 
+  private async readDurableOwner(): Promise<SessionOwner | null | undefined> {
+    try {
+      return await readSessionOwner();
+    } catch (e) {
+      console.warn('[RecordingService] Failed to read durable session owner:', e);
+      // `null` means the metadata store is healthy and has no owner. Keep an
+      // unavailable store distinct so recovery and destructive cleanup fail
+      // closed instead of treating an unknown owner as idle.
+      return undefined;
+    }
+  }
+
+  private async claimDurableOwner(
+    recordingId: string,
+    strategy: RecordingContext['strategy'],
+    recorderTabId: number | null,
+    overlayTabId: number | null,
+    persistedSnapshot?: SessionSnapshot
+  ): Promise<SessionOwner | null> {
+    try {
+      const current = this.actor.getSnapshot();
+      const snapshot =
+        persistedSnapshot ??
+        (current.context.recordingId === recordingId
+          ? this.snapshotFromContext(current.context)
+          : undefined);
+      const owner = await claimSessionOwner({
+        recordingId,
+        strategy,
+        recorderTabId,
+        overlayTabId,
+        snapshot,
+      });
+      if (owner) this.sessionGeneration = owner.generation;
+      return owner;
+    } catch (e) {
+      console.warn('[RecordingService] Failed to claim durable session owner:', e);
+      return null;
+    }
+  }
+
+  private async retireDurableOwner(
+    recordingId: string,
+    strategy: RecordingContext['strategy'],
+    recorderTabId: number | null,
+    overlayTabId: number | null
+  ): Promise<boolean> {
+    try {
+      return await retireSessionOwner(recordingId, {
+        strategy,
+        recorderTabId,
+        overlayTabId,
+      });
+    } catch (e) {
+      console.warn('[RecordingService] Failed to retire durable session owner:', e);
+      return false;
+    }
+  }
+
+  private async updateDurableOwner(
+    recordingId: string,
+    strategy: RecordingContext['strategy'],
+    recorderTabId: number | null,
+    overlayTabId: number | null
+  ): Promise<boolean> {
+    try {
+      return await updateSessionOwner(recordingId, {
+        strategy,
+        recorderTabId,
+        overlayTabId,
+      });
+    } catch (e) {
+      console.warn('[RecordingService] Failed to update durable session owner:', e);
+      return false;
+    }
+  }
+
+  /**
+   * Read the small session metadata set in one operation. New workers keep
+   * each recording in its own key, while the singleton keys are read only for
+   * upgrades from versions that predate per-recording storage.
+   */
+  private async readPersistedSessionState(): Promise<PersistedSessionState> {
+    const values = await this.chrome.storage.get(null);
+    const snapshotsById = new Map<string, SessionSnapshot>();
+    const snapshotIsPerRecording = new Map<string, boolean>();
+    const retirementsById = new Map<string, SessionRetirement>();
+
+    for (const [key, value] of Object.entries(values)) {
+      if (
+        (key === STORAGE_KEYS.SESSION_SNAPSHOT ||
+          key.startsWith(STORAGE_KEYS.SESSION_SNAPSHOT_PREFIX)) &&
+        isPersistedSessionSnapshot(value)
+      ) {
+        const existing = snapshotsById.get(value.recordingId);
+        const isPerRecording = key.startsWith(STORAGE_KEYS.SESSION_SNAPSHOT_PREFIX);
+        const existingIsPerRecording = snapshotIsPerRecording.get(value.recordingId) ?? false;
+        if (
+          !existing ||
+          (isPerRecording && !existingIsPerRecording) ||
+          (isPerRecording === existingIsPerRecording &&
+            (value.lastActivityAt ?? 0) >= (existing.lastActivityAt ?? 0))
+        ) {
+          snapshotsById.set(value.recordingId, value);
+          snapshotIsPerRecording.set(value.recordingId, isPerRecording);
+        }
+      }
+
+      if (
+        (key === STORAGE_KEYS.SESSION_RETIREMENT ||
+          key.startsWith(STORAGE_KEYS.SESSION_RETIREMENT_PREFIX)) &&
+        isSessionRetirement(value)
+      ) {
+        retirementsById.set(value.recordingId, value);
+      }
+    }
+
+    return {
+      snapshots: [...snapshotsById.values()],
+      retirements: [...retirementsById.values()],
+    };
+  }
+
+  private selectPersistedSnapshot(
+    state: PersistedSessionState,
+    owner: SessionOwner | null = null,
+    retiredIds = new Set(state.retirements.map((retirement) => retirement.recordingId))
+  ): SessionSnapshot | undefined {
+    // The owner claim includes a full snapshot in the same transaction. It
+    // remains recoverable even if the worker dies before chrome.storage.set.
+    const snapshots =
+      owner?.status === 'active' && isPersistedSessionSnapshot(owner.snapshot)
+        ? [
+            {
+              ...owner.snapshot,
+              generation: owner.generation,
+              recorderTabId: owner.recorderTabId,
+              overlayTabId: owner.overlayTabId,
+            },
+          ]
+        : state.snapshots;
+    return snapshots
+      .filter((snapshot) => !retiredIds.has(snapshot.recordingId))
+      .filter((snapshot) => snapshot.status !== 'idle')
+      .filter((snapshot) => {
+        if (!owner) return true;
+        if (owner.status !== 'active' || snapshot.recordingId !== owner.recordingId) return false;
+        return snapshot.generation == null || snapshot.generation === owner.generation;
+      })
+      .sort((a, b) => (b.lastActivityAt ?? 0) - (a.lastActivityAt ?? 0))[0];
+  }
+
+  /** Public read used by background reconciliation without exposing storage. */
+  async getPersistedSessionSnapshot(): Promise<SessionSnapshot | undefined> {
+    const state = await this.readPersistedSessionState();
+    const owner = await this.readDurableOwner();
+    if (owner === undefined)
+      throw new Error('Session ownership is unavailable; retry reconciliation');
+    return this.selectPersistedSnapshot(state, owner);
+  }
+
+  private snapshotFromContext(context: RecordingContext): SessionSnapshot {
+    return {
+      recordingId: context.recordingId!,
+      ...(this.sessionGeneration == null ? {} : { generation: this.sessionGeneration }),
+      status: this.actor.getSnapshot().value as SessionSnapshot['status'],
+      startedAt: context.startedAt ?? Date.now(),
+      lastActivityAt: Date.now(),
+      options: { ...context.options },
+      strategy: context.strategy,
+      correlationId: context.correlationId ?? context.recordingId!,
+      recorderTabId: context.recorderTabId,
+      overlayTabId: context.overlayTabId,
+    };
+  }
+
   private async persistSessionSnapshot(context: RecordingContext): Promise<void> {
     return this.queueSessionStorage(() => this.writeSessionSnapshot(context));
   }
 
   private async writeSessionSnapshot(context: RecordingContext): Promise<void> {
     if (!context.recordingId || this.retiredRecordingIds.has(context.recordingId)) return;
+    this.lastSessionRecordingId = context.recordingId;
     const current = this.actor.getSnapshot();
     if (
       !(
@@ -346,27 +611,27 @@ export class RecordingService {
     }
 
     try {
-      const snapshot = {
-        recordingId: context.recordingId,
-        status: current.value,
-        startedAt: context.startedAt,
-        lastActivityAt: Date.now(),
-        options: { ...context.options },
-        strategy: context.strategy,
-        correlationId: context.correlationId,
-        recorderTabId: context.recorderTabId,
-      };
-      await this.chrome.storage.set({ [STORAGE_KEYS.SESSION_SNAPSHOT]: snapshot });
+      const snapshot = this.snapshotFromContext(current.context);
+      await updateSessionOwner(context.recordingId, {
+        strategy: current.context.strategy,
+        recorderTabId: current.context.recorderTabId,
+        overlayTabId: current.context.overlayTabId,
+        snapshot,
+      });
+      // The per-recording key is authoritative. A delayed operation from an
+      // older worker can never overwrite another recording's key.
+      await this.chrome.storage.set({ [sessionSnapshotStorageKey(context.recordingId)]: snapshot });
     } catch (e) {
       console.warn('[RecordingService] Failed to persist session snapshot:', e);
     }
   }
 
-  private async clearSessionSnapshot(): Promise<void> {
+  private async clearSessionSnapshot(recordingId = this.lastSessionRecordingId): Promise<void> {
+    if (!recordingId) return;
     try {
-      await this.queueSessionStorage(() =>
-        this.chrome.storage.remove(STORAGE_KEYS.SESSION_SNAPSHOT)
-      );
+      await this.queueSessionStorage(async () => {
+        await this.chrome.storage.remove(sessionSnapshotStorageKey(recordingId));
+      });
     } catch (e) {
       console.warn('[RecordingService] Failed to clear session snapshot:', e);
     }
@@ -387,10 +652,36 @@ export class RecordingService {
         );
       };
       if (isLive()) return false;
-      const result = await this.chrome.storage.get(STORAGE_KEYS.SESSION_SNAPSHOT);
-      const persisted = result[STORAGE_KEYS.SESSION_SNAPSHOT] as SessionSnapshot | undefined;
-      if (persisted?.recordingId !== recordingId || isLive()) return false;
-      await this.chrome.storage.remove(STORAGE_KEYS.SESSION_SNAPSHOT);
+      const state = await this.readPersistedSessionState();
+      const persisted = state.snapshots.find((snapshot) => snapshot.recordingId === recordingId);
+      if (
+        !persisted ||
+        state.retirements.some((retirement) => retirement.recordingId === recordingId)
+      ) {
+        return false;
+      }
+
+      // Turn an interrupted legacy snapshot into an isolated retirement marker
+      // before clearing its per-recording copy. The legacy singleton is left
+      // untouched because a delayed old worker must never delete a newer
+      // worker's mirror from that shared key.
+      const retired = await this.retireDurableOwner(
+        recordingId,
+        persisted.strategy ?? null,
+        persisted.recorderTabId ?? null,
+        persisted.overlayTabId ?? null
+      );
+      if (!retired || isLive()) return false;
+      await this.chrome.storage.set({
+        [sessionRetirementStorageKey(recordingId)]: {
+          recordingId,
+          strategy: persisted.strategy,
+          recorderTabId: persisted.recorderTabId ?? null,
+          overlayTabId: persisted.overlayTabId ?? null,
+        } satisfies SessionRetirement,
+      });
+      if (isLive()) return false;
+      await this.chrome.storage.remove(sessionSnapshotStorageKey(recordingId));
       return true;
     });
   }
@@ -480,6 +771,7 @@ export class RecordingService {
       attempt ??
       ({
         recordingId: currentContext.recordingId ?? '',
+        generation: this.sessionGeneration ?? 0,
         strategy: currentContext.strategy,
         cancelled: true,
         recorderTabId: this.recorderTabId,
@@ -548,18 +840,38 @@ export class RecordingService {
     attempt: StartupAttempt
   ): Promise<void> {
     try {
-      const existing = await this.chrome.offscreen.hasDocument();
-      if (!this.isCurrentStartup(attempt)) throw new StartupCancelledError();
-      if (!existing) {
-        await this.chrome.offscreen.createDocument({
-          url: this.chrome.runtime.getURL('offscreen.html'),
-          reasons: ['USER_MEDIA', 'BLOBS'],
-          justification:
-            'Record a screen capture stream using MediaRecorder in an offscreen document.',
-        });
-      }
+      await withResourceLock(async () => {
+        const existing = await this.chrome.offscreen.hasDocument();
+        if (!this.isCurrentStartup(attempt)) throw new StartupCancelledError();
+        const owner = await this.readDurableOwner();
+        if (
+          !owner ||
+          owner.status !== 'active' ||
+          owner.recordingId !== attempt.recordingId ||
+          owner.generation !== attempt.generation
+        ) {
+          throw new StartupCancelledError();
+        }
+        if (!existing) {
+          await this.chrome.offscreen.createDocument({
+            url: this.chrome.runtime.getURL('offscreen.html'),
+            reasons: ['USER_MEDIA', 'BLOBS'],
+            justification:
+              'Record a screen capture stream using MediaRecorder in an offscreen document.',
+          });
+        }
+      });
 
       if (!this.isCurrentStartup(attempt)) throw new StartupCancelledError();
+      const owner = await this.readDurableOwner();
+      if (
+        !owner ||
+        owner.status !== 'active' ||
+        owner.recordingId !== attempt.recordingId ||
+        owner.generation !== attempt.generation
+      ) {
+        throw new StartupCancelledError();
+      }
 
       // Send start message to offscreen
       attempt.offscreenStartRequested = true;
@@ -617,6 +929,16 @@ export class RecordingService {
       tabId: recorderTabId,
     });
 
+    const ownerUpdated = await this.updateDurableOwner(
+      attempt.recordingId,
+      attempt.strategy,
+      recorderTabId,
+      this.overlayTabId
+    );
+    if (!ownerUpdated && this.isCurrentStartup(attempt)) {
+      throw new Error('Failed to update durable recorder ownership');
+    }
+
     if (!this.isCurrentStartup(attempt)) {
       if (this.isStoppingStartup(attempt)) return;
       try {
@@ -646,18 +968,28 @@ export class RecordingService {
     }
   }
 
-  private async closeOffscreenDocumentIfIdle(): Promise<void> {
-    try {
-      const existing = await this.chrome.offscreen.hasDocument();
-      if (existing) {
-        const state = this.actor.getSnapshot().value;
-        if (state === 'idle') {
-          await this.chrome.offscreen.closeDocument();
+  private async closeOffscreenDocumentIfIdle(
+    recordingId = this.lastSessionRecordingId
+  ): Promise<void> {
+    await withResourceLock(async () => {
+      try {
+        const existing = await this.chrome.offscreen.hasDocument();
+        if (existing) {
+          const state = this.actor.getSnapshot().value;
+          const owner = await this.readDurableOwner();
+          const ownedByAnotherActiveSession =
+            owner === undefined ||
+            (owner?.status === 'active' &&
+              owner.recordingId !== recordingId &&
+              owner.strategy === 'offscreen');
+          if (state === 'idle' && !ownedByAnotherActiveSession) {
+            await this.chrome.offscreen.closeDocument();
+          }
         }
+      } catch (e) {
+        console.warn('[RecordingService] Failed to close offscreen document:', e);
       }
-    } catch (e) {
-      console.warn('[RecordingService] Failed to close offscreen document:', e);
-    }
+    });
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -862,9 +1194,38 @@ export class RecordingService {
       this.actor.send({ type: 'RESET' });
       return { ok: false, error: 'Failed to initialize recording session' };
     }
+    const recordingId = context.recordingId;
+
+    // Claim the durable owner before creating an overlay, tab, or offscreen
+    // document. A second worker can then protect this session while this
+    // startup is still waiting on browser APIs, and a stale worker's cleanup
+    // cannot close the new owner's offscreen document.
+    const owner = await withResourceLock(() =>
+      this.claimDurableOwner(
+        recordingId,
+        context.strategy,
+        context.recorderTabId ?? null,
+        context.overlayTabId ?? null
+      )
+    );
+    if (
+      !owner ||
+      !this.actor.getSnapshot().matches('starting') ||
+      this.actor.getSnapshot().context.recordingId !== recordingId
+    ) {
+      if (this.actor.getSnapshot().matches('starting')) this.actor.send({ type: 'RESET' });
+      return {
+        ok: false,
+        error: owner
+          ? 'Recording start was cancelled during initialization'
+          : 'A recording is already in progress',
+      };
+    }
+    this.sessionGeneration = owner.generation;
 
     const attempt: StartupAttempt = {
       recordingId: context.recordingId,
+      generation: owner.generation,
       strategy: context.strategy,
       cancelled: false,
       recorderTabId: null,
@@ -1288,71 +1649,130 @@ export class RecordingService {
       return false;
     }
 
-    let persisted: SessionSnapshot | undefined;
+    let persistedState: PersistedSessionState;
     try {
-      const result = await this.chrome.storage.get(STORAGE_KEYS.SESSION_SNAPSHOT);
-      persisted = result[STORAGE_KEYS.SESSION_SNAPSHOT] as SessionSnapshot | undefined;
+      persistedState = await this.readPersistedSessionState();
     } catch (e) {
-      console.warn('[RecordingService] Failed to read session snapshot for restore:', e);
+      console.warn('[RecordingService] Failed to read persisted session state for restore:', e);
       return false;
     }
 
-    if (!persisted || !isValidUUID(persisted.recordingId)) return false;
-
-    // Retirement uses its own key so an older live snapshot write cannot
-    // overwrite it or block it behind the worker's snapshot-write queue.
-    let retirement: SessionRetirement | undefined;
-    try {
-      const result = await this.chrome.storage.get(STORAGE_KEYS.SESSION_RETIREMENT);
-      retirement = result[STORAGE_KEYS.SESSION_RETIREMENT] as SessionRetirement | undefined;
-    } catch (e) {
-      console.warn('[RecordingService] Failed to read session retirement:', e);
-      return false;
-    }
-    if (retirement?.recordingId === persisted.recordingId) {
-      await this.cleanupRetiredSession(retirement);
-      return false;
-    }
-
-    if (persisted.status === 'idle') {
-      // Retirement is durable before snapshot removal or browser teardown.
-      // A worker that died between those steps may leave a pending picker;
-      // finish its cleanup without ever restoring an active machine state.
-      await this.cleanupRetiredSession({
-        recordingId: persisted.recordingId,
-        strategy: persisted.strategy,
-        recorderTabId: persisted.recorderTabId ?? null,
-        overlayTabId: persisted.overlayTabId ?? null,
-      });
-      return false;
-    }
-
+    const durableOwner = await this.readDurableOwner();
+    if (durableOwner === undefined) return false;
+    const persisted = this.selectPersistedSnapshot(persistedState, durableOwner);
+    // A crash or failed browser close can leave only the durable retirement.
+    // Keep retrying cleanup even after the Chrome storage marker was removed.
     if (
-      this.retiredRecordingIds.has(persisted.recordingId) ||
-      (persisted.status !== 'starting' &&
-        persisted.status !== 'recording' &&
-        persisted.status !== 'stopping')
+      durableOwner?.status === 'retired' &&
+      !persistedState.retirements.some((entry) => entry.recordingId === durableOwner.recordingId)
     ) {
+      persistedState.retirements.push(durableOwner);
+    }
+    const retiredIds = new Set(
+      persistedState.retirements.map((retirement) => retirement.recordingId)
+    );
+
+    // Retirement is independent of the live snapshot. Process every marker,
+    // including marker-only state left after the old snapshot was removed.
+    // When another active snapshot exists, resource-aware cleanup protects its
+    // offscreen document and shared overlay while still removing an orphaned
+    // recorder tab belonging to the retired ID.
+    for (const retirement of persistedState.retirements) {
+      await this.cleanupRetiredSession(
+        retirement,
+        persisted?.recordingId === retirement.recordingId ? undefined : persisted
+      );
+    }
+
+    if (!this.actor.getSnapshot().matches('idle')) {
+      return (
+        this.actor.getSnapshot().matches('recording') ||
+        this.actor.getSnapshot().matches('stopping')
+      );
+    }
+
+    if (!persisted) {
+      // The owner claim is committed before the first browser resource is
+      // created. If the worker dies in that short window there is no snapshot
+      // to restore, so retire the owner only after proving that no capture
+      // context exists. The same resource lock used by startup prevents this
+      // check from racing a still-running creator in another worker.
+      if (durableOwner?.status === 'active') {
+        await withResourceLock(async () => {
+          const owner = await this.readDurableOwner();
+          if (!owner || owner.status !== 'active') return;
+          const live = await this.hasLiveOwnerContext(owner);
+          if (!live) {
+            await this.retireDurableOwner(
+              owner.recordingId,
+              owner.strategy,
+              owner.recorderTabId,
+              owner.overlayTabId
+            );
+          }
+        });
+      }
       return false;
     }
+    if (retiredIds.has(persisted.recordingId)) return false;
+    if (!LIVE_SESSION_STATUSES.has(persisted.status)) return false;
+    if (persisted.strategy !== 'offscreen' && persisted.strategy !== 'page') return false;
+
+    // Reserve the persisted owner before awaiting tabs/offscreen liveness. A
+    // concurrent START in another worker must observe this reservation and
+    // wait for retirement instead of creating a second capture context.
+    if (!this.actor.getSnapshot().matches('idle')) return false;
+    const claimedOwner = await this.claimDurableOwner(
+      persisted.recordingId,
+      persisted.strategy,
+      persisted.recorderTabId ?? null,
+      persisted.overlayTabId ?? null,
+      persisted
+    );
+    if (!claimedOwner) return false;
+    if (!this.actor.getSnapshot().matches('idle')) return false;
 
     let restoredRecorderTabId: number | null = null;
     if (persisted.strategy === 'offscreen') {
-      let docAlive = false;
+      let docAlive: boolean | null = null;
       try {
         docAlive = await this.chrome.offscreen.hasDocument();
       } catch (e) {
         console.warn('[RecordingService] Offscreen liveness check failed:', e);
+        // An unavailable liveness check cannot prove that the owner is orphaned.
+        // Keep the snapshot and durable owner for a later wakeup.
+        return false;
       }
       if (!docAlive) {
+        await this.retireDurableOwner(
+          persisted.recordingId,
+          persisted.strategy,
+          persisted.recorderTabId ?? null,
+          persisted.overlayTabId ?? null
+        );
+        await this.clearSessionSnapshot(persisted.recordingId);
         return false;
       }
     } else if (persisted.strategy === 'page') {
-      const recorderTabId = await this.findRecorderTabId(
-        persisted.recordingId,
-        persisted.recorderTabId
-      );
+      let recorderTabId: number | null;
+      try {
+        recorderTabId = await this.findRecorderTabId(
+          persisted.recordingId,
+          persisted.recorderTabId,
+          true
+        );
+      } catch (e) {
+        console.warn('[RecordingService] Recorder-tab liveness check failed:', e);
+        return false;
+      }
       if (recorderTabId == null) {
+        await this.retireDurableOwner(
+          persisted.recordingId,
+          persisted.strategy,
+          persisted.recorderTabId ?? null,
+          persisted.overlayTabId ?? null
+        );
+        await this.clearSessionSnapshot(persisted.recordingId);
         return false;
       }
       restoredRecorderTabId = recorderTabId;
@@ -1361,16 +1781,28 @@ export class RecordingService {
     }
 
     // A cancellation may have committed while the browser liveness lookup
-    // was pending. Recheck its independent marker before accepting RESTORE.
+    // was pending. Re-read all retirement keys before accepting RESTORE.
+    let latestState: PersistedSessionState;
     try {
-      const result = await this.chrome.storage.get(STORAGE_KEYS.SESSION_RETIREMENT);
-      retirement = result[STORAGE_KEYS.SESSION_RETIREMENT] as SessionRetirement | undefined;
+      latestState = await this.readPersistedSessionState();
     } catch (e) {
-      console.warn('[RecordingService] Failed to recheck session retirement:', e);
+      console.warn('[RecordingService] Failed to recheck persisted session state:', e);
       return false;
     }
-    if (retirement?.recordingId === persisted.recordingId) {
-      await this.cleanupRetiredSession(retirement);
+    const retirement = latestState.retirements.find(
+      (candidate) => candidate.recordingId === persisted.recordingId
+    );
+    const latestOwner = await this.readDurableOwner();
+    if (retirement || latestOwner?.status === 'retired') {
+      if (retirement) await this.cleanupRetiredSession(retirement);
+      return false;
+    }
+    if (
+      !latestOwner ||
+      latestOwner.status !== 'active' ||
+      latestOwner.recordingId !== persisted.recordingId ||
+      (persisted.generation != null && persisted.generation !== latestOwner.generation)
+    ) {
       return false;
     }
 
@@ -1400,6 +1832,7 @@ export class RecordingService {
     if (restoredRecorderTabId != null) {
       this.recorderTabId = restoredRecorderTabId;
     }
+    this.overlayTabId = persisted.overlayTabId ?? null;
     this.startCheckpointTimer();
     return true;
   }
@@ -1437,8 +1870,20 @@ export class RecordingService {
 
   private async findRecorderTabId(
     recordingId: string,
-    persistedTabId?: number | null
+    persistedTabId?: number | null,
+    failClosedOnQueryError = false
   ): Promise<number | null> {
+    if (this.chrome.runtime.findRecorderTabIds) {
+      try {
+        const ids = await this.chrome.runtime.findRecorderTabIds(recordingId);
+        return persistedTabId != null && ids.includes(persistedTabId)
+          ? persistedTabId
+          : ids[0] ?? null;
+      } catch (error) {
+        if (failClosedOnQueryError) throw error;
+        return null;
+      }
+    }
     // Extension pages do not receive tab URLs without the broad `tabs`
     // permission. Persisting the owned tab ID lets a worker restart reclaim a
     // recorder page using the narrower tab access already granted here.
@@ -1469,8 +1914,31 @@ export class RecordingService {
       }
     } catch (e) {
       console.warn('[RecordingService] Failed to locate recorder tab:', e);
+      if (failClosedOnQueryError) throw e;
     }
     return null;
+  }
+
+  private async hasLiveOwnerContext(owner: SessionOwner): Promise<boolean> {
+    if (owner.strategy === 'offscreen') {
+      try {
+        return await this.chrome.offscreen.hasDocument();
+      } catch (e) {
+        console.warn('[RecordingService] Failed to inspect owner offscreen document:', e);
+        return true;
+      }
+    }
+    if (owner.strategy === 'page') {
+      try {
+        return (await this.findRecorderTabId(owner.recordingId, owner.recorderTabId, true)) != null;
+      } catch (e) {
+        console.warn('[RecordingService] Failed to inspect owner recorder tab:', e);
+        // Keep an active owner when the browser query is unavailable; another
+        // worker may still be creating or using the recorder page.
+        return true;
+      }
+    }
+    return false;
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -1553,64 +2021,165 @@ export class RecordingService {
     const context = this.actor.getSnapshot().context;
     if (context.recordingId !== recordingId) return Promise.resolve();
 
-    // This separate, bounded key is intentionally outside sessionStorageQueue:
-    // a suspended live write must not delay durable cancellation. A later
-    // session can replace the marker only after startup has drained teardown
-    // and snapshot writes from this session.
-    const retirement = this.chrome.storage
-      .set({
-        [STORAGE_KEYS.SESSION_RETIREMENT]: {
+    // This per-recording key is intentionally outside sessionStorageQueue: a
+    // suspended live write must not delay durable cancellation, and a later
+    // worker's snapshot cannot overwrite this marker.
+    const retirement = Promise.all([
+      this.chrome.storage.set({
+        [sessionRetirementStorageKey(recordingId)]: {
           recordingId,
           strategy: context.strategy,
           recorderTabId: context.recorderTabId,
           overlayTabId: context.overlayTabId,
         } satisfies SessionRetirement,
-      })
+      }),
+      this.retireDurableOwner(
+        recordingId,
+        context.strategy,
+        context.recorderTabId ?? null,
+        context.overlayTabId ?? null
+      ),
+    ])
+      .then(() => undefined)
       .catch((e) => {
         console.warn('[RecordingService] Failed to persist session retirement:', e);
       });
     this.retirementWrites.set(recordingId, retirement);
 
-    // Queue this before sending the terminal actor event. Existing live writes
-    // finish first; later writes for this ID are suppressed. Thus a restart
-    // during removal/teardown sees a non-restorable snapshot, not a live one.
-    void this.queueSessionStorage(async () => {
-      await retirement;
-      await this.chrome.storage.set({
-        [STORAGE_KEYS.SESSION_SNAPSHOT]: {
-          ...context,
-          options: { ...context.options },
-          status: 'idle',
-          lastActivityAt: Date.now(),
-        },
-      });
-    }).catch((e) => {
-      console.warn('[RecordingService] Failed to persist terminal snapshot:', e);
-    });
     return retirement;
   }
 
-  private async cleanupRetiredSession(retirement: SessionRetirement): Promise<void> {
-    if (
-      !this.actor.getSnapshot().matches('idle') ||
-      this.retiredRecordingIds.has(retirement.recordingId)
-    )
-      return;
-    this.retiredRecordingIds.add(retirement.recordingId);
-    this.recorderTabId = retirement.strategy === 'page' ? retirement.recorderTabId : null;
-    this.overlayTabId = retirement.overlayTabId;
-    await this.cleanup(retirement.recordingId);
+  private async cleanupRetiredSession(
+    retirement: SessionRetirement,
+    protectedSnapshot?: SessionSnapshot
+  ): Promise<void> {
+    await withResourceLock(async () => {
+      if (!this.actor.getSnapshot().matches('idle')) return;
+      this.retiredRecordingIds.add(retirement.recordingId);
+
+      const pendingRetirement = this.retirementWrites.get(retirement.recordingId);
+      if (pendingRetirement) await pendingRetirement;
+
+      // The metadata transaction is the durable fence that survives a worker
+      // restart. If another worker has already claimed a different recording,
+      // this marker is still safe to clean, but that owner's browser resources
+      // must be protected below.
+      const ownerBeforeRetire = await this.readDurableOwner();
+      if (ownerBeforeRetire === undefined) return;
+      await this.retireDurableOwner(
+        retirement.recordingId,
+        retirement.strategy,
+        retirement.recorderTabId,
+        retirement.overlayTabId
+      );
+      const durableOwner = await this.readDurableOwner();
+      if (durableOwner === undefined) return;
+
+      const protectsOverlay =
+        protectedSnapshot?.recordingId !== retirement.recordingId &&
+        protectedSnapshot?.overlayTabId != null &&
+        protectedSnapshot.overlayTabId === retirement.overlayTabId;
+      const protectsRecorderTab =
+        protectedSnapshot?.recordingId !== retirement.recordingId &&
+        protectedSnapshot?.recorderTabId != null &&
+        protectedSnapshot.recorderTabId === retirement.recorderTabId;
+      const protectsOffscreen =
+        protectedSnapshot?.recordingId !== retirement.recordingId &&
+        protectedSnapshot?.strategy === 'offscreen' &&
+        retirement.strategy === 'offscreen';
+      const protectsDurableOwnerOverlay =
+        durableOwner?.status === 'active' &&
+        durableOwner.recordingId !== retirement.recordingId &&
+        durableOwner.overlayTabId != null &&
+        durableOwner.overlayTabId === retirement.overlayTabId;
+      const protectsDurableOwnerRecorder =
+        durableOwner?.status === 'active' &&
+        durableOwner.recordingId !== retirement.recordingId &&
+        durableOwner.recorderTabId != null &&
+        durableOwner.recorderTabId === retirement.recorderTabId;
+      const protectsDurableOwnerOffscreen =
+        durableOwner?.status === 'active' &&
+        durableOwner.recordingId !== retirement.recordingId &&
+        durableOwner.strategy === 'offscreen' &&
+        retirement.strategy === 'offscreen';
+
+      // A newer live worker can claim the machine while browser cleanup awaits a
+      // Chrome call. Recheck ownership before each destructive operation.
+      if (!this.actor.getSnapshot().matches('idle')) return;
+      if (retirement.overlayTabId != null && !protectsOverlay && !protectsDurableOwnerOverlay) {
+        await this.removeOverlay(retirement.overlayTabId);
+        if (!this.actor.getSnapshot().matches('idle')) return;
+      }
+
+      if (
+        retirement.strategy === 'page' &&
+        retirement.recorderTabId != null &&
+        !protectsRecorderTab &&
+        !protectsDurableOwnerRecorder
+      ) {
+        try {
+          const ownedTab = await this.findRecorderTabId(
+            retirement.recordingId,
+            retirement.recorderTabId,
+            true
+          );
+          if (ownedTab === retirement.recorderTabId) await this.chrome.tabs.remove(ownedTab);
+        } catch (e) {
+          console.warn('[RecordingService] Retired recorder tab cleanup failed:', e);
+          return;
+        }
+        if (!this.actor.getSnapshot().matches('idle')) return;
+      }
+
+      if (
+        retirement.strategy === 'offscreen' &&
+        !protectsOffscreen &&
+        !protectsDurableOwnerOffscreen
+      ) {
+        try {
+          const existing = await this.chrome.offscreen.hasDocument();
+          if (existing && this.actor.getSnapshot().matches('idle')) {
+            await this.chrome.offscreen.closeDocument();
+          }
+        } catch (e) {
+          console.warn('[RecordingService] Retired offscreen cleanup failed:', e);
+          return;
+        }
+        if (!this.actor.getSnapshot().matches('idle')) return;
+      }
+
+      if (this.recorderTabId === retirement.recorderTabId) this.recorderTabId = null;
+      if (this.overlayTabId === retirement.overlayTabId) this.overlayTabId = null;
+
+      // Only remove isolated metadata. The legacy singleton remains readable for
+      // older extension pages. The durable owner fence prevents a delayed old
+      // worker write from becoming restorable after this marker is removed.
+      const ownerBeforeMetadataCleanup = await this.readDurableOwner();
+      if (
+        ownerBeforeMetadataCleanup === undefined ||
+        (ownerBeforeMetadataCleanup?.status === 'active' &&
+          ownerBeforeMetadataCleanup.recordingId === retirement.recordingId)
+      ) {
+        return;
+      }
+      await this.queueSessionStorage(async () => {
+        await this.chrome.storage.remove(sessionSnapshotStorageKey(retirement.recordingId));
+        await this.chrome.storage.remove(sessionRetirementStorageKey(retirement.recordingId));
+      });
+    });
   }
 
   private cleanup(
-    recordingId: string | null = this.actor.getSnapshot().context.recordingId
+    recordingId: string | null = this.actor.getSnapshot().context.recordingId ??
+      this.lastSessionRecordingId
   ): Promise<void> {
     // Cleanup shares the startup/state-transition barrier. If a newer session
     // already owns the machine, this delayed caller has no resources to close.
     const cleanup = this.stateChangeQueue.then(async () => {
       const current = this.actor.getSnapshot();
       if (current.context.recordingId !== recordingId && !current.matches('idle')) return;
-      await this.cleanupResources();
+      await this.cleanupResources(recordingId);
+      if (recordingId) await this.finishRetirement(recordingId);
     });
     this.stateChangeQueue = cleanup.catch((e) => {
       console.warn('[RecordingService] Cleanup failed:', e);
@@ -1618,43 +2187,80 @@ export class RecordingService {
     return cleanup;
   }
 
+  /**
+   * Remove isolated terminal metadata only after browser resources have been
+   * reclaimed. The durable owner record remains as the bounded fence that
+   * rejects a late write from a suspended worker after this removal.
+   */
+  private async finishRetirement(recordingId: string): Promise<void> {
+    const pendingRetirement = this.retirementWrites.get(recordingId);
+    if (pendingRetirement) await pendingRetirement;
+    const owner = await this.readDurableOwner();
+    if (!owner || owner.recordingId !== recordingId || owner.status === 'active') return;
+    // Browser API failures are logged by cleanupResources. Retain its marker
+    // until absence is confirmed so the next wakeup can retry failed cleanup.
+    if ((await this.hasLiveOwnerContext(owner)) !== false) return;
+    await this.queueSessionStorage(async () => {
+      await this.chrome.storage.remove(sessionSnapshotStorageKey(recordingId));
+      await this.chrome.storage.remove(sessionRetirementStorageKey(recordingId));
+    });
+  }
+
   // Called directly only from a task that already owns stateChangeQueue.
-  private async cleanupResources(): Promise<void> {
-    const overlayTabId = this.overlayTabId;
-    const recorderTabId = this.recorderTabId;
+  private async cleanupResources(recordingId = this.lastSessionRecordingId): Promise<void> {
+    await withResourceLock(async () => {
+      const overlayTabId = this.overlayTabId;
+      const recorderTabId = this.recorderTabId;
 
-    // Remove overlay
-    if (overlayTabId) {
-      await this.removeOverlay(overlayTabId);
-      if (this.overlayTabId === overlayTabId) {
-        this.actor.send({ type: 'SET_OVERLAY_TAB_ID', tabId: null });
-        this.overlayTabId = null;
-      }
-    }
+      const ownerProtects = async (
+        resource: 'overlay' | 'recorder' | 'offscreen',
+        id?: number | null
+      ): Promise<boolean> => {
+        const owner = await this.readDurableOwner();
+        if (owner === undefined) return true;
+        if (!owner || owner.status !== 'active' || owner.recordingId === recordingId) return false;
+        if (resource === 'offscreen') return owner.strategy === 'offscreen';
+        return resource === 'overlay'
+          ? owner.overlayTabId != null && owner.overlayTabId === id
+          : owner.recorderTabId != null && owner.recorderTabId === id;
+      };
 
-    // Close recorder tab without letting a stale/missing tab abort later cleanup.
-    if (recorderTabId != null) {
-      try {
-        await this.chrome.tabs.remove(recorderTabId);
-      } catch (e) {
-        console.warn('[RecordingService] Recorder tab cleanup failed:', e);
-      } finally {
-        if (this.recorderTabId === recorderTabId) {
-          this.actor.send({ type: 'SET_RECORDER_TAB_ID', tabId: null });
-          this.recorderTabId = null;
+      // Remove overlay
+      if (overlayTabId && !(await ownerProtects('overlay', overlayTabId))) {
+        await this.removeOverlay(overlayTabId);
+        if (this.overlayTabId === overlayTabId) {
+          this.actor.send({ type: 'SET_OVERLAY_TAB_ID', tabId: null });
+          this.overlayTabId = null;
         }
       }
-    }
 
-    // Close offscreen document
-    try {
-      const existing = await this.chrome.offscreen.hasDocument();
-      if (existing) {
-        await this.chrome.offscreen.closeDocument();
+      // Close recorder tab without letting a stale/missing tab abort later cleanup.
+      if (recorderTabId != null && !(await ownerProtects('recorder', recorderTabId))) {
+        try {
+          const ownedTab = recordingId
+            ? await this.findRecorderTabId(recordingId, recorderTabId, true)
+            : null;
+          if (ownedTab === recorderTabId) await this.chrome.tabs.remove(ownedTab);
+        } catch (e) {
+          console.warn('[RecordingService] Recorder tab cleanup failed:', e);
+        } finally {
+          if (this.recorderTabId === recorderTabId) {
+            this.actor.send({ type: 'SET_RECORDER_TAB_ID', tabId: null });
+            this.recorderTabId = null;
+          }
+        }
       }
-    } catch (e) {
-      console.warn('[RecordingService] Offscreen cleanup failed:', e);
-    }
+
+      // Close offscreen document
+      try {
+        const existing = await this.chrome.offscreen.hasDocument();
+        if (existing && !(await ownerProtects('offscreen'))) {
+          await this.chrome.offscreen.closeDocument();
+        }
+      } catch (e) {
+        console.warn('[RecordingService] Offscreen cleanup failed:', e);
+      }
+    });
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -1683,13 +2289,21 @@ export class RecordingService {
         return await this.stopRecording();
 
       case 'OFFSCREEN_STARTED':
-        if (this.actor.getSnapshot().matches('idle')) await this.restoreSession();
+        if (
+          this.actor.getSnapshot().matches('idle') &&
+          !this.retiredRecordingIds.has(message.recordingId as string)
+        )
+          await this.restoreSession();
         return this.handleOffscreenStarted(message.recordingId as string)
           ? { ok: true }
           : { ok: false, error: 'Stale OFFSCREEN_STARTED acknowledgment' };
 
       case 'RECORDER_STARTED':
-        if (this.actor.getSnapshot().matches('idle')) await this.restoreSession();
+        if (
+          this.actor.getSnapshot().matches('idle') &&
+          !this.retiredRecordingIds.has(message.recordingId as string)
+        )
+          await this.restoreSession();
         return this.handleRecorderStarted(message.recordingId as string)
           ? { ok: true }
           : { ok: false, error: 'Stale RECORDER_STARTED acknowledgment' };

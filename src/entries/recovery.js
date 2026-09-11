@@ -2,7 +2,9 @@
 // Phase 4 recovery flow
 
 import { STORE_RECORDINGS, STORE_CHUNKS, openDB } from '../lib/db-shared.js';
-const SESSION_SNAPSHOT_KEY = 'sessionSnapshot';
+// Legacy key retained only as a read fallback for snapshots written before
+// RecordingService moved session ownership to per-recording metadata.
+const LEGACY_SESSION_SNAPSHOT_KEY = 'sessionSnapshot';
 
 /**
  * Get active session snapshot from chrome.storage.local
@@ -10,8 +12,21 @@ const SESSION_SNAPSHOT_KEY = 'sessionSnapshot';
  */
 async function getActiveSessionSnapshot() {
   try {
-    const result = await chrome.storage.local.get(SESSION_SNAPSHOT_KEY);
-    return result[SESSION_SNAPSHOT_KEY] || null;
+    const state = await chrome.runtime.sendMessage({ type: 'GET_STATE' });
+    if (state && typeof state === 'object') {
+      return state.recordingId && ['starting', 'recording', 'stopping'].includes(state.status)
+        ? state
+        : null;
+    }
+  } catch (e) {
+    // Older extension versions did not answer GET_STATE from this page. Fall
+    // through to the legacy snapshot so an upgrade can still show recovery UI.
+  }
+
+  try {
+    const result = await chrome.storage.local.get(LEGACY_SESSION_SNAPSHOT_KEY);
+    const snapshot = result[LEGACY_SESSION_SNAPSHOT_KEY];
+    return snapshot && snapshot.recordingId && snapshot.status !== 'idle' ? snapshot : null;
   } catch (e) {
     return null;
   }
@@ -187,10 +202,11 @@ async function render() {
         try {
           if (action === 'discard') {
             if (confirm('Discard this recording? This cannot be undone.')) {
-              // Check if this is an active session (has sessionSnapshot)
+              // Ask the background for canonical session ownership. The
+              // storage fallback is limited to pre-coordination snapshots.
               try {
-                const snapshot = await chrome.storage.local.get('sessionSnapshot');
-                if (snapshot.sessionSnapshot && snapshot.sessionSnapshot.recordingId === id) {
+                const snapshot = await getActiveSessionSnapshot();
+                if (snapshot && snapshot.recordingId === id) {
                   // Background owns the machine transition and snapshot cleanup.
                   await chrome.runtime.sendMessage({ type: 'RECOVERY_DISCARD', recordingId: id });
                 } else {

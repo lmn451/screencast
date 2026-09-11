@@ -66,7 +66,11 @@ for (const restart of [false, true]) {
       await expect
         .poll(() =>
           control.evaluate(
-            async () => (await chrome.storage.local.get('sessionSnapshot')).sessionSnapshot
+            async (id) =>
+              (
+                await chrome.storage.local.get(`sessionSnapshot:${id}`)
+              )[`sessionSnapshot:${id}`],
+            before.recordingId
           )
         )
         .toMatchObject({
@@ -107,7 +111,11 @@ for (const mic of [true, false]) {
     await expect
       .poll(() =>
         control.evaluate(
-          async () => (await chrome.storage.local.get('sessionSnapshot')).sessionSnapshot
+          async (id) =>
+            (
+              await chrome.storage.local.get(`sessionSnapshot:${id}`)
+            )[`sessionSnapshot:${id}`],
+          before.recordingId
         )
       )
       .toMatchObject({ recordingId: before.recordingId, status: 'recording' });
@@ -136,4 +144,25 @@ test('screen permission denial permits retry without restarting the extension', 
   expect(await start(control)).toMatchObject({ ok: true });
   await expect.poll(async () => (await state(control)).status).toBe('recording');
   await stopAndSave(control);
+});
+
+test('does not close a recorder tab that navigated away after a worker restart', async ({
+  context,
+  extensionId,
+}) => {
+  const control = await context.newPage();
+  await control.goto(`chrome-extension://${extensionId}/consent.html`);
+  const opened = context.waitForEvent('page');
+  expect(await start(control)).toMatchObject({ ok: true });
+  const recorder = await opened;
+  await expect.poll(async () => (await state(control)).status).toBe('recording');
+  const cdp = await context.newCDPSession(control);
+  await cdp.send('ServiceWorker.enable');
+  await cdp.send('ServiceWorker.stopAllWorkers');
+  await cdp.detach();
+  await recorder.goto('about:blank');
+  expect((await state(control)).recording).toBe(false);
+  await control.evaluate(() => chrome.runtime.sendMessage({ type: 'STOP' }));
+  expect(recorder.isClosed()).toBe(false);
+  expect(recorder.url()).toBe('about:blank');
 });
