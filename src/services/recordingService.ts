@@ -120,6 +120,13 @@ interface StartupAttempt {
   offscreenStartRequested: boolean;
 }
 
+interface SessionRetirement {
+  recordingId: string;
+  strategy: RecordingContext['strategy'];
+  recorderTabId: number | null;
+  overlayTabId: number | null;
+}
+
 class StartupCancelledError extends Error {
   constructor() {
     super('Recording start was cancelled during initialization');
@@ -158,6 +165,7 @@ export class RecordingService {
   // Terminal transitions can precede asynchronous snapshot removal. Never let
   // a wakeup in this worker reclaim a session it has already finished/cancelled.
   private readonly retiredRecordingIds = new Set<string>();
+  private readonly retirementWrites = new Map<string, Promise<void>>();
 
   constructor(chrome: ChromeAPI) {
     this.chrome = chrome;
@@ -176,6 +184,13 @@ export class RecordingService {
     // Chained through a promise queue so each onStateChange fully settles before
     // the next runs, preventing interleaved storage/offscreen operations.
     this.actor.subscribe((snapshot) => {
+      if (
+        snapshot.matches('saved') ||
+        snapshot.matches('failed') ||
+        snapshot.matches('recoverable')
+      ) {
+        void this.retireRecording(snapshot.context.recordingId);
+      }
       this.stateChangeQueue = this.stateChangeQueue
         .then(() => this.onStateChange(snapshot))
         .catch((e) => {
@@ -197,7 +212,7 @@ export class RecordingService {
     const previousState = this.lastActorState;
     this.lastActorState = state;
     if (state === 'saved' || state === 'failed' || state === 'recoverable') {
-      this.retireRecording(context.recordingId);
+      await this.retireRecording(context.recordingId);
     }
 
     // Badge management
@@ -459,7 +474,8 @@ export class RecordingService {
    */
   private async cancelStartup(attempt: StartupAttempt | null): Promise<void> {
     const currentContext = this.actor.getSnapshot().context;
-    this.retireRecording(currentContext.recordingId);
+    this.clearTimers();
+    await this.retireRecording(currentContext.recordingId);
     const stopAttempt =
       attempt ??
       ({
@@ -470,7 +486,6 @@ export class RecordingService {
         offscreenStartRequested: false,
       } satisfies StartupAttempt);
     if (attempt) attempt.cancelled = true;
-    this.clearTimers();
 
     // Mark the machine idle immediately so late acknowledgements are rejected;
     // invalidateStartup above makes the in-flight initializer reject as soon
@@ -1033,6 +1048,7 @@ export class RecordingService {
     const snapshot = this.actor.getSnapshot();
     const isExpectedAcknowledgment =
       isValidUUID(recordingId) &&
+      !this.retiredRecordingIds.has(recordingId) &&
       snapshot.matches('starting') &&
       snapshot.context.recordingId === recordingId &&
       snapshot.context.strategy === 'offscreen';
@@ -1054,6 +1070,7 @@ export class RecordingService {
     const snapshot = this.actor.getSnapshot();
     const isExpectedAcknowledgment =
       isValidUUID(recordingId) &&
+      !this.retiredRecordingIds.has(recordingId) &&
       snapshot.matches('starting') &&
       snapshot.context.recordingId === recordingId &&
       snapshot.context.strategy === 'page';
@@ -1282,19 +1299,31 @@ export class RecordingService {
 
     if (!persisted || !isValidUUID(persisted.recordingId)) return false;
 
+    // Retirement uses its own key so an older live snapshot write cannot
+    // overwrite it or block it behind the worker's snapshot-write queue.
+    let retirement: SessionRetirement | undefined;
+    try {
+      const result = await this.chrome.storage.get(STORAGE_KEYS.SESSION_RETIREMENT);
+      retirement = result[STORAGE_KEYS.SESSION_RETIREMENT] as SessionRetirement | undefined;
+    } catch (e) {
+      console.warn('[RecordingService] Failed to read session retirement:', e);
+      return false;
+    }
+    if (retirement?.recordingId === persisted.recordingId) {
+      await this.cleanupRetiredSession(retirement);
+      return false;
+    }
+
     if (persisted.status === 'idle') {
       // Retirement is durable before snapshot removal or browser teardown.
       // A worker that died between those steps may leave a pending picker;
       // finish its cleanup without ever restoring an active machine state.
-      if (
-        !this.actor.getSnapshot().matches('idle') ||
-        this.retiredRecordingIds.has(persisted.recordingId)
-      )
-        return false;
-      this.retiredRecordingIds.add(persisted.recordingId);
-      this.recorderTabId = persisted.strategy === 'page' ? persisted.recorderTabId ?? null : null;
-      this.overlayTabId = persisted.overlayTabId ?? null;
-      await this.cleanup(persisted.recordingId);
+      await this.cleanupRetiredSession({
+        recordingId: persisted.recordingId,
+        strategy: persisted.strategy,
+        recorderTabId: persisted.recorderTabId ?? null,
+        overlayTabId: persisted.overlayTabId ?? null,
+      });
       return false;
     }
 
@@ -1328,6 +1357,20 @@ export class RecordingService {
       }
       restoredRecorderTabId = recorderTabId;
     } else {
+      return false;
+    }
+
+    // A cancellation may have committed while the browser liveness lookup
+    // was pending. Recheck its independent marker before accepting RESTORE.
+    try {
+      const result = await this.chrome.storage.get(STORAGE_KEYS.SESSION_RETIREMENT);
+      retirement = result[STORAGE_KEYS.SESSION_RETIREMENT] as SessionRetirement | undefined;
+    } catch (e) {
+      console.warn('[RecordingService] Failed to recheck session retirement:', e);
+      return false;
+    }
+    if (retirement?.recordingId === persisted.recordingId) {
+      await this.cleanupRetiredSession(retirement);
       return false;
     }
 
@@ -1502,27 +1545,61 @@ export class RecordingService {
     );
   }
 
-  private retireRecording(recordingId: string | null): void {
-    if (!recordingId || this.retiredRecordingIds.has(recordingId)) return;
+  private retireRecording(recordingId: string | null): Promise<void> {
+    if (!recordingId) return Promise.resolve();
+    const existingWrite = this.retirementWrites.get(recordingId);
+    if (existingWrite) return existingWrite;
     this.retiredRecordingIds.add(recordingId);
     const context = this.actor.getSnapshot().context;
-    if (context.recordingId !== recordingId) return;
+    if (context.recordingId !== recordingId) return Promise.resolve();
+
+    // This separate, bounded key is intentionally outside sessionStorageQueue:
+    // a suspended live write must not delay durable cancellation. A later
+    // session can replace the marker only after startup has drained teardown
+    // and snapshot writes from this session.
+    const retirement = this.chrome.storage
+      .set({
+        [STORAGE_KEYS.SESSION_RETIREMENT]: {
+          recordingId,
+          strategy: context.strategy,
+          recorderTabId: context.recorderTabId,
+          overlayTabId: context.overlayTabId,
+        } satisfies SessionRetirement,
+      })
+      .catch((e) => {
+        console.warn('[RecordingService] Failed to persist session retirement:', e);
+      });
+    this.retirementWrites.set(recordingId, retirement);
 
     // Queue this before sending the terminal actor event. Existing live writes
     // finish first; later writes for this ID are suppressed. Thus a restart
     // during removal/teardown sees a non-restorable snapshot, not a live one.
-    void this.queueSessionStorage(() =>
-      this.chrome.storage.set({
+    void this.queueSessionStorage(async () => {
+      await retirement;
+      await this.chrome.storage.set({
         [STORAGE_KEYS.SESSION_SNAPSHOT]: {
           ...context,
           options: { ...context.options },
           status: 'idle',
           lastActivityAt: Date.now(),
         },
-      })
-    ).catch((e) => {
-      console.warn('[RecordingService] Failed to persist session retirement:', e);
+      });
+    }).catch((e) => {
+      console.warn('[RecordingService] Failed to persist terminal snapshot:', e);
     });
+    return retirement;
+  }
+
+  private async cleanupRetiredSession(retirement: SessionRetirement): Promise<void> {
+    if (
+      !this.actor.getSnapshot().matches('idle') ||
+      this.retiredRecordingIds.has(retirement.recordingId)
+    )
+      return;
+    this.retiredRecordingIds.add(retirement.recordingId);
+    this.recorderTabId = retirement.strategy === 'page' ? retirement.recorderTabId : null;
+    this.overlayTabId = retirement.overlayTabId;
+    await this.cleanup(retirement.recordingId);
   }
 
   private cleanup(

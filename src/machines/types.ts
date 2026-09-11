@@ -145,6 +145,7 @@ export const TIMEOUTS = {
 
 export const STORAGE_KEYS = {
   SESSION_SNAPSHOT: 'sessionSnapshot',
+  SESSION_RETIREMENT: 'sessionRetirement',
 } as const;
 
 /** Alias for backwards compatibility with background-xstate.js */
