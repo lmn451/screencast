@@ -10,17 +10,17 @@ jobs:
   lint-build-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install pnpm
         run: |
           corepack enable
           corepack prepare "$(node -p 'require("./package.json").packageManager')" --activate
 
-      - name: Use Node 20
-        uses: actions/setup-node@v4
+      - name: Use Node 24
+        uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          node-version: '24'
           cache: 'pnpm'
 
       - name: Install dependencies
@@ -39,7 +39,7 @@ jobs:
         run: pnpm run test:unit
 
       - name: Upload Chrome marketplace package
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: screensilo-chrome-marketplace
           path: dist/screensilo-mv3-*.zip
@@ -47,7 +47,7 @@ jobs:
           retention-days: 30
 
       - name: Upload Firefox marketplace packages
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: screensilo-firefox-marketplace
           path: |
@@ -58,7 +58,7 @@ jobs:
 
       - name: Upload coverage artifact (if present)
         if: always() && hashFiles('coverage/**') != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-report
           path: coverage/
@@ -67,17 +67,17 @@ jobs:
     runs-on: ubuntu-latest
     needs: lint-build-test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install pnpm
         run: |
           corepack enable
           corepack prepare "$(node -p 'require("./package.json").packageManager')" --activate
 
-      - name: Use Node 20
-        uses: actions/setup-node@v4
+      - name: Use Node 24
+        uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          node-version: '24'
           cache: 'pnpm'
 
       - name: Install dependencies
@@ -99,7 +99,7 @@ jobs:
 
       - name: Upload E2E artifacts
         if: always() && hashFiles('test-results/e2e/**') != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-artifacts
           path: test-results/e2e/
