@@ -450,7 +450,7 @@ async function verifyCiProvenance(options, releaseSha, token) {
   return successfulRun.id;
 }
 
-async function verifyRelease(options, tag, githubToken) {
+async function verifyRelease(options, tag, githubToken, selectAssets = selectReleaseAssets) {
   const release = await githubJson(
     options,
     `/repos/${options.repository}/releases/tags/${encodeURIComponent(tag)}`,
@@ -468,10 +468,11 @@ async function verifyRelease(options, tag, githubToken) {
   const releaseSha = await resolveReleaseCommit(options, tag, githubToken);
   const masterSha = await verifyMasterAncestry(options, releaseSha, githubToken);
   const ciRunId = await verifyCiProvenance(options, releaseSha, githubToken);
-  const assets = selectReleaseAssets(release, tag);
+  const assets = selectAssets(release, tag);
   const expectedHost = new URL(GITHUB_API_BASE).host;
   validateAsset(assets.zipAsset, options.repository, expectedHost);
   validateAsset(assets.checksumAsset, options.repository, expectedHost);
+  if (assets.sourceAsset) validateAsset(assets.sourceAsset, options.repository, expectedHost);
 
   console.log(
     `Verified published release ${tag} at ${releaseSha.slice(0, 12)}; master ${masterSha.slice(
@@ -923,7 +924,15 @@ export async function publishRelease(options, env = process.env) {
   return publishResponse;
 }
 
-export { readZipManifest, verifyChecksum, verifyPackageManifest };
+export {
+  PublishError,
+  readZipManifest,
+  verifyChecksum,
+  verifyPackageManifest,
+  verifyRelease,
+  requestBytes,
+  withRetries,
+};
 
 async function main() {
   const options = parseArgs();

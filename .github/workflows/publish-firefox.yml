@@ -1,0 +1,61 @@
+name: Publish Firefox Add-on
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Published GitHub release tag to submit (for example, v0.2.3)
+        required: true
+        type: string
+
+concurrency:
+  group: firefox-addons-publish
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  publish:
+    name: Upload and submit Firefox package
+    runs-on: ubuntu-latest
+    environment:
+      name: firefox-store
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Require master dispatch
+        env:
+          EXPECTED_REF: refs/heads/master
+        run: |
+          if [ "$GITHUB_REF" != "$EXPECTED_REF" ]; then
+            echo "This workflow must be dispatched from master (got $GITHUB_REF)." >&2
+            exit 1
+          fi
+
+      - name: Check out master
+        uses: actions/checkout@v7
+        with:
+          ref: master
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Verify release, upload package, and submit for review
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
+          AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          node scripts/publish-firefox.mjs \
+            --tag "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY"
