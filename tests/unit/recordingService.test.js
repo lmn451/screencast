@@ -394,6 +394,84 @@ describe('startRecording', () => {
     });
   });
 
+  it.each([
+    ['offscreen', 'OFFSCREEN_STARTED'],
+    ['page', 'RECORDER_STARTED'],
+  ])(
+    'does not reclaim a cancelled %s startup from a late same-worker acknowledgement',
+    async (strategy, acknowledgementType) => {
+      const { chrome, store } = makeStorageBackedChrome({
+        capabilities: { offscreen: strategy === 'offscreen' },
+        offscreen: {
+          ...makeStubChrome().offscreen,
+          hasDocument: jest.fn(async () => strategy === 'offscreen'),
+        },
+      });
+
+      let releaseStartup;
+      if (strategy === 'offscreen') {
+        const pendingStart = new Promise((resolve) => {
+          releaseStartup = resolve;
+        });
+        chrome.runtime.sendMessage.mockImplementation(async (message) => {
+          if (message.type === 'OFFSCREEN_START') return pendingStart;
+          return undefined;
+        });
+      } else {
+        const pendingTabLookup = new Promise((resolve) => {
+          releaseStartup = resolve;
+        });
+        chrome.tabs.get.mockImplementationOnce(() => pendingTabLookup);
+      }
+
+      const svc = createRecordingService(chrome);
+      const firstStart = svc.startRecording('tab', false, false);
+      await flushMicrotasks(100);
+
+      const recordingId = svc.getState().recordingId;
+      expect(svc.getState().status).toBe('starting');
+      expect(store.sessionSnapshot).toEqual(
+        expect.objectContaining({ recordingId, status: 'starting' })
+      );
+
+      let releaseRemoval;
+      const pendingRemoval = new Promise((resolve) => {
+        releaseRemoval = resolve;
+      });
+      chrome.storage.remove.mockImplementationOnce(async (key) => {
+        await pendingRemoval;
+        delete store[key];
+      });
+
+      const stop = svc.stopRecording();
+      await flushMicrotasks(100);
+
+      expect(svc.getState().status).toBe('idle');
+      expect(chrome.storage.remove).toHaveBeenCalledWith('sessionSnapshot');
+      expect(store.sessionSnapshot).toEqual(expect.objectContaining({ recordingId }));
+
+      const lateAcknowledgement = await svc.handleMessage(
+        { type: acknowledgementType, recordingId },
+        { id: chrome.runtime.id }
+      );
+
+      expect(lateAcknowledgement).toEqual({
+        ok: false,
+        error: `Stale ${acknowledgementType} acknowledgment`,
+      });
+      expect(svc.getState().status).toBe('idle');
+      expect(svc.getState().recordingId).toBeNull();
+
+      releaseRemoval();
+      releaseStartup();
+      await expect(stop).resolves.toEqual({ ok: true });
+      await expect(firstStart).resolves.toEqual({
+        ok: false,
+        error: 'Recording start was cancelled during initialization',
+      });
+    }
+  );
+
   it('leaves an acknowledged page recording to the normal STOP flow', async () => {
     const chrome = makeStubChrome();
     let releaseTabLookup;
@@ -638,6 +716,90 @@ describe('handleOffscreenData / handleRecorderData', () => {
       url: `chrome-extension://test/preview.html?id=${encodeURIComponent(recordingId)}`,
     });
   });
+
+  it.each([
+    ['offscreen', 'page'],
+    ['page', 'offscreen'],
+  ])(
+    'keeps a newer %s session alive when an older %s data handler resumes after preview creation',
+    async (newStrategy, oldStrategy) => {
+      const { chrome, store } = makeStorageBackedChrome({
+        capabilities: { offscreen: oldStrategy === 'offscreen' },
+        offscreen: {
+          ...makeStubChrome().offscreen,
+          hasDocument: jest.fn(async () => oldStrategy === 'offscreen'),
+        },
+      });
+
+      let nextRecorderTabId = 98;
+      let releasePreview;
+      const pendingPreview = new Promise((resolve) => {
+        releasePreview = resolve;
+      });
+      chrome.tabs.create.mockImplementation(async ({ url }) => {
+        if (url.includes('/preview.html')) return pendingPreview;
+        return { id: ++nextRecorderTabId };
+      });
+
+      const svc = createRecordingService(chrome);
+      const setStrategy = (strategy) => {
+        chrome.capabilities.offscreen = strategy === 'offscreen';
+        chrome.offscreen.hasDocument.mockImplementation(async () => strategy === 'offscreen');
+      };
+      const acknowledge = (strategy) =>
+        strategy === 'offscreen' ? acknowledgeOffscreen(svc) : acknowledgeRecorder(svc);
+      const handleData = (strategy, recordingId) =>
+        strategy === 'offscreen'
+          ? svc.handleOffscreenData(recordingId, 'video/webm')
+          : svc.handleRecorderData(recordingId, 'video/webm');
+
+      await svc.startRecording('tab', false, false);
+      acknowledge(oldStrategy);
+      const oldRecordingId = svc.getState().recordingId;
+      await flushMicrotasks(100);
+
+      const oldData = handleData(oldStrategy, oldRecordingId);
+      await flushMicrotasks(100);
+      expect(svc.getState().status).toBe('saved');
+      expect(chrome.tabs.create).toHaveBeenCalledWith({
+        url: `chrome-extension://test/preview.html?id=${encodeURIComponent(oldRecordingId)}`,
+      });
+
+      jest.advanceTimersByTime(1000);
+      await flushMicrotasks(100);
+      expect(svc.getState().status).toBe('idle');
+
+      setStrategy(newStrategy);
+      await expect(svc.startRecording('tab', false, false)).resolves.toEqual(
+        expect.objectContaining({ ok: true })
+      );
+      acknowledge(newStrategy);
+      const newRecordingId = svc.getState().recordingId;
+      expect(newRecordingId).not.toBe(oldRecordingId);
+      await flushMicrotasks(100);
+      expect(store.sessionSnapshot).toEqual(
+        expect.objectContaining({ recordingId: newRecordingId })
+      );
+
+      const recorderRemovalsBeforeOldPreviewResolves = chrome.tabs.remove.mock.calls.length;
+      const offscreenClosuresBeforeOldPreviewResolves =
+        chrome.offscreen.closeDocument.mock.calls.length;
+
+      releasePreview({ id: 500 });
+      await oldData;
+      await flushMicrotasks(100);
+
+      expect(svc.getState().status).toBe('recording');
+      expect(svc.getState().recordingId).toBe(newRecordingId);
+      expect(chrome.tabs.remove.mock.calls.length).toBe(recorderRemovalsBeforeOldPreviewResolves);
+      expect(chrome.offscreen.closeDocument.mock.calls.length).toBe(
+        offscreenClosuresBeforeOldPreviewResolves
+      );
+      expect(store.sessionSnapshot).toEqual(
+        expect.objectContaining({ recordingId: newRecordingId })
+      );
+    }
+  );
 });
 
 describe('handleMessage routing', () => {

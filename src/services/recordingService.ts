@@ -155,6 +155,9 @@ export class RecordingService {
   private checkpointActive = false;
   private startInProgress = false;
   private startupAttempt: StartupAttempt | null = null;
+  // Terminal transitions can precede asynchronous snapshot removal. Never let
+  // a wakeup in this worker reclaim a session it has already finished/cancelled.
+  private readonly retiredRecordingIds = new Set<string>();
 
   constructor(chrome: ChromeAPI) {
     this.chrome = chrome;
@@ -249,7 +252,7 @@ export class RecordingService {
     if (state === 'idle') {
       await this.closeOffscreenDocumentIfIdle();
     } else if (state === 'recoverable' || state === 'failed') {
-      await this.cleanup();
+      await this.cleanupResources();
     }
   }
 
@@ -453,6 +456,7 @@ export class RecordingService {
    */
   private async cancelStartup(attempt: StartupAttempt | null): Promise<void> {
     const currentContext = this.actor.getSnapshot().context;
+    this.retireRecording(currentContext.recordingId);
     const stopAttempt =
       attempt ??
       ({
@@ -800,7 +804,14 @@ export class RecordingService {
     const [activeTab] = await this.chrome.tabs.query({ active: true, currentWindow: true });
     // An error can arrive during quota/tab lookups. Complete its queued
     // teardown before a retry creates browser resources or a new snapshot.
-    await this.settleStateChanges();
+    // Check the queue and send START in the same continuation. An extra async
+    // helper return would allow teardown to be queued between the final drain
+    // check and START, then close resources belonging to the new session.
+    let pendingStateChanges: Promise<void>;
+    do {
+      pendingStateChanges = this.stateChangeQueue;
+      await pendingStateChanges;
+    } while (pendingStateChanges !== this.stateChangeQueue);
 
     // Liveness wakeups can complete while the active-tab query is pending. Do
     // the ownership check immediately before START, before mutating overlay
@@ -892,6 +903,7 @@ export class RecordingService {
       }
       this.clearTimers();
       if (!cancelled && this.actor.getSnapshot().matches('starting')) {
+        this.retireRecording(attempt.recordingId);
         this.actor.send({ type: 'RESET' });
       }
       await this.cleanup();
@@ -1081,15 +1093,14 @@ export class RecordingService {
 
     this.clearTimers();
 
+    this.retireRecording(recordingId);
     this.actor.send({ type: 'OFFSCREEN_DATA', recordingId, mimeType });
     await this.clearActiveSessionArtifacts();
+    await this.cleanup(recordingId);
 
     // Open preview page
     const url = this.chrome.runtime.getURL(`preview.html?id=${encodeURIComponent(recordingId)}`);
     await this.chrome.tabs.create({ url });
-
-    // Clean up
-    await this.cleanup();
   }
 
   async handleRecorderData(recordingId: string, mimeType: string): Promise<void> {
@@ -1111,15 +1122,14 @@ export class RecordingService {
 
     this.clearTimers();
 
+    this.retireRecording(recordingId);
     this.actor.send({ type: 'RECORDER_DATA', recordingId, mimeType });
     await this.clearActiveSessionArtifacts();
+    await this.cleanup(recordingId);
 
     // Open preview page
     const url = this.chrome.runtime.getURL(`preview.html?id=${encodeURIComponent(recordingId)}`);
     await this.chrome.tabs.create({ url });
-
-    // Clean up
-    await this.cleanup();
   }
 
   async handleOffscreenError(
@@ -1139,6 +1149,7 @@ export class RecordingService {
       }
     }
     this.clearTimers();
+    this.retireRecording(this.actor.getSnapshot().context.recordingId);
     this.actor.send({
       type: 'OFFSCREEN_ERROR',
       error: toErrorText(error),
@@ -1160,6 +1171,7 @@ export class RecordingService {
       }
     }
     this.clearTimers();
+    this.retireRecording(this.actor.getSnapshot().context.recordingId);
     this.actor.send({ type: 'RECORDER_ERROR', error: toErrorText(error) });
     await this.clearActiveSessionArtifacts();
   }
@@ -1179,6 +1191,7 @@ export class RecordingService {
       this.invalidateStartup(snapshot.context.recordingId ?? undefined);
     }
     this.clearTimers();
+    this.retireRecording(snapshot.context.recordingId);
     this.actor.send({ type: 'TAB_CLOSING', tabId });
 
     // Do not attempt to remove the tab Chrome has already reported as closed.
@@ -1212,6 +1225,7 @@ export class RecordingService {
     }
 
     this.clearTimers();
+    this.retireRecording(recordingId);
     this.actor.send({ type: 'RECOVERY_DISCARD', recordingId });
     await this.cleanup();
     await this.settleStateChanges();
@@ -1266,6 +1280,7 @@ export class RecordingService {
     if (
       !persisted ||
       !isValidUUID(persisted.recordingId) ||
+      this.retiredRecordingIds.has(persisted.recordingId) ||
       (persisted.status !== 'starting' &&
         persisted.status !== 'recording' &&
         persisted.status !== 'stopping')
@@ -1299,7 +1314,10 @@ export class RecordingService {
 
     // START/STOP/GET_STATE can race this liveness query. Do not let a late
     // restore replace a newly-created session.
-    if (!this.actor.getSnapshot().matches('idle')) {
+    if (
+      !this.actor.getSnapshot().matches('idle') ||
+      this.retiredRecordingIds.has(persisted.recordingId)
+    ) {
       return false;
     }
 
@@ -1418,6 +1436,7 @@ export class RecordingService {
   }
 
   reset(): void {
+    this.retireRecording(this.actor.getSnapshot().context.recordingId);
     this.invalidateStartup(this.actor.getSnapshot().context.recordingId ?? undefined);
     this.clearTimers();
     this.actor.send({ type: 'RESET' });
@@ -1464,7 +1483,28 @@ export class RecordingService {
     );
   }
 
-  private async cleanup(): Promise<void> {
+  private retireRecording(recordingId: string | null): void {
+    if (recordingId) this.retiredRecordingIds.add(recordingId);
+  }
+
+  private cleanup(
+    recordingId: string | null = this.actor.getSnapshot().context.recordingId
+  ): Promise<void> {
+    // Cleanup shares the startup/state-transition barrier. If a newer session
+    // already owns the machine, this delayed caller has no resources to close.
+    const cleanup = this.stateChangeQueue.then(async () => {
+      const current = this.actor.getSnapshot();
+      if (current.context.recordingId !== recordingId && !current.matches('idle')) return;
+      await this.cleanupResources();
+    });
+    this.stateChangeQueue = cleanup.catch((e) => {
+      console.warn('[RecordingService] Cleanup failed:', e);
+    });
+    return cleanup;
+  }
+
+  // Called directly only from a task that already owns stateChangeQueue.
+  private async cleanupResources(): Promise<void> {
     const overlayTabId = this.overlayTabId;
     const recorderTabId = this.recorderTabId;
 
