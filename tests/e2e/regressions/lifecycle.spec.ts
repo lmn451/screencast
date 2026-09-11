@@ -48,30 +48,52 @@ test.beforeEach(async ({ context }) => {
   await installSyntheticCapture(context);
 });
 
-test('cancelling a pending picker closes its recorder and permits a fresh recording', async ({
-  context,
-  extensionId,
-}) => {
-  const control = await context.newPage();
-  await control.goto(`chrome-extension://${extensionId}/consent.html`);
-  await control.evaluate(() => chrome.storage.local.set({ reviewHoldPicker: true }));
-  const opened = context.waitForEvent('page');
-  expect(await start(control)).toMatchObject({ ok: true });
-  const recorder = await opened;
-  await recorder.waitForFunction(() => typeof (window as any).resolveReviewPicker === 'function');
-  expect((await state(control)).status).toBe('starting');
+for (const restart of [false, true]) {
+  test(`cancelling a pending picker ${
+    restart ? 'after worker restart ' : ''
+  }closes its recorder and permits a fresh recording`, async ({ context, extensionId }) => {
+    const control = await context.newPage();
+    await control.goto(`chrome-extension://${extensionId}/consent.html`);
+    await control.evaluate(() => chrome.storage.local.set({ reviewHoldPicker: true }));
+    const opened = context.waitForEvent('page');
+    expect(await start(control)).toMatchObject({ ok: true });
+    const recorder = await opened;
+    await recorder.waitForFunction(() => typeof (window as any).resolveReviewPicker === 'function');
+    expect((await state(control)).status).toBe('starting');
 
-  expect(await control.evaluate(() => chrome.runtime.sendMessage({ type: 'STOP' }))).toMatchObject({
-    ok: true,
+    if (restart) {
+      const before = await state(control);
+      await expect
+        .poll(() =>
+          control.evaluate(
+            async () => (await chrome.storage.local.get('sessionSnapshot')).sessionSnapshot
+          )
+        )
+        .toMatchObject({
+          recordingId: before.recordingId,
+          status: 'starting',
+          recorderTabId: expect.any(Number),
+        });
+      const cdp = await context.newCDPSession(control);
+      await cdp.send('ServiceWorker.enable');
+      await cdp.send('ServiceWorker.stopAllWorkers');
+      await cdp.detach();
+    }
+
+    expect(
+      await control.evaluate(() => chrome.runtime.sendMessage({ type: 'STOP' }))
+    ).toMatchObject({
+      ok: true,
+    });
+    await expect.poll(() => recorder.isClosed()).toBe(true);
+    expect((await state(control)).status).toBe('idle');
+
+    await control.evaluate(() => chrome.storage.local.set({ reviewHoldPicker: false }));
+    expect(await start(control)).toMatchObject({ ok: true });
+    await expect.poll(async () => (await state(control)).status).toBe('recording');
+    await stopAndSave(control);
   });
-  await expect.poll(() => recorder.isClosed()).toBe(true);
-  expect((await state(control)).status).toBe('idle');
-
-  await control.evaluate(() => chrome.storage.local.set({ reviewHoldPicker: false }));
-  expect(await start(control)).toMatchObject({ ok: true });
-  await expect.poll(async () => (await state(control)).status).toBe('recording');
-  await stopAndSave(control);
-});
+}
 
 for (const mic of [true, false]) {
   test(`a GET_STATE wake restores a live ${

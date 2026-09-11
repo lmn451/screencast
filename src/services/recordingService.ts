@@ -151,6 +151,7 @@ export class RecordingService {
   // Serializes onStateChange so persist/clear/close/badge side effects cannot
   // interleave across rapid transitions (notably saved→idle).
   private stateChangeQueue: Promise<void> = Promise.resolve();
+  private sessionStorageQueue: Promise<void> = Promise.resolve();
   private checkpointActive = false;
   private startInProgress = false;
   private startupAttempt: StartupAttempt | null = null;
@@ -247,7 +248,7 @@ export class RecordingService {
     // Offscreen document lifecycle
     if (state === 'idle') {
       await this.closeOffscreenDocumentIfIdle();
-    } else if (state === 'recoverable') {
+    } else if (state === 'recoverable' || state === 'failed') {
       await this.cleanup();
     }
   }
@@ -296,7 +297,20 @@ export class RecordingService {
     }
   }
 
+  private queueSessionStorage<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.sessionStorageQueue.then(operation);
+    this.sessionStorageQueue = result.then(
+      () => undefined,
+      () => undefined
+    );
+    return result;
+  }
+
   private async persistSessionSnapshot(context: RecordingContext): Promise<void> {
+    return this.queueSessionStorage(() => this.writeSessionSnapshot(context));
+  }
+
+  private async writeSessionSnapshot(context: RecordingContext): Promise<void> {
     if (!context.recordingId) return;
     const current = this.actor.getSnapshot();
     if (
@@ -329,20 +343,44 @@ export class RecordingService {
 
   private async clearSessionSnapshot(): Promise<void> {
     try {
-      await this.chrome.storage.remove(STORAGE_KEYS.SESSION_SNAPSHOT);
+      await this.queueSessionStorage(() =>
+        this.chrome.storage.remove(STORAGE_KEYS.SESSION_SNAPSHOT)
+      );
     } catch (e) {
       console.warn('[RecordingService] Failed to clear session snapshot:', e);
     }
   }
 
   private async clearActiveSessionArtifacts(): Promise<void> {
-    await this.clearSessionSnapshot();
-    await this.updateBadge('idle');
+    // The terminal transition already queued badge and snapshot cleanup.
+    // A second removal outside that queue could erase a later retry's state.
+    await this.settleStateChanges();
+  }
+
+  async clearInterruptedSessionSnapshot(recordingId: string): Promise<boolean> {
+    return this.queueSessionStorage(async () => {
+      const isLive = () => {
+        const current = this.actor.getSnapshot();
+        return (
+          current.matches('starting') || current.matches('recording') || current.matches('stopping')
+        );
+      };
+      if (isLive()) return false;
+      const result = await this.chrome.storage.get(STORAGE_KEYS.SESSION_SNAPSHOT);
+      const persisted = result[STORAGE_KEYS.SESSION_SNAPSHOT] as SessionSnapshot | undefined;
+      if (persisted?.recordingId !== recordingId || isLive()) return false;
+      await this.chrome.storage.remove(STORAGE_KEYS.SESSION_SNAPSHOT);
+      return true;
+    });
   }
 
   /** Wait until all queued state side effects observed so far have settled. */
   private async settleStateChanges(): Promise<void> {
-    await this.stateChangeQueue;
+    let pending: Promise<void>;
+    do {
+      pending = this.stateChangeQueue;
+      await pending;
+    } while (pending !== this.stateChangeQueue);
   }
 
   /**
@@ -691,7 +729,6 @@ export class RecordingService {
         // context may still be around while the error message is being handled.
         // Close that context before accepting a retry. cleanup only tears down
         // browser resources; it deliberately leaves any partial DB data intact.
-        await this.cleanup();
         // The failed transition clears the persisted session through the
         // serialized state-change queue. Wait for that clear before consulting
         // storage below, otherwise a retry can mistake its own stale snapshot
@@ -706,8 +743,18 @@ export class RecordingService {
       // A service-worker restart loses the in-memory machine. If a live capture
       // from a previous session still exists (offscreen document / recorder tab),
       // reclaim it instead of silently starting a second recording on top.
-      if (await this.restoreSession()) {
+      const restored = await this.restoreSession();
+      const postRestoreState = this.actor.getSnapshot().value;
+      if (restored || postRestoreState === 'recording' || postRestoreState === 'stopping') {
         return { ok: false, error: 'A recording is already in progress' };
+      }
+      // A concurrent GET_STATE/heartbeat may have restored the snapshot while
+      // this START was waiting in restoreSession(). Do not pass that false
+      // return through to initializeRecording: START is ignored in recording,
+      // which would otherwise make the initializer send a second start to the
+      // live capture context.
+      if (postRestoreState !== 'idle' && postRestoreState !== 'failed') {
+        return { ok: false, error: `Cannot start: invalid state ${postRestoreState}` };
       }
       return await this.initializeRecording(mode, includeMic, includeSystemAudio, bestQuality);
     } finally {
@@ -721,14 +768,53 @@ export class RecordingService {
     includeSystemAudio: boolean,
     bestQuality: boolean
   ): Promise<{ ok: boolean; error?: string; overlayInjected?: boolean }> {
+    const initialState = this.actor.getSnapshot().value;
+    if (initialState !== 'idle' && initialState !== 'failed') {
+      return {
+        ok: false,
+        error:
+          initialState === 'recording' || initialState === 'stopping'
+            ? 'A recording is already in progress'
+            : `Cannot start: invalid state ${initialState}`,
+      };
+    }
+
     // Check storage quota
     const quotaCheck = await checkStorageQuota();
     if (!quotaCheck.ok) {
       return { ok: false, error: quotaCheck.error };
     }
 
+    const stateBeforeTabQuery = this.actor.getSnapshot().value;
+    if (stateBeforeTabQuery !== 'idle' && stateBeforeTabQuery !== 'failed') {
+      return {
+        ok: false,
+        error:
+          stateBeforeTabQuery === 'recording' || stateBeforeTabQuery === 'stopping'
+            ? 'A recording is already in progress'
+            : `Cannot start: invalid state ${stateBeforeTabQuery}`,
+      };
+    }
+
     // Get active tab for overlay
     const [activeTab] = await this.chrome.tabs.query({ active: true, currentWindow: true });
+    // An error can arrive during quota/tab lookups. Complete its queued
+    // teardown before a retry creates browser resources or a new snapshot.
+    await this.settleStateChanges();
+
+    // Liveness wakeups can complete while the active-tab query is pending. Do
+    // the ownership check immediately before START, before mutating overlay
+    // fields or sending an event that the active machine would ignore.
+    const stateBeforeStart = this.actor.getSnapshot().value;
+    if (stateBeforeStart !== 'idle' && stateBeforeStart !== 'failed') {
+      return {
+        ok: false,
+        error:
+          stateBeforeStart === 'recording' || stateBeforeStart === 'stopping'
+            ? 'A recording is already in progress'
+            : `Cannot start: invalid state ${stateBeforeStart}`,
+      };
+    }
     this.overlayTabId = activeTab?.id ?? null;
 
     // Send START event to machine
@@ -1059,8 +1145,6 @@ export class RecordingService {
       code: code || undefined,
     });
     await this.clearActiveSessionArtifacts();
-    await this.cleanup();
-    await this.settleStateChanges();
   }
 
   async handleRecorderError(error: string | StructuredError, recordingId?: string): Promise<void> {
@@ -1078,8 +1162,6 @@ export class RecordingService {
     this.clearTimers();
     this.actor.send({ type: 'RECORDER_ERROR', error: toErrorText(error) });
     await this.clearActiveSessionArtifacts();
-    await this.cleanup();
-    await this.settleStateChanges();
   }
 
   async handleTabClosing(tabId: number): Promise<boolean> {
@@ -1223,7 +1305,10 @@ export class RecordingService {
 
     this.actor.send({ type: 'RESTORE', snapshot: persisted });
     if (
-      !this.actor.getSnapshot().matches('recording') ||
+      !(
+        this.actor.getSnapshot().matches('recording') ||
+        this.actor.getSnapshot().matches('starting')
+      ) ||
       this.actor.getSnapshot().context.recordingId !== persisted.recordingId
     ) {
       return false;
@@ -1443,11 +1528,13 @@ export class RecordingService {
         return await this.stopRecording();
 
       case 'OFFSCREEN_STARTED':
+        if (this.actor.getSnapshot().matches('idle')) await this.restoreSession();
         return this.handleOffscreenStarted(message.recordingId as string)
           ? { ok: true }
           : { ok: false, error: 'Stale OFFSCREEN_STARTED acknowledgment' };
 
       case 'RECORDER_STARTED':
+        if (this.actor.getSnapshot().matches('idle')) await this.restoreSession();
         return this.handleRecorderStarted(message.recordingId as string)
           ? { ok: true }
           : { ok: false, error: 'Stale RECORDER_STARTED acknowledgment' };

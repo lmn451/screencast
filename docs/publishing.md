@@ -64,4 +64,4 @@ Common rejection checks
 Release notes & versioning
 
 - Maintain CHANGELOG.md; paste into store release notes fields
-- Bump version for every upload (Chrome/Edge)
+- Bump version for every upload (Chrome/Edge/Firefox)

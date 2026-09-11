@@ -8,6 +8,7 @@ let onRemovedListener;
 const getAllRecordings = jest.fn();
 const hasChunks = jest.fn();
 const markRecordingRecoverable = jest.fn(async () => undefined);
+const clearInterruptedSessionSnapshot = jest.fn(async () => true);
 
 jest.unstable_mockModule('../../src/services/recordingService.js', () => ({
   CHECKPOINT_ALARM_NAME: 'screensilo-checkpoint',
@@ -17,6 +18,7 @@ jest.unstable_mockModule('../../src/services/recordingService.js', () => ({
     handleCheckpointAlarm: jest.fn(async () => undefined),
     handleTabClosing,
     restoreSession: jest.fn(async () => false),
+    clearInterruptedSessionSnapshot,
   })),
 }));
 jest.unstable_mockModule('../../src/lib/db.js', () => ({
@@ -86,6 +88,8 @@ beforeEach(() => {
   serviceState = { recording: false, recordingId: null };
   getAllRecordings.mockResolvedValue([]);
   hasChunks.mockResolvedValue(false);
+  clearInterruptedSessionSnapshot.mockReset();
+  clearInterruptedSessionSnapshot.mockResolvedValue(true);
   chrome.storage.local.get.mockResolvedValue({});
 });
 
@@ -104,6 +108,65 @@ it('leaves the current live recording untouched during periodic reconciliation',
 
   expect(markRecordingRecoverable).not.toHaveBeenCalled();
   expect(chrome.storage.local.remove).not.toHaveBeenCalled();
+  expect(chrome.tabs.create).not.toHaveBeenCalled();
+});
+
+it('preserves a recording that starts while the orphan scan is loading rows', async () => {
+  getAllRecordings.mockImplementationOnce(async () => {
+    serviceState = { recording: true, recordingId: 'new-live-recording' };
+    return [{ id: 'new-live-recording', status: 'active' }];
+  });
+
+  await reconcileUnfinishedSessions();
+
+  expect(markRecordingRecoverable).not.toHaveBeenCalled();
+  expect(chrome.storage.local.remove).not.toHaveBeenCalled();
+  expect(chrome.tabs.create).not.toHaveBeenCalled();
+});
+
+it('recovers the previous active row when a replacement recording starts mid-scan', async () => {
+  serviceState = { recording: true, recordingId: 'old-live-recording' };
+  getAllRecordings.mockImplementationOnce(async () => {
+    serviceState = { recording: true, recordingId: 'new-live-recording' };
+    return [
+      { id: 'old-live-recording', status: 'active' },
+      { id: 'new-live-recording', status: 'active' },
+    ];
+  });
+
+  await reconcileUnfinishedSessions();
+
+  expect(markRecordingRecoverable).toHaveBeenCalledTimes(1);
+  expect(markRecordingRecoverable).toHaveBeenCalledWith('old-live-recording');
+  expect(markRecordingRecoverable).not.toHaveBeenCalledWith('new-live-recording');
+});
+
+it('does not clear a newer session snapshot after an interrupted snapshot was inspected', async () => {
+  const interruptedSnapshot = {
+    recordingId: 'interrupted-recording',
+    status: 'recording',
+    strategy: 'offscreen',
+  };
+  const newSnapshot = {
+    recordingId: 'new-live-recording',
+    status: 'recording',
+    strategy: 'offscreen',
+  };
+  clearInterruptedSessionSnapshot.mockResolvedValueOnce(false);
+  chrome.storage.local.get.mockResolvedValueOnce({ sessionSnapshot: interruptedSnapshot });
+  getAllRecordings.mockImplementationOnce(async () => {
+    // Model a START whose snapshot persistence completes while DB rows are
+    // still being enumerated. The service mock remains idle here so this test
+    // specifically exercises the inspected-snapshot re-read guard.
+    chrome.storage.local.get.mockResolvedValue({ sessionSnapshot: newSnapshot });
+    return [];
+  });
+
+  await reconcileUnfinishedSessions();
+
+  expect(clearInterruptedSessionSnapshot).toHaveBeenCalledWith('interrupted-recording');
+  expect(chrome.storage.local.remove).not.toHaveBeenCalledWith('sessionSnapshot');
+  expect(hasChunks).not.toHaveBeenCalled();
   expect(chrome.tabs.create).not.toHaveBeenCalled();
 });
 
@@ -126,7 +189,7 @@ it('recovers and prompts for an interrupted persisted snapshot', async () => {
 
   await reconcileUnfinishedSessions();
 
-  expect(chrome.storage.local.remove).toHaveBeenCalledWith('sessionSnapshot');
+  expect(clearInterruptedSessionSnapshot).toHaveBeenCalledWith('interrupted-recording');
   expect(markRecordingRecoverable).toHaveBeenCalledWith('interrupted-recording');
   expect(chrome.tabs.create).toHaveBeenCalledTimes(1);
 });

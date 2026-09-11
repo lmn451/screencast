@@ -197,7 +197,14 @@ async function recoverOrphanedRecordings(skipRecordingId: string | null): Promis
     const recordings = await getAllRecordings();
     for (const recording of recordings) {
       if (recording.status === 'active') {
-        if (recording.id === skipRecordingId) {
+        // The service can accept START while the DB enumeration is awaiting
+        // rows. Re-read ownership for every row so a session that became live
+        // during that await is protected even when the initial state was idle.
+        const liveState = service.getState();
+        const protectedRecordingId = liveState.recording
+          ? liveState.recordingId ?? null
+          : skipRecordingId;
+        if (recording.id === protectedRecordingId) {
           logger.log('Skipping likely live active recording during orphan recovery', {
             recordingId: recording.id,
           });
@@ -250,8 +257,16 @@ async function reconcileUnfinishedSessions(): Promise<void> {
 
     recoveredOrphanCount = await recoverOrphanedRecordings(skipRecordingId);
 
+    // Reconciliation yields while sweeping DB rows. A new START can make the
+    // service live during that await, so refresh the protected ID before any
+    // snapshot recovery or cleanup decisions below.
+    const stateAfterOrphanRecovery = service.getState();
+    if (stateAfterOrphanRecovery.recording) {
+      skipRecordingId = stateAfterOrphanRecovery.recordingId ?? null;
+    }
+
     if (snapshot?.status && snapshot.status !== 'idle') {
-      if (skipRecordingId === snapshot.recordingId) {
+      if (stateAfterOrphanRecovery.recording || skipRecordingId === snapshot.recordingId) {
         logger.log('Found likely active session snapshot, deferring recovery', {
           status: snapshot.status,
           recordingId: snapshot.recordingId,
@@ -260,7 +275,20 @@ async function reconcileUnfinishedSessions(): Promise<void> {
         logger.log('Found interrupted session snapshot, marking recoverable', {
           status: snapshot.status,
         });
-        await chrome.storage.local.remove(SESSION_SNAPSHOT_KEY);
+
+        // Snapshot writes and this conditional clear are serialized by the
+        // recording service. A newer START snapshot therefore survives even
+        // when it is persisted while this reconciliation pass is awaiting DB
+        // work or an earlier clear operation.
+        const cleared =
+          snapshot.recordingId != null &&
+          (await service.clearInterruptedSessionSnapshot(snapshot.recordingId));
+        if (!cleared) {
+          logger.log('Skipping stale session snapshot recovery after ownership changed', {
+            recordingId: snapshot.recordingId,
+          });
+          return;
+        }
 
         if (snapshot.recordingId && (await hasChunks(snapshot.recordingId))) {
           await markRecordingRecoverable(snapshot.recordingId);
@@ -268,7 +296,7 @@ async function reconcileUnfinishedSessions(): Promise<void> {
         }
         await showRecoveryPrompt();
       }
-    } else if (recoveredOrphanCount > 0) {
+    } else if (recoveredOrphanCount > 0 && !service.getState().recording) {
       // A crash can happen before the first session snapshot is persisted.
       // The metadata stub still makes the chunks recoverable, so notify the user.
       await showRecoveryPrompt();

@@ -113,11 +113,32 @@ export const recordingMachine = setup({
 
     determineStrategy: assign({
       strategy: ({ context, event }) =>
-        event.type === 'START' && event.strategy
+        event.type === 'RESTORE'
+          ? event.snapshot.strategy
+          : event.type === 'START' && event.strategy
           ? event.strategy
           : context.options.includeMic
           ? 'page'
           : 'offscreen',
+    }),
+
+    restoreRecording: assign({
+      recordingId: ({ event }) =>
+        (event as { type: 'RESTORE'; snapshot: SessionSnapshot }).snapshot.recordingId,
+      correlationId: ({ event }) =>
+        (event as { type: 'RESTORE'; snapshot: SessionSnapshot }).snapshot.correlationId,
+      strategy: ({ event }) =>
+        (event as { type: 'RESTORE'; snapshot: SessionSnapshot }).snapshot.strategy,
+      startedAt: ({ event }) =>
+        (event as { type: 'RESTORE'; snapshot: SessionSnapshot }).snapshot.startedAt,
+      lastActivityAt: () => Date.now(),
+      options: ({ event }) => ({
+        ...(event as { type: 'RESTORE'; snapshot: SessionSnapshot }).snapshot.options,
+      }),
+      recorderTabId: ({ event }) =>
+        (event as { type: 'RESTORE'; snapshot: SessionSnapshot }).snapshot.recorderTabId ?? null,
+      error: () => null,
+      failedChunkCount: () => 0,
     }),
 
     updateLastActivity: assign({
@@ -168,28 +189,14 @@ export const recordingMachine = setup({
           target: 'starting',
           actions: 'startNewRecording',
         },
-        RESTORE: {
-          target: 'recording',
-          actions: assign({
-            recordingId: ({ event }) =>
-              (event as { type: 'RESTORE'; snapshot: SessionSnapshot }).snapshot.recordingId,
-            correlationId: ({ event }) =>
-              (event as { type: 'RESTORE'; snapshot: SessionSnapshot }).snapshot.correlationId,
-            strategy: ({ event }) =>
-              (event as { type: 'RESTORE'; snapshot: SessionSnapshot }).snapshot.strategy,
-            startedAt: ({ event }) =>
-              (event as { type: 'RESTORE'; snapshot: SessionSnapshot }).snapshot.startedAt,
-            lastActivityAt: () => Date.now(),
-            options: ({ event }) => ({
-              ...(event as { type: 'RESTORE'; snapshot: SessionSnapshot }).snapshot.options,
-            }),
-            recorderTabId: ({ event }) =>
-              (event as { type: 'RESTORE'; snapshot: SessionSnapshot }).snapshot.recorderTabId ??
-              null,
-            error: () => null,
-            failedChunkCount: () => 0,
-          }),
-        },
+        RESTORE: [
+          {
+            guard: ({ event }) => event.snapshot.status === 'starting',
+            target: 'starting',
+            actions: 'restoreRecording',
+          },
+          { target: 'recording', actions: 'restoreRecording' },
+        ],
       },
     },
 

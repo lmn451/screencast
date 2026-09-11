@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.3 (2026-09-10)
+## 0.2.3 (2026-09-11)
 
 ### Recording and recovery
 
