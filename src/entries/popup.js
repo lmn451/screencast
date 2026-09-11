@@ -15,7 +15,7 @@ async function getState() {
     return await chrome.runtime.sendMessage({ type: 'GET_STATE' });
   } catch (e) {
     logger.error('Failed to get state from background:', e);
-    alert('CaptureCast: Unable to communicate with the extension. Try reloading.');
+    alert('ScreenSilo: Unable to communicate with the extension. Try reloading.');
     return null;
   }
 }
@@ -48,7 +48,7 @@ async function start(mode) {
     window.location.href = `consent.html?${params.toString()}`;
   } catch (e) {
     logger.error('Failed to navigate to consent page:', e);
-    alert('CaptureCast: Failed to open recording consent page.');
+    alert('ScreenSilo: Failed to open recording consent page.');
   }
 }
 
@@ -57,11 +57,11 @@ async function stop() {
     const res = await chrome.runtime.sendMessage({ type: 'STOP' });
     if (!res?.ok) {
       logger.error('Failed to stop recording:', res?.error);
-      alert('CaptureCast: Failed to stop recording: ' + (res?.error || 'Unknown error'));
+      alert('ScreenSilo: Failed to stop recording: ' + (res?.error || 'Unknown error'));
     }
   } catch (e) {
     logger.error('Failed to send stop message:', e);
-    alert('CaptureCast: Could not stop recording. The extension may need to be reloaded.');
+    alert('ScreenSilo: Could not stop recording. The extension may need to be reloaded.');
   }
   window.close();
 }
@@ -92,12 +92,12 @@ async function stop() {
           chrome.tabs.create({ url: 'recordings.html' });
         } catch (e) {
           logger.error('Failed to open recordings page:', e);
-          alert('CaptureCast: Failed to open recordings page.');
+          alert('ScreenSilo: Failed to open recordings page.');
         }
       });
     }
   } catch (e) {
     logger.error('Popup initialization failed:', e);
-    alert('CaptureCast: Popup failed to initialize. Please try again.');
+    alert('ScreenSilo: Popup failed to initialize. Please try again.');
   }
 })();

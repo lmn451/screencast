@@ -8,6 +8,8 @@
  */
 
 import { jest } from '@jest/globals';
+import indexedDB from 'fake-indexeddb';
+import { setImmediate as realSetImmediate } from 'node:timers';
 
 const VALID_UUID = '550e8400-e29b-41d4-a716-446655440000';
 
@@ -21,6 +23,7 @@ let __resetRecordingServiceForTests;
 let storageUtils;
 
 beforeAll(async () => {
+  global.indexedDB = indexedDB;
   storageUtils = await import('../../src/lib/storage-utils.js');
   const mod = await import('../../src/services/recordingService.ts');
   createRecordingService = mod.createRecordingService;
@@ -78,6 +81,12 @@ async function flushMicrotasks(times = 20) {
   for (let i = 0; i < times; i++) {
     await Promise.resolve();
   }
+  // The coordination store uses fake-indexeddb, whose transaction callbacks
+  // run on a task queue rather than a promise microtask. Let one task run so
+  // startup assertions observe the same point as the browser implementation.
+  for (let i = 0; i < 50; i++) {
+    await new Promise((resolve) => realSetImmediate(resolve));
+  }
 }
 
 function acknowledgeOffscreen(svc) {
@@ -95,15 +104,25 @@ function makeStorageBackedChrome(overrides = {}) {
   const store = {};
   const chrome = makeStubChrome({
     storage: {
-      get: jest.fn(async (key) => ({ [key]: store[key] })),
+      get: jest.fn(async (key) => {
+        if (key == null) return { ...store };
+        if (Array.isArray(key)) {
+          return Object.fromEntries(key.map((name) => [name, store[name]]));
+        }
+        return { [key]: store[key] };
+      }),
       set: jest.fn(async (data) => Object.assign(store, data)),
       remove: jest.fn(async (key) => {
-        delete store[key];
+        for (const name of Array.isArray(key) ? key : [key]) delete store[name];
       }),
     },
     ...overrides,
   });
   return { chrome, store };
+}
+
+function snapshotFor(store, recordingId) {
+  return store[`sessionSnapshot:${recordingId}`] ?? store.sessionSnapshot;
 }
 
 // Simulate the SW being terminated + restarted mid-recording: a brand-new
@@ -114,7 +133,19 @@ function simulateServiceWorkerRestart(chrome) {
   return createRecordingService(chrome);
 }
 
-beforeEach(() => {
+async function clearSessionMetadataDatabase() {
+  await new Promise((resolve) => {
+    const request = indexedDB.deleteDatabase('CaptureCastSessionMetadata');
+    request.onsuccess = resolve;
+    request.onerror = resolve;
+    // Wait for existing per-operation connections to close rather than
+    // allowing the next test to reopen the old owner record after a blocked
+    // delete request.
+  });
+}
+
+beforeEach(async () => {
+  await clearSessionMetadataDatabase();
   __resetRecordingServiceForTests();
   storageUtils.checkStorageQuota.mockClear();
   storageUtils.checkStorageQuota.mockResolvedValue({ ok: true });
@@ -166,6 +197,24 @@ describe('startRecording', () => {
       bestQuality: false,
       recordingId: expect.stringMatching(/^[0-9a-f-]{36}$/i),
       targetTabId: 42,
+    });
+  });
+
+  it('uses the recorder page when the browser does not support offscreen documents', async () => {
+    const chrome = makeStubChrome({ capabilities: { offscreen: false } });
+    const svc = createRecordingService(chrome);
+
+    const result = await svc.startRecording('screen', false, false);
+
+    expect(result.ok).toBe(true);
+    expect(svc.getState().strategy).toBe('page');
+    expect(svc.getState().options.includeMic).toBe(false);
+    expect(chrome.offscreen.createDocument).not.toHaveBeenCalled();
+    expect(chrome.tabs.create).toHaveBeenCalledWith({
+      url: expect.stringMatching(
+        /^chrome-extension:\/\/test\/recorder\.html\?id=[0-9a-f-]{36}&mode=screen&mic=0&sys=0&best=0$/i
+      ),
+      active: true,
     });
   });
 
@@ -306,6 +355,398 @@ describe('startRecording', () => {
 
     const replacementStart = await svc.startRecording('tab', false, false);
     expect(replacementStart.ok).toBe(true);
+  });
+
+  it('cancels an offscreen start whose picker acknowledgement is still pending', async () => {
+    const chrome = makeStubChrome();
+    let releaseStart;
+    let firstStartMessage = true;
+    const pendingStart = new Promise((resolve) => {
+      releaseStart = resolve;
+    });
+    chrome.offscreen.hasDocument.mockResolvedValue(true);
+    chrome.runtime.sendMessage.mockImplementation(async (message) => {
+      if (message.type === 'OFFSCREEN_START' && firstStartMessage) {
+        firstStartMessage = false;
+        return pendingStart;
+      }
+      return undefined;
+    });
+    const svc = createRecordingService(chrome);
+
+    const firstStart = svc.startRecording('tab', false, false);
+    await flushMicrotasks();
+    expect(chrome.runtime.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'OFFSCREEN_START' })
+    );
+
+    const stopResult = await svc.stopRecording();
+
+    expect(stopResult).toEqual({ ok: true });
+    expect(svc.getState().status).toBe('idle');
+    expect(chrome.runtime.sendMessage).toHaveBeenCalledWith({ type: 'OFFSCREEN_STOP' });
+    expect(chrome.offscreen.closeDocument).toHaveBeenCalled();
+
+    releaseStart();
+    await expect(firstStart).resolves.toEqual({
+      ok: false,
+      error: 'Recording start was cancelled during initialization',
+    });
+
+    const retry = await svc.startRecording('tab', false, false);
+    expect(retry.ok).toBe(true);
+  });
+
+  it('removes a page recorder tab when cancellation races its first lookup', async () => {
+    const chrome = makeStubChrome();
+    let releaseTabLookup;
+    const pendingTabLookup = new Promise((resolve) => {
+      releaseTabLookup = resolve;
+    });
+    chrome.tabs.get.mockImplementationOnce(() => pendingTabLookup);
+    const svc = createRecordingService(chrome);
+
+    const firstStart = svc.startRecording('tab', true, false);
+    await flushMicrotasks();
+    expect(chrome.tabs.create).toHaveBeenCalled();
+    expect(chrome.tabs.get).toHaveBeenCalledWith(99);
+
+    const stopResult = await svc.stopRecording();
+
+    expect(stopResult).toEqual({ ok: true });
+    expect(svc.getState().status).toBe('idle');
+    expect(chrome.tabs.sendMessage).toHaveBeenCalledWith(99, { type: 'RECORDER_STOP' });
+    expect(chrome.tabs.remove).toHaveBeenCalledWith(99);
+
+    releaseTabLookup({ windowId: 1 });
+    await expect(firstStart).resolves.toEqual({
+      ok: false,
+      error: 'Recording start was cancelled during initialization',
+    });
+  });
+
+  it.each([
+    ['offscreen', 'OFFSCREEN_STARTED'],
+    ['page', 'RECORDER_STARTED'],
+  ])(
+    'does not reclaim a cancelled %s startup from a late same-worker acknowledgement',
+    async (strategy, acknowledgementType) => {
+      const { chrome, store } = makeStorageBackedChrome({
+        capabilities: { offscreen: strategy === 'offscreen' },
+        offscreen: {
+          ...makeStubChrome().offscreen,
+          hasDocument: jest.fn(async () => strategy === 'offscreen'),
+        },
+      });
+
+      let releaseStartup;
+      if (strategy === 'offscreen') {
+        const pendingStart = new Promise((resolve) => {
+          releaseStartup = resolve;
+        });
+        chrome.runtime.sendMessage.mockImplementation(async (message) => {
+          if (message.type === 'OFFSCREEN_START') return pendingStart;
+          return undefined;
+        });
+      } else {
+        const pendingTabLookup = new Promise((resolve) => {
+          releaseStartup = resolve;
+        });
+        chrome.tabs.get.mockImplementationOnce(() => pendingTabLookup);
+      }
+
+      const svc = createRecordingService(chrome);
+      const firstStart = svc.startRecording('tab', false, false);
+      await flushMicrotasks(100);
+
+      const recordingId = svc.getState().recordingId;
+      expect(svc.getState().status).toBe('starting');
+      expect(snapshotFor(store, recordingId)).toEqual(
+        expect.objectContaining({ recordingId, status: 'starting' })
+      );
+
+      let releaseRemoval;
+      const pendingRemoval = new Promise((resolve) => {
+        releaseRemoval = resolve;
+      });
+      chrome.storage.remove.mockImplementationOnce(async (key) => {
+        await pendingRemoval;
+        delete store[key];
+      });
+
+      const stop = svc.stopRecording();
+      await flushMicrotasks(100);
+
+      expect(svc.getState().status).toBe('idle');
+      expect(chrome.storage.remove).toHaveBeenCalledWith(`sessionSnapshot:${recordingId}`);
+      expect(snapshotFor(store, recordingId)).toEqual(expect.objectContaining({ recordingId }));
+
+      const lateAcknowledgement = await svc.handleMessage(
+        { type: acknowledgementType, recordingId },
+        { id: chrome.runtime.id }
+      );
+
+      expect(lateAcknowledgement).toEqual({
+        ok: false,
+        error: `Stale ${acknowledgementType} acknowledgment`,
+      });
+      expect(svc.getState().status).toBe('idle');
+      expect(svc.getState().recordingId).toBeNull();
+
+      releaseRemoval();
+      releaseStartup();
+      await expect(stop).resolves.toEqual({ ok: true });
+      await expect(firstStart).resolves.toEqual({
+        ok: false,
+        error: 'Recording start was cancelled during initialization',
+      });
+    }
+  );
+
+  it.each([
+    ['offscreen', 'OFFSCREEN_STARTED'],
+    ['page', 'RECORDER_STARTED'],
+  ])(
+    'persists a cancelled %s startup as terminal before a worker restart can reclaim it',
+    async (strategy, acknowledgementType) => {
+      const { chrome, store } = makeStorageBackedChrome({
+        capabilities: { offscreen: strategy === 'offscreen' },
+        offscreen: {
+          ...makeStubChrome().offscreen,
+          hasDocument: jest.fn(async () => strategy === 'offscreen'),
+        },
+      });
+
+      let releaseStartup;
+      if (strategy === 'offscreen') {
+        const pendingStart = new Promise((resolve) => {
+          releaseStartup = resolve;
+        });
+        chrome.runtime.sendMessage.mockImplementation(async (message) => {
+          if (message.type === 'OFFSCREEN_START') return pendingStart;
+          return undefined;
+        });
+      } else {
+        const pendingTabLookup = new Promise((resolve) => {
+          releaseStartup = resolve;
+        });
+        chrome.tabs.get.mockImplementationOnce(() => pendingTabLookup);
+      }
+
+      const svc = createRecordingService(chrome);
+      const firstStart = svc.startRecording('tab', false, false);
+      await flushMicrotasks(100);
+
+      const recordingId = svc.getState().recordingId;
+      expect(svc.getState().status).toBe('starting');
+      expect(snapshotFor(store, recordingId)).toEqual(
+        expect.objectContaining({ recordingId, status: 'starting' })
+      );
+
+      let releaseRemoval;
+      const pendingRemoval = new Promise((resolve) => {
+        releaseRemoval = resolve;
+      });
+      chrome.storage.remove.mockImplementationOnce(async (key) => {
+        await pendingRemoval;
+        delete store[key];
+      });
+
+      const stop = svc.stopRecording();
+      await flushMicrotasks(100);
+
+      expect(svc.getState().status).toBe('idle');
+      expect(chrome.storage.remove).toHaveBeenCalledWith(`sessionSnapshot:${recordingId}`);
+      expect(snapshotFor(store, recordingId)).toEqual(
+        expect.objectContaining({ recordingId, status: 'starting' })
+      );
+
+      const recorderTabRemovalsBeforeRestart = chrome.tabs.remove.mock.calls.length;
+      const offscreenClosuresBeforeRestart = chrome.offscreen.closeDocument.mock.calls.length;
+
+      const restarted = simulateServiceWorkerRestart(chrome);
+      const lateAcknowledgement = await restarted.handleMessage(
+        { type: acknowledgementType, recordingId },
+        { id: chrome.runtime.id }
+      );
+
+      expect(lateAcknowledgement).toEqual({
+        ok: false,
+        error: `Stale ${acknowledgementType} acknowledgment`,
+      });
+      expect(restarted.getState().status).toBe('idle');
+      expect(restarted.getState().recordingId).toBeNull();
+      if (strategy === 'page') {
+        expect(chrome.tabs.remove.mock.calls.length).toBeGreaterThan(
+          recorderTabRemovalsBeforeRestart
+        );
+        expect(chrome.tabs.remove).toHaveBeenCalledWith(99);
+      } else {
+        expect(chrome.offscreen.closeDocument.mock.calls.length).toBe(
+          offscreenClosuresBeforeRestart + 1
+        );
+      }
+      await expect(restarted.handleHeartbeat(recordingId)).resolves.toEqual({
+        ok: false,
+        error: 'Heartbeat for unknown session',
+      });
+      expect(restarted.getState().status).toBe('idle');
+      expect(restarted.getState().recordingId).toBeNull();
+
+      releaseRemoval();
+      releaseStartup();
+      await expect(stop).resolves.toEqual({ ok: true });
+      await expect(firstStart).resolves.toEqual({
+        ok: false,
+        error: 'Recording start was cancelled during initialization',
+      });
+    }
+  );
+
+  it.each([
+    ['offscreen', 'OFFSCREEN_STARTED'],
+    ['page', 'RECORDER_STARTED'],
+  ])(
+    'durably retires a %s startup while a live snapshot write is delayed',
+    async (strategy, acknowledgementType) => {
+      const { chrome, store } = makeStorageBackedChrome({
+        capabilities: { offscreen: strategy === 'offscreen' },
+        offscreen: {
+          ...makeStubChrome().offscreen,
+          hasDocument: jest.fn(async () => strategy === 'offscreen'),
+        },
+      });
+
+      let startingWrites = 0;
+      let releaseStartingWrite;
+      const pendingStartingWrite = new Promise((resolve) => {
+        releaseStartingWrite = resolve;
+      });
+      chrome.storage.set.mockImplementation(async (data) => {
+        const snapshot = Object.entries(data).find(
+          ([key, value]) => key.startsWith('sessionSnapshot:') && value?.status === 'starting'
+        )?.[1];
+        if (snapshot?.status === 'starting') {
+          startingWrites += 1;
+          if (startingWrites === 2) await pendingStartingWrite;
+        }
+        Object.assign(store, data);
+      });
+
+      const svc = createRecordingService(chrome);
+      const firstStart = svc.startRecording('tab', false, false);
+      await expect(firstStart).resolves.toEqual(expect.objectContaining({ ok: true }));
+      await flushMicrotasks(100);
+
+      const recordingId = svc.getState().recordingId;
+      expect(startingWrites).toBeGreaterThanOrEqual(2);
+      expect(svc.getState().status).toBe('starting');
+      expect(snapshotFor(store, recordingId)).toEqual(
+        expect.objectContaining({ recordingId, status: 'starting' })
+      );
+
+      const stop = svc.stopRecording();
+      await flushMicrotasks(100);
+
+      expect(svc.getState().status).toBe('idle');
+      expect(snapshotFor(store, recordingId)).toEqual(
+        expect.objectContaining({ recordingId, status: 'starting' })
+      );
+      expect(store[`sessionRetirement:${recordingId}`]).toEqual(
+        expect.objectContaining({ recordingId, strategy })
+      );
+
+      const recorderTabRemovalsBeforeRestart = chrome.tabs.remove.mock.calls.length;
+      const offscreenClosuresBeforeRestart = chrome.offscreen.closeDocument.mock.calls.length;
+      const restarted = simulateServiceWorkerRestart(chrome);
+
+      const lateAcknowledgement = await restarted.handleMessage(
+        { type: acknowledgementType, recordingId },
+        { id: chrome.runtime.id }
+      );
+      expect(lateAcknowledgement).toEqual({
+        ok: false,
+        error: `Stale ${acknowledgementType} acknowledgment`,
+      });
+      expect(restarted.getState().status).toBe('idle');
+      expect(restarted.getState().recordingId).toBeNull();
+      if (strategy === 'page') {
+        expect(chrome.tabs.remove.mock.calls.length).toBeGreaterThan(
+          recorderTabRemovalsBeforeRestart
+        );
+        expect(chrome.tabs.remove).toHaveBeenCalledWith(99);
+      } else {
+        expect(chrome.offscreen.closeDocument.mock.calls.length).toBe(
+          offscreenClosuresBeforeRestart + 1
+        );
+      }
+
+      await expect(restarted.handleHeartbeat(recordingId)).resolves.toEqual({
+        ok: false,
+        error: 'Heartbeat for unknown session',
+      });
+      expect(restarted.getState().status).toBe('idle');
+      expect(restarted.getState().recordingId).toBeNull();
+
+      releaseStartingWrite();
+      await expect(stop).resolves.toEqual({ ok: true });
+      await expect(firstStart).resolves.toEqual(expect.objectContaining({ ok: true }));
+    }
+  );
+
+  it('leaves an acknowledged page recording to the normal STOP flow', async () => {
+    const chrome = makeStubChrome();
+    let releaseTabLookup;
+    const pendingTabLookup = new Promise((resolve) => {
+      releaseTabLookup = resolve;
+    });
+    chrome.tabs.get.mockImplementationOnce(() => pendingTabLookup);
+    const svc = createRecordingService(chrome);
+
+    const firstStart = svc.startRecording('tab', true, false);
+    await flushMicrotasks();
+    acknowledgeRecorder(svc);
+    expect(svc.getState().status).toBe('recording');
+
+    const stopResult = await svc.stopRecording();
+    expect(stopResult).toEqual({ ok: true });
+    expect(svc.getState().status).toBe('stopping');
+    expect(chrome.tabs.sendMessage).toHaveBeenCalledWith(99, { type: 'RECORDER_STOP' });
+    expect(chrome.tabs.remove).not.toHaveBeenCalledWith(99);
+
+    releaseTabLookup({ windowId: 1 });
+    await expect(firstStart).resolves.toEqual({
+      ok: false,
+      error: 'Recording start was cancelled during initialization',
+    });
+    expect(chrome.tabs.remove).not.toHaveBeenCalledWith(99);
+  });
+
+  it('serializes retries while failed startup cleanup is pending', async () => {
+    const chrome = makeStubChrome();
+    const svc = createRecordingService(chrome);
+    await svc.startRecording('tab', false, false);
+    acknowledgeOffscreen(svc);
+    await svc.handleOffscreenError('Permission denied', 'PERMISSION_DENIED');
+    expect(svc.getState().status).toBe('failed');
+
+    let releaseCleanup;
+    const pendingCleanup = new Promise((resolve) => {
+      releaseCleanup = resolve;
+    });
+    chrome.offscreen.hasDocument.mockImplementationOnce(() => pendingCleanup);
+
+    const firstRetry = svc.startRecording('tab', false, false);
+    await flushMicrotasks();
+    const secondRetry = await svc.startRecording('tab', false, false);
+
+    expect(secondRetry).toEqual({
+      ok: false,
+      error: 'Cannot start: initialization already in progress',
+    });
+
+    releaseCleanup(false);
+    await expect(firstRetry).resolves.toEqual(expect.objectContaining({ ok: true }));
   });
 
   it('ignores a stale acknowledgment without cancelling the current start timeout', async () => {
@@ -497,6 +938,90 @@ describe('handleOffscreenData / handleRecorderData', () => {
       url: `chrome-extension://test/preview.html?id=${encodeURIComponent(recordingId)}`,
     });
   });
+
+  it.each([
+    ['offscreen', 'page'],
+    ['page', 'offscreen'],
+  ])(
+    'keeps a newer %s session alive when an older %s data handler resumes after preview creation',
+    async (newStrategy, oldStrategy) => {
+      const { chrome, store } = makeStorageBackedChrome({
+        capabilities: { offscreen: oldStrategy === 'offscreen' },
+        offscreen: {
+          ...makeStubChrome().offscreen,
+          hasDocument: jest.fn(async () => oldStrategy === 'offscreen'),
+        },
+      });
+
+      let nextRecorderTabId = 98;
+      let releasePreview;
+      const pendingPreview = new Promise((resolve) => {
+        releasePreview = resolve;
+      });
+      chrome.tabs.create.mockImplementation(async ({ url }) => {
+        if (url.includes('/preview.html')) return pendingPreview;
+        return { id: ++nextRecorderTabId };
+      });
+
+      const svc = createRecordingService(chrome);
+      const setStrategy = (strategy) => {
+        chrome.capabilities.offscreen = strategy === 'offscreen';
+        chrome.offscreen.hasDocument.mockImplementation(async () => strategy === 'offscreen');
+      };
+      const acknowledge = (strategy) =>
+        strategy === 'offscreen' ? acknowledgeOffscreen(svc) : acknowledgeRecorder(svc);
+      const handleData = (strategy, recordingId) =>
+        strategy === 'offscreen'
+          ? svc.handleOffscreenData(recordingId, 'video/webm')
+          : svc.handleRecorderData(recordingId, 'video/webm');
+
+      await svc.startRecording('tab', false, false);
+      acknowledge(oldStrategy);
+      const oldRecordingId = svc.getState().recordingId;
+      await flushMicrotasks(100);
+
+      const oldData = handleData(oldStrategy, oldRecordingId);
+      await flushMicrotasks(100);
+      expect(svc.getState().status).toBe('saved');
+      expect(chrome.tabs.create).toHaveBeenCalledWith({
+        url: `chrome-extension://test/preview.html?id=${encodeURIComponent(oldRecordingId)}`,
+      });
+
+      jest.advanceTimersByTime(1000);
+      await flushMicrotasks(100);
+      expect(svc.getState().status).toBe('idle');
+
+      setStrategy(newStrategy);
+      await expect(svc.startRecording('tab', false, false)).resolves.toEqual(
+        expect.objectContaining({ ok: true })
+      );
+      acknowledge(newStrategy);
+      const newRecordingId = svc.getState().recordingId;
+      expect(newRecordingId).not.toBe(oldRecordingId);
+      await flushMicrotasks(100);
+      expect(snapshotFor(store, newRecordingId)).toEqual(
+        expect.objectContaining({ recordingId: newRecordingId })
+      );
+
+      const recorderRemovalsBeforeOldPreviewResolves = chrome.tabs.remove.mock.calls.length;
+      const offscreenClosuresBeforeOldPreviewResolves =
+        chrome.offscreen.closeDocument.mock.calls.length;
+
+      releasePreview({ id: 500 });
+      await oldData;
+      await flushMicrotasks(100);
+
+      expect(svc.getState().status).toBe('recording');
+      expect(svc.getState().recordingId).toBe(newRecordingId);
+      expect(chrome.tabs.remove.mock.calls.length).toBe(recorderRemovalsBeforeOldPreviewResolves);
+      expect(chrome.offscreen.closeDocument.mock.calls.length).toBe(
+        offscreenClosuresBeforeOldPreviewResolves
+      );
+      expect(snapshotFor(store, newRecordingId)).toEqual(
+        expect.objectContaining({ recordingId: newRecordingId })
+      );
+    }
+  );
 });
 
 describe('handleMessage routing', () => {
@@ -654,7 +1179,7 @@ describe('state projection and recovery exits', () => {
     expect(svc.getState().status).toBe('idle');
     expect(svc.getState().recording).toBe(false);
     await flushMicrotasks();
-    expect(chrome.storage.remove).toHaveBeenCalledWith('sessionSnapshot');
+    expect(chrome.storage.remove).toHaveBeenCalledWith(`sessionSnapshot:${recordingId}`);
   });
 
   it('rejects a stale recovery discard without touching the active session', async () => {
@@ -727,16 +1252,125 @@ describe('state projection and recovery exits', () => {
     await flushMicrotasks(2);
     expect(chrome.storage.set).toHaveBeenCalledTimes(1);
 
-    await svc.handleOffscreenError('capture failed');
+    const failure = svc.handleOffscreenError('capture failed');
     expect(chrome.alarms.clear).toHaveBeenCalled();
     releasePersist();
-    await checkpoint;
+    await Promise.all([checkpoint, failure]);
 
     expect(chrome.alarms.create).not.toHaveBeenCalled();
   });
 });
 
 describe('session restore & heartbeat (service-worker restart recovery)', () => {
+  it.each(['offscreen', 'page'])(
+    'restores and cancels pending %s startup without promoting it to recording',
+    async (strategy) => {
+      const { chrome, store } = makeStorageBackedChrome({
+        capabilities: { offscreen: strategy === 'offscreen' },
+        offscreen: { ...makeStubChrome().offscreen, hasDocument: jest.fn(async () => true) },
+      });
+      const original = createRecordingService(chrome);
+      await original.startRecording('tab', false, false);
+      await flushMicrotasks(100);
+      const recordingId = original.getState().recordingId;
+      expect(snapshotFor(store, recordingId).status).toBe('starting');
+      const restarted = simulateServiceWorkerRestart(chrome);
+
+      expect(
+        await restarted.handleMessage({ type: 'GET_STATE' }, { id: chrome.runtime.id })
+      ).toEqual(expect.objectContaining({ status: 'starting', recordingId, strategy }));
+      expect(await restarted.stopRecording()).toEqual({ ok: true });
+      expect(restarted.getState().status).toBe('idle');
+      if (strategy === 'page') expect(chrome.tabs.remove).toHaveBeenCalledWith(99);
+      else expect(chrome.offscreen.closeDocument).toHaveBeenCalled();
+      expect(
+        strategy === 'page'
+          ? restarted.handleRecorderStarted(recordingId)
+          : restarted.handleOffscreenStarted(recordingId)
+      ).toBe(false);
+    }
+  );
+
+  it('serializes interrupted snapshot removal before a new session snapshot', async () => {
+    const { chrome, store } = makeStorageBackedChrome();
+    store[`sessionSnapshot:${VALID_UUID}`] = { recordingId: VALID_UUID, status: 'failed' };
+    const svc = createRecordingService(chrome);
+    let releaseRemoval;
+    const pendingRemoval = new Promise((resolve) => {
+      releaseRemoval = resolve;
+    });
+    chrome.storage.remove.mockImplementationOnce(async (key) => {
+      await pendingRemoval;
+      delete store[key];
+    });
+    const clearing = svc.clearInterruptedSessionSnapshot(VALID_UUID);
+    await flushMicrotasks(100);
+    expect(chrome.storage.remove).toHaveBeenCalled();
+    const starting = svc.startRecording('tab', false, false);
+    await flushMicrotasks();
+    releaseRemoval();
+    expect(await clearing).toBe(true);
+    expect(await starting).toEqual(expect.objectContaining({ ok: true }));
+    const newId = svc.getState().recordingId;
+    await flushMicrotasks(100);
+    expect(snapshotFor(store, newId).recordingId).toBe(newId);
+    expect(await svc.clearInterruptedSessionSnapshot(newId)).toBe(false);
+    expect(snapshotFor(store, newId).recordingId).toBe(newId);
+  });
+
+  it('accepts a page acknowledgement after restoring startup without microphone', async () => {
+    const { chrome } = makeStorageBackedChrome({ capabilities: { offscreen: false } });
+    const original = createRecordingService(chrome);
+    await original.startRecording('tab', false, false);
+    await flushMicrotasks(100);
+    const recordingId = original.getState().recordingId;
+    const restarted = simulateServiceWorkerRestart(chrome);
+    expect(
+      await restarted.handleMessage(
+        { type: 'RECORDER_STARTED', recordingId },
+        { id: chrome.runtime.id }
+      )
+    ).toEqual({ ok: true });
+    expect(restarted.getState().status).toBe('recording');
+  });
+
+  it('finishes old error cleanup before persisting a retried session', async () => {
+    const { chrome, store } = makeStorageBackedChrome();
+    chrome.tabs.create.mockResolvedValueOnce({ id: 99 }).mockResolvedValueOnce({ id: 100 });
+    const svc = createRecordingService(chrome);
+    await svc.startRecording('tab', true, false);
+    acknowledgeRecorder(svc);
+    await flushMicrotasks(100);
+    const oldId = svc.getState().recordingId;
+    let releaseRemoval;
+    const pendingRemoval = new Promise((resolve) => {
+      releaseRemoval = resolve;
+    });
+    chrome.storage.remove.mockImplementationOnce(async (key) => {
+      await pendingRemoval;
+      delete store[key];
+    });
+
+    const error = svc.handleRecorderError('Permission denied', oldId);
+    let retryFinished = false;
+    const retry = svc.startRecording('tab', true, false).then((result) => {
+      retryFinished = true;
+      return result;
+    });
+    await flushMicrotasks(100);
+    expect(retryFinished).toBe(false);
+    expect(svc.getState().status).toBe('failed');
+    releaseRemoval();
+    await error;
+    expect(await retry).toEqual(expect.objectContaining({ ok: true }));
+    await flushMicrotasks(100);
+    expect(snapshotFor(store, svc.getState().recordingId).recordingId).toBe(
+      svc.getState().recordingId
+    );
+    expect(snapshotFor(store, svc.getState().recordingId).recordingId).not.toBe(oldId);
+    expect(chrome.tabs.remove).not.toHaveBeenCalledWith(100);
+  });
+
   async function startAndPersist(chrome) {
     const svc = createRecordingService(chrome);
     await svc.startRecording('tab', false, false);
@@ -780,6 +1414,79 @@ describe('session restore & heartbeat (service-worker restart recovery)', () => 
     expect(restarted.getState().recordingId).toBe(recordingId);
   });
 
+  it('does not start a second capture when GET_STATE restores during START recovery', async () => {
+    const { chrome } = makeStorageBackedChrome({
+      offscreen: { ...makeStubChrome().offscreen, hasDocument: jest.fn(async () => true) },
+    });
+    const { recordingId } = await startAndPersist(chrome);
+    const restarted = simulateServiceWorkerRestart(chrome);
+    chrome.runtime.sendMessage.mockClear();
+
+    let releaseFirstLiveness;
+    const firstLiveness = new Promise((resolve) => {
+      releaseFirstLiveness = resolve;
+    });
+    chrome.offscreen.hasDocument
+      .mockReset()
+      .mockImplementationOnce(() => firstLiveness)
+      .mockImplementation(async () => true);
+
+    const start = restarted.startRecording('tab', false, false);
+    await flushMicrotasks();
+    expect(chrome.offscreen.hasDocument).toHaveBeenCalledTimes(1);
+
+    const state = await restarted.handleMessage({ type: 'GET_STATE' }, { id: chrome.runtime.id });
+    expect(state).toEqual(expect.objectContaining({ ok: true, status: 'recording', recordingId }));
+
+    releaseFirstLiveness(true);
+    await expect(start).resolves.toEqual({
+      ok: false,
+      error: 'A recording is already in progress',
+    });
+    expect(
+      chrome.runtime.sendMessage.mock.calls.filter(
+        ([message]) => message.type === 'OFFSCREEN_START'
+      )
+    ).toHaveLength(0);
+  });
+
+  it('does not clear a persisted session when a fresh actor starts in idle', async () => {
+    const { chrome } = makeStorageBackedChrome({
+      offscreen: { ...makeStubChrome().offscreen, hasDocument: jest.fn(async () => true) },
+    });
+    const { recordingId } = await startAndPersist(chrome);
+    const removeCountBeforeRestart = chrome.storage.remove.mock.calls.length;
+    const closeCountBeforeRestart = chrome.offscreen.closeDocument.mock.calls.length;
+
+    const restarted = simulateServiceWorkerRestart(chrome);
+    await flushMicrotasks();
+
+    expect(restarted.getState().status).toBe('idle');
+    expect(chrome.storage.remove.mock.calls.length).toBe(removeCountBeforeRestart);
+    expect(chrome.offscreen.closeDocument.mock.calls.length).toBe(closeCountBeforeRestart);
+
+    const state = await restarted.handleMessage({ type: 'GET_STATE' }, { id: chrome.runtime.id });
+    expect(state).toEqual(expect.objectContaining({ ok: true, status: 'recording', recordingId }));
+    expect(chrome.storage.remove.mock.calls.length).toBe(removeCountBeforeRestart);
+    expect(chrome.offscreen.closeDocument.mock.calls.length).toBe(closeCountBeforeRestart);
+  });
+
+  it('restores before handling STOP on a fresh worker', async () => {
+    const { chrome } = makeStorageBackedChrome({
+      offscreen: { ...makeStubChrome().offscreen, hasDocument: jest.fn(async () => true) },
+    });
+    const { recordingId } = await startAndPersist(chrome);
+    const restarted = simulateServiceWorkerRestart(chrome);
+
+    const result = await restarted.handleMessage({ type: 'STOP' }, { id: chrome.runtime.id });
+
+    expect(result).toEqual({ ok: true });
+    expect(restarted.getState()).toEqual(
+      expect.objectContaining({ status: 'stopping', recordingId })
+    );
+    expect(chrome.runtime.sendMessage).toHaveBeenCalledWith({ type: 'OFFSCREEN_STOP' });
+  });
+
   it('does not restore when the offscreen document is gone', async () => {
     const { chrome } = makeStorageBackedChrome(); // hasDocument → false
     const { recordingId } = await startAndPersist(chrome);
@@ -818,6 +1525,22 @@ describe('session restore & heartbeat (service-worker restart recovery)', () => 
     expect(result.ok).toBe(false);
     expect(result.error).toMatch(/already in progress/);
     expect(restarted.getState().recordingId).toBe(recordingId);
+  });
+
+  it('accepts a new START after a permission failure without a worker restart', async () => {
+    const chrome = makeStubChrome();
+    const svc = createRecordingService(chrome);
+    await svc.startRecording('tab', false, false);
+    acknowledgeOffscreen(svc);
+
+    await svc.handleOffscreenError('Permission denied', 'PERMISSION_DENIED');
+    expect(svc.getState().status).toBe('failed');
+
+    const retry = await svc.startRecording('tab', false, false);
+
+    expect(retry.ok).toBe(true);
+    expect(svc.getState().status).toBe('starting');
+    expect(svc.getState().recordingId).not.toBeNull();
   });
 
   it('restores a live recorder-tab session after a service-worker restart', async () => {
@@ -941,5 +1664,140 @@ describe('overlay STATE_UPDATE push', () => {
     await flushMicrotasks();
 
     expect(svc.getState().status).toBe('recording');
+  });
+});
+
+describe('durable session ownership across workers', () => {
+  function liveOffscreen() {
+    const backed = makeStorageBackedChrome();
+    let documentOpen = false;
+    backed.chrome.offscreen.hasDocument.mockImplementation(async () => documentOpen);
+    backed.chrome.offscreen.createDocument.mockImplementation(async () => {
+      documentOpen = true;
+    });
+    backed.chrome.offscreen.closeDocument.mockImplementation(async () => {
+      documentOpen = false;
+    });
+    return { ...backed, isOpen: () => documentOpen };
+  }
+
+  it.each(['offscreen', 'page'])(
+    'cleans a %s retirement with no session snapshot',
+    async (strategy) => {
+      const { chrome, store } = makeStorageBackedChrome();
+      let open = true;
+      chrome.offscreen.hasDocument.mockImplementation(async () => strategy === 'offscreen' && open);
+      chrome.offscreen.closeDocument.mockImplementation(async () => {
+        open = false;
+      });
+      chrome.tabs.remove.mockImplementation(async () => {
+        open = false;
+      });
+      store[`sessionRetirement:${VALID_UUID}`] = {
+        recordingId: VALID_UUID,
+        strategy,
+        recorderTabId: strategy === 'page' ? 99 : null,
+        overlayTabId: 42,
+      };
+      const service = createRecordingService(chrome);
+      expect(await service.restoreSession()).toBe(false);
+      expect(service.getState().recording).toBe(false);
+      expect(open).toBe(false);
+      expect(store[`sessionRetirement:${VALID_UUID}`]).toBeUndefined();
+    }
+  );
+
+  it('restores the durable snapshot when the Chrome storage snapshot is absent', async () => {
+    const { chrome, store, isOpen } = liveOffscreen();
+    const first = createRecordingService(chrome);
+    await first.startRecording('tab', false, false);
+    const recordingId = first.getState().recordingId;
+    await acknowledgeOffscreen(first);
+    await flushMicrotasks();
+    delete store[`sessionSnapshot:${recordingId}`];
+    const restarted = simulateServiceWorkerRestart(chrome);
+    expect(await restarted.restoreSession()).toBe(true);
+    expect(restarted.getState()).toMatchObject({ recordingId, status: 'recording' });
+    expect(isOpen()).toBe(true);
+  });
+
+  it.each(['write', 'remove'])(
+    'protects a newer recorder when an older worker finishes a delayed snapshot %s',
+    async (operation) => {
+      const { chrome, store, isOpen } = liveOffscreen();
+      let release;
+      const gate = new Promise((resolve) => {
+        release = resolve;
+      });
+      let held = false;
+      if (operation === 'write') {
+        chrome.storage.set.mockImplementation(async (data) => {
+          if (!held && Object.keys(data).some((key) => key.startsWith('sessionSnapshot:'))) {
+            held = true;
+            await gate;
+          }
+          Object.assign(store, data);
+        });
+      }
+      const oldWorker = createRecordingService(chrome);
+      try {
+        await oldWorker.startRecording('tab', false, false);
+        const oldId = oldWorker.getState().recordingId;
+        await flushMicrotasks();
+        if (operation === 'remove') {
+          chrome.storage.remove.mockImplementation(async (key) => {
+            if (!held && key === `sessionSnapshot:${oldId}`) {
+              held = true;
+              await gate;
+            }
+            delete store[key];
+          });
+        }
+        const stop = oldWorker.stopRecording();
+        await flushMicrotasks();
+        expect(held).toBe(true);
+        expect(oldWorker.getState().status).toBe('idle');
+        const newWorker = simulateServiceWorkerRestart(chrome);
+        await newWorker.restoreSession();
+        expect((await newWorker.startRecording('tab', false, false)).ok).toBe(true);
+        const newId = newWorker.getState().recordingId;
+        expect(newId).not.toBe(oldId);
+        await flushMicrotasks();
+        release();
+        await stop;
+        await flushMicrotasks();
+        expect(newWorker.getState()).toMatchObject({ recordingId: newId, status: 'starting' });
+        expect(await newWorker.getPersistedSessionSnapshot()).toMatchObject({ recordingId: newId });
+        expect(isOpen()).toBe(true);
+        expect(store[`sessionSnapshot:${newId}`]).toMatchObject({ recordingId: newId });
+      } finally {
+        release();
+        await flushMicrotasks();
+      }
+    }
+  );
+
+  it('retries marker-only cleanup after a transient browser close failure', async () => {
+    const { chrome, store } = makeStorageBackedChrome();
+    let open = true;
+    chrome.offscreen.hasDocument.mockImplementation(async () => open);
+    chrome.offscreen.closeDocument
+      .mockRejectedValueOnce(new Error('Browser busy'))
+      .mockImplementation(async () => {
+        open = false;
+      });
+    store[`sessionRetirement:${VALID_UUID}`] = {
+      recordingId: VALID_UUID,
+      strategy: 'offscreen',
+      recorderTabId: null,
+      overlayTabId: null,
+    };
+    const service = createRecordingService(chrome);
+    await service.restoreSession();
+    expect(open).toBe(true);
+    expect(store[`sessionRetirement:${VALID_UUID}`]).toBeDefined();
+    await service.restoreSession();
+    expect(open).toBe(false);
+    expect(store[`sessionRetirement:${VALID_UUID}`]).toBeUndefined();
   });
 });

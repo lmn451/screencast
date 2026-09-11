@@ -1,4 +1,4 @@
-// Storage quota utilities for CaptureCast
+// Storage quota utilities for ScreenSilo
 // Helps prevent out-of-space errors during recording
 
 import { createLogger } from '../logger.js';

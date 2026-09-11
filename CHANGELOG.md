@@ -1,6 +1,39 @@
 # Changelog
 
-## 0.2.2 (Unreleased)
+## 0.2.3 (2026-09-11)
+
+### Recording and recovery
+
+- Cancel pending capture startup completely before reporting that recording stopped.
+- Restore live sessions before service-worker initialization can clear their recovery state.
+- Mix microphone and system audio so both sources are retained in recordings.
+- Allow a new recording attempt after screen-capture permission is denied.
+- Preserve newer sessions during delayed cleanup and keep navigated recorder tabs open.
+- Require Chrome 116 or later for extension-context ownership checks.
+
+### Diagnostics
+
+- Preserve the newest diagnostic entries using timestamp order instead of UUID order.
+- Migrate the diagnostics index without removing existing recordings or chunks.
+
+### Publishing
+
+- Prepare keyless Chrome Web Store submissions from verified GitHub releases using a service account and GitHub OIDC.
+
+### Verification
+
+- Add regression coverage for cancellation, worker restart, permission retry, audio mixing, and diagnostics migration.
+
+## 0.2.2
+
+### Brand and Release
+
+- Renamed the extension from CaptureCast to ScreenSilo.
+- Updated visible UI, download names, documentation, and store metadata for the new brand.
+- Disabled verbose production logging.
+- Removed the unused optional `notifications` permission.
+- Added clean builds and an explicit production-bundle allowlist for store packages.
+- Preserved the legacy local database identifier so existing recordings remain available after updating.
 
 ### New Features
 

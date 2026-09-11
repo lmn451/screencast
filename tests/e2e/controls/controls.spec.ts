@@ -39,10 +39,18 @@ test.describe('Tab mode recording controls', () => {
     );
     expect(stopRes?.ok).toBeTruthy();
 
-    // Verify state is idle
-    const state = await controlPage.evaluate(
-      () => new Promise((resolve) => chrome.runtime.sendMessage({ type: 'GET_STATE' }, resolve))
-    );
-    expect(state?.recording).toBe(false);
+    // STOP acknowledges the request before MediaRecorder flushes its final
+    // chunk and IndexedDB commits. Require a successful save, rather than
+    // racing that asynchronous work or accepting a failed terminal state.
+    await expect
+      .poll(() =>
+        controlPage.evaluate(
+          async () => (await chrome.runtime.sendMessage({ type: 'GET_STATE' })).status
+        )
+      )
+      .toMatch(/^(saved|idle)$/);
+    await expect
+      .poll(() => context.pages().some((page) => page.url().includes('/preview.html?id=')))
+      .toBe(true);
   });
 });

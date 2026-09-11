@@ -1,4 +1,4 @@
-// Error codes and structured error responses for CaptureCast
+// Error codes and structured error responses for ScreenSilo
 
 /**
  * Canonical error codes used throughout the extension.

@@ -8,17 +8,13 @@ import {
   exportDiagnostics,
   getDiagnostics,
   MAX_DIAGNOSTIC_ENTRIES,
-  DIAG_STORE,
   DiagLevel,
   DiagEvent,
 } from '../../src/diagnostics.js';
+import { DB_NAME } from '../../src/lib/db-shared.js';
 
 // Mock IndexedDB with fake-indexeddb
 import 'fake-indexeddb/auto';
-
-// Use the shared DB constants
-const DB_NAME = 'capturecast-db';
-const DB_VERSION = 3;
 
 describe('diagnostics.js', () => {
   beforeEach(async () => {
@@ -27,7 +23,7 @@ describe('diagnostics.js', () => {
       const req = indexedDB.deleteDatabase(DB_NAME);
       req.onsuccess = resolve;
       req.onerror = reject;
-      req.onblocked = resolve; // OK if blocked
+      req.onblocked = () => {};
     });
     jest.clearAllMocks();
   });
@@ -138,39 +134,94 @@ describe('diagnostics.js', () => {
   describe('Ring buffer trim (500 entries max)', () => {
     it('should trim entries when exceeding MAX_DIAGNOSTIC_ENTRIES', async () => {
       const entries = [];
-      for (let i = 0; i < MAX_DIAGNOSTIC_ENTRIES + 100; i++) {
-        entries.push(
-          createDiagnosticEntry(DiagLevel.INFO, DiagEvent.STATE_TRANSITION, `Entry ${i}`)
+      const total = MAX_DIAGNOSTIC_ENTRIES + 100;
+      for (let i = 0; i < total; i++) {
+        const entry = createDiagnosticEntry(
+          DiagLevel.INFO,
+          DiagEvent.STATE_TRANSITION,
+          `Entry ${i}`
         );
+        entry.ts = i;
+        entries.push(entry);
       }
 
-      // Save all entries
+      // saveDiagnostic waits for each commit, so this burst is deterministic
+      // without a timing-based sleep before the read.
       await Promise.all(entries.map((e) => saveDiagnostic(e)));
 
-      // Allow trimming to complete
-      await new Promise((resolve) => setTimeout(resolve, 100));
-
-      // Should have at most MAX entries (possibly fewer due to async nature)
       const stored = await getDiagnostics();
-      expect(stored.length).toBeLessThanOrEqual(MAX_DIAGNOSTIC_ENTRIES);
+      expect(stored).toHaveLength(MAX_DIAGNOSTIC_ENTRIES);
+      expect(stored[0].ts).toBe(total - 1);
+      expect(stored.at(-1).ts).toBe(total - MAX_DIAGNOSTIC_ENTRIES);
     });
 
-    it('should keep newest entries when trimming', async () => {
-      // Add many entries
-      for (let i = 0; i < MAX_DIAGNOSTIC_ENTRIES + 50; i++) {
-        await saveDiagnostic(
-          createDiagnosticEntry(DiagLevel.INFO, DiagEvent.STATE_TRANSITION, `Entry ${i}`)
+    it('should keep newest entries when UUID order disagrees with timestamp order', async () => {
+      const total = MAX_DIAGNOSTIC_ENTRIES + 1;
+      for (let i = 0; i < total; i++) {
+        const entry = createDiagnosticEntry(
+          DiagLevel.INFO,
+          DiagEvent.STATE_TRANSITION,
+          `Entry ${i}`
         );
+        entry.id = String(total - i).padStart(4, '0');
+        entry.ts = i;
+        await saveDiagnostic(entry);
       }
 
       const entries = await getDiagnostics();
 
-      // Newest entries (higher indices) should be present
-      // The first entries added should be trimmed
-      if (entries.length < MAX_DIAGNOSTIC_ENTRIES) {
-        expect(entries.length).toBeGreaterThan(0);
+      expect(entries).toHaveLength(MAX_DIAGNOSTIC_ENTRIES);
+      expect(entries[0].ts).toBe(total - 1);
+      expect(entries.at(-1).ts).toBe(1);
+      expect(entries.some((entry) => entry.ts === 0)).toBe(false);
+    });
+
+    it('should keep the latest arrival when all timestamps and UUID order tie', async () => {
+      const total = MAX_DIAGNOSTIC_ENTRIES + 1;
+      const entries = [];
+      for (let i = 0; i < total; i++) {
+        const entry = createDiagnosticEntry(
+          DiagLevel.INFO,
+          DiagEvent.STATE_TRANSITION,
+          `Same timestamp ${i}`
+        );
+        entry.id = String(total - i).padStart(4, '0');
+        entry.ts = 42;
+        entries.push(entry);
       }
-    }, 15_000);
+
+      await Promise.all(entries.map((entry) => saveDiagnostic(entry)));
+
+      const stored = await getDiagnostics();
+      expect(stored).toHaveLength(MAX_DIAGNOSTIC_ENTRIES);
+      expect(stored[0].userMessage).toBe(`Same timestamp ${total - 1}`);
+      expect(stored.at(-1).userMessage).toBe('Same timestamp 1');
+      expect(stored.some((entry) => entry.userMessage === 'Same timestamp 0')).toBe(false);
+      expect(new Set(stored.map((entry) => entry.sequence)).size).toBe(MAX_DIAGNOSTIC_ENTRIES);
+    });
+
+    it('should allocate unique sequences for concurrent saves', async () => {
+      const total = 80;
+      const entries = Array.from({ length: total }, (_, i) => {
+        const entry = createDiagnosticEntry(
+          DiagLevel.INFO,
+          DiagEvent.STATE_TRANSITION,
+          `Concurrent ${i}`
+        );
+        entry.ts = 99;
+        entry.id = `concurrent-${String(total - i).padStart(3, '0')}`;
+        return entry;
+      });
+
+      await Promise.all(entries.map((entry) => saveDiagnostic(entry)));
+
+      const stored = await getDiagnostics(total);
+      expect(stored).toHaveLength(total);
+      expect(new Set(stored.map((entry) => entry.sequence)).size).toBe(total);
+      expect(stored.map((entry) => entry.userMessage)).toEqual(
+        entries.map((entry) => entry.userMessage).reverse()
+      );
+    });
   });
 
   describe('redactDiagnosticsEntry', () => {

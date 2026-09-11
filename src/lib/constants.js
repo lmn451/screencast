@@ -1,4 +1,4 @@
-// Shared constants for CaptureCast extension
+// Shared constants for ScreenSilo extension
 
 // Timeout durations (in milliseconds)
 export const STOP_TIMEOUT_MS = 60_000; // 60 seconds safety timeout for stop operations

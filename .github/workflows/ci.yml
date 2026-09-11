@@ -32,11 +32,29 @@ jobs:
       - name: Typecheck
         run: pnpm run typecheck
 
-      - name: Build (bundles background.js from src/background.ts)
-        run: pnpm run build
+      - name: Build marketplace packages
+        run: pnpm run package:all
 
       - name: Unit tests
         run: pnpm run test:unit
+
+      - name: Upload Chrome marketplace package
+        uses: actions/upload-artifact@v4
+        with:
+          name: screensilo-chrome-marketplace
+          path: dist/screensilo-mv3-*.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Firefox marketplace packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: screensilo-firefox-marketplace
+          path: |
+            dist/screensilo-firefox-mv3-*.zip
+            dist/screensilo-firefox-source-*.zip
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Upload coverage artifact (if present)
         if: always() && hashFiles('coverage/**') != ''

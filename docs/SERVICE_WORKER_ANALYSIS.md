@@ -1,4 +1,4 @@
-# Service Worker Analysis: CaptureCast Background.js
+# Service Worker Analysis: ScreenSilo Background.js
 
 ## What Breaks When SW Suspends During Recording
 

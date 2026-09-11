@@ -1,8 +1,8 @@
-# CaptureCast Architecture
+# ScreenSilo Architecture
 
 ## Overview
 
-CaptureCast is a privacy-focused browser extension for screen recording built on Chrome Extension Manifest V3. All processing happens client-side with no external servers.
+ScreenSilo is a privacy-focused browser extension for screen recording built on Chrome Extension Manifest V3. All processing happens client-side with no external servers.
 
 ## Components
 
@@ -376,11 +376,11 @@ For MV3 service worker suspension:
 
 ```javascript
 // Save state to chrome.storage.session
-await chrome.storage.session.set({ captureCastState: STATE });
+await chrome.storage.session.set({ screenSiloState: STATE });
 
 // Restore on wakeup
-const data = await chrome.storage.session.get('captureCastState');
-Object.assign(STATE, data.captureCastState);
+const data = await chrome.storage.session.get('screenSiloState');
+Object.assign(STATE, data.screenSiloState);
 ```
 
 ## Testing

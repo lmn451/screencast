@@ -1,9 +1,9 @@
-// Centralized logging utility for CaptureCast
+// Centralized logging utility for ScreenSilo
 // In production, only warnings and errors are shown
 
 import { saveDiagnostic, createDiagnosticEntry, DiagLevel, DiagEvent } from './diagnostics.js';
 
-const DEBUG = true; // Set to true during development, false for production
+const DEBUG = false;
 
 export const log = DEBUG ? console.log.bind(console) : () => {};
 export const warn = console.warn.bind(console);

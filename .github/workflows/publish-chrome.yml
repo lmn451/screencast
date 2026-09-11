@@ -1,0 +1,75 @@
+name: Publish Chrome Web Store
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Published GitHub release tag to submit (for example, v0.2.3)
+        required: true
+        type: string
+
+concurrency:
+  group: chrome-web-store-publish
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+
+jobs:
+  publish:
+    name: Upload and submit Chrome package
+    runs-on: ubuntu-latest
+    environment:
+      name: chrome-store
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    steps:
+      - name: Require master dispatch
+        env:
+          EXPECTED_REF: refs/heads/master
+        run: |
+          if [ "$GITHUB_REF" != "$EXPECTED_REF" ]; then
+            echo "This workflow must be dispatched from master (got $GITHUB_REF)." >&2
+            exit 1
+          fi
+
+      - name: Check out master
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Authenticate to Google Cloud with GitHub OIDC
+        id: google-auth
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.CHROME_WEBSTORE_SERVICE_ACCOUNT }}
+          token_format: access_token
+          access_token_lifetime: 3600s
+          access_token_scopes: https://www.googleapis.com/auth/chromewebstore
+          create_credentials_file: false
+          export_environment_variables: false
+
+      - name: Verify release, upload package, and submit for review
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CWS_ACCESS_TOKEN: ${{ steps.google-auth.outputs.access_token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          node scripts/publish-chrome.mjs \
+            --tag "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --publisher-id "05ed331a-3c06-4e14-a198-e8aa53c73cd7" \
+            --extension-id "higbocdfimfmcjckomeggbbigcglpdje"

@@ -6,10 +6,22 @@ import { createError, CODES } from '../error-codes.js';
 
 const logger = createLogger('MediaRecorderUtils');
 
+// A MediaStream can only expose one audio track reliably to MediaRecorder in
+// Chromium. When a screen capture and a microphone are both present we route
+// them through Web Audio and retain the graph's lifetime alongside the output
+// stream. A WeakMap keeps the resource bookkeeping private to this module and
+// avoids adding application-specific properties to browser MediaStream
+// objects.
+const combinedStreamResources = new WeakMap();
+
 // Constants for recorder configuration
 export const CHUNK_INTERVAL_MS = 1000; // 1 second chunks for balance of memory/recovery
 export const BEST_QUALITY_FRAME_RATE = 60;
 export const BEST_QUALITY_VIDEO_BITS_PER_SECOND = 25_000_000;
+// A browser can leave AudioContext.resume() pending when autoplay or sticky
+// user activation is unavailable. Keep this below the service's startup
+// confirmation timeout so a capture cannot remain untracked indefinitely.
+export const MIXED_AUDIO_RESUME_TIMEOUT_MS = 3000;
 
 /**
  * Return display-capture constraints for the selected quality mode.
@@ -224,19 +236,201 @@ export function createMediaRecorder(stream, recordingId, callbacks = {}, recordi
 }
 
 /**
- * Combine multiple media streams into one
+ * Combine multiple media streams into one. When both inputs have audio, the
+ * returned stream has one Web Audio mixed track so MediaRecorder receives both
+ * sources reliably.
  * @param {Object} streams - Object containing display and optional mic streams
  * @param {MediaStream} streams.displayStream - Screen/window/tab stream
  * @param {MediaStream} [streams.micStream] - Optional microphone stream
  * @returns {MediaStream} Combined stream with all tracks
  */
 export function combineStreams({ displayStream, micStream }) {
-  const tracks = [
-    ...displayStream.getVideoTracks(),
-    ...displayStream.getAudioTracks(),
-    ...(micStream ? micStream.getAudioTracks() : []),
-  ];
-  return new MediaStream(tracks);
+  const displayVideoTracks = displayStream?.getVideoTracks?.() || [];
+  const displayAudioTracks = displayStream?.getAudioTracks?.() || [];
+  const micAudioTracks = micStream?.getAudioTracks?.() || [];
+
+  // Keep the old track-preserving behavior when there is only one audio
+  // source. In particular, this avoids introducing a resampling/latency step
+  // for recordings that do not need mixing.
+  if (displayAudioTracks.length === 0 || micAudioTracks.length === 0) {
+    return new MediaStream([...displayVideoTracks, ...displayAudioTracks, ...micAudioTracks]);
+  }
+
+  const AudioContextConstructor = globalThis.AudioContext || globalThis.webkitAudioContext;
+  if (!AudioContextConstructor) {
+    throw new Error('Web Audio is required to record system audio and microphone audio together');
+  }
+
+  let audioContext = null;
+  let combinedStream = null;
+  let sourceNodes = [];
+  let inputTracksStopped = false;
+  let cleanupPromise = null;
+
+  const stopInputTracks = () => {
+    if (inputTracksStopped) return;
+    inputTracksStopped = true;
+    for (const track of [...displayAudioTracks, ...micAudioTracks]) {
+      try {
+        track.stop?.();
+      } catch (error) {
+        logger.warn('Failed to stop an audio capture track (non-fatal):', error);
+      }
+    }
+  };
+
+  const closeAudioContext = async () => {
+    if (!audioContext || audioContext.state === 'closed') return;
+    try {
+      await audioContext.close();
+    } catch (error) {
+      logger.warn('Failed to close mixed-audio context (non-fatal):', error);
+    }
+  };
+
+  const cleanup = () => {
+    if (cleanupPromise) return cleanupPromise;
+
+    // Disconnect and stop synchronously so callers that cannot await during
+    // unload still release the live capture sources immediately.
+    for (const { sourceNode, gainNode } of sourceNodes) {
+      for (const node of [sourceNode, gainNode]) {
+        try {
+          node?.disconnect?.();
+        } catch (error) {
+          logger.warn('Failed to disconnect mixed-audio source (non-fatal):', error);
+        }
+      }
+    }
+    sourceNodes = [];
+    stopInputTracks();
+
+    cleanupPromise = closeAudioContext();
+    return cleanupPromise;
+  };
+
+  try {
+    audioContext = new AudioContextConstructor();
+    const destination = audioContext.createMediaStreamDestination();
+    const mixedAudioTrack = destination?.stream?.getAudioTracks?.()?.[0];
+    if (!mixedAudioTrack) {
+      throw new Error('Web Audio did not provide a mixed audio track');
+    }
+
+    // Give each input half the available headroom. Directly summing two
+    // full-scale sources can clip before MediaRecorder receives the signal.
+    const inputStreams = [displayStream, micStream];
+    sourceNodes = inputStreams.map((inputStream) => {
+      const sourceNode = audioContext.createMediaStreamSource(inputStream);
+      if (typeof audioContext.createGain === 'function') {
+        const gainNode = audioContext.createGain();
+        gainNode.gain.value = 0.5;
+        sourceNode.connect(gainNode);
+        gainNode.connect(destination);
+        return { sourceNode, gainNode };
+      }
+      sourceNode.connect(destination);
+      return { sourceNode };
+    });
+
+    combinedStream = new MediaStream([...displayVideoTracks, mixedAudioTrack]);
+    const resource = {
+      cleanup,
+      ready: null,
+    };
+    combinedStreamResources.set(combinedStream, resource);
+
+    resource.ready = resumeAudioContext(audioContext).catch((error) => {
+      // A suspended context that cannot be resumed must fail startup. Closing
+      // the graph here also prevents an unhandled live capture source if the
+      // caller abandons the failed promise.
+      return cleanupCombinedStream(combinedStream).then(() => {
+        throw error;
+      });
+    });
+
+    return combinedStream;
+  } catch (error) {
+    cleanup();
+    throw error;
+  }
+}
+
+/**
+ * Wait until a stream's mixed-audio graph is running.
+ *
+ * Single-source streams have no graph and are ready immediately. The promise
+ * rejects when a browser refuses to resume Web Audio, so callers cannot start
+ * a recording that silently contains no audio.
+ * @param {MediaStream} stream - A stream returned by combineStreams
+ * @returns {Promise<void>} Resolves when mixed audio is ready
+ */
+export function waitForCombinedStreamReady(stream) {
+  return combinedStreamResources.get(stream)?.ready || Promise.resolve();
+}
+
+/**
+ * Release tracks and Web Audio resources owned by a combined stream.
+ * Cleanup is idempotent and safe to call from both stop and failure paths.
+ * @param {MediaStream} stream - A stream returned by combineStreams
+ * @returns {Promise<void>} Resolves after AudioContext.close, when applicable
+ */
+export async function cleanupCombinedStream(stream) {
+  if (!stream) return;
+
+  const resource = combinedStreamResources.get(stream);
+  try {
+    await resource?.cleanup?.();
+  } finally {
+    // Stop the mixed track and all video tracks. For single-source streams the
+    // audio track is also the original capture track, so this covers that
+    // path without needing a second owner reference.
+    try {
+      stream.getTracks?.().forEach((track) => track.stop?.());
+    } catch (error) {
+      logger.warn('Failed to stop combined stream tracks (non-fatal):', error);
+    }
+    if (resource) combinedStreamResources.delete(stream);
+  }
+}
+
+/**
+ * Resume a context before MediaRecorder starts consuming its destination.
+ * @param {AudioContext} audioContext - Context used for mixed audio
+ * @returns {Promise<void>} Resolves only when the context is running
+ */
+async function resumeAudioContext(audioContext) {
+  if (audioContext.state === 'running') return;
+  if (audioContext.state === 'closed') {
+    throw new Error('Mixed-audio context is already closed');
+  }
+  if (typeof audioContext.resume !== 'function') {
+    throw new Error('Mixed-audio context cannot be resumed');
+  }
+
+  let timeoutId;
+  try {
+    const resumePromise = Promise.resolve().then(() => audioContext.resume());
+    const timeoutPromise = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => {
+        const timeoutError = new Error(
+          `Timed out waiting ${MIXED_AUDIO_RESUME_TIMEOUT_MS}ms for mixed-audio context to resume`
+        );
+        timeoutError.name = 'TimeoutError';
+        reject(timeoutError);
+      }, MIXED_AUDIO_RESUME_TIMEOUT_MS);
+    });
+    // Promise.race observes a late resume rejection too, so a browser that
+    // eventually settles the original operation cannot create an unhandled
+    // rejection after the timeout has already failed startup.
+    await Promise.race([resumePromise, timeoutPromise]);
+  } finally {
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
+  }
+
+  if (audioContext.state && audioContext.state !== 'running') {
+    throw new Error(`Mixed-audio context did not start (state: ${audioContext.state})`);
+  }
 }
 
 /**

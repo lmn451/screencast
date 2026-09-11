@@ -1,6 +1,6 @@
 # Unit Tests
 
-This directory contains unit tests for CaptureCast utility modules.
+This directory contains unit tests for ScreenSilo utility modules.
 
 ## Running Tests
 

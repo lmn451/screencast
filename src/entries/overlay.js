@@ -24,7 +24,7 @@ const ERROR_DISPLAY_DURATION_MS = 2000;
     /\.pdf(\?|#|$)/i.test(currentUrl);
 
   if (isProtected) {
-    console.debug('[CaptureCast Overlay] Skipping on protected page');
+    console.debug('[ScreenSilo Overlay] Skipping on protected page');
     return;
   }
 
@@ -144,7 +144,7 @@ const ERROR_DISPLAY_DURATION_MS = 2000;
     try {
       const response = await chrome.runtime.sendMessage({ type: MSG_STOP });
       if (!response || !response.ok) {
-        console.error('[CaptureCast Overlay] Stop failed:', response?.error);
+        console.error('[ScreenSilo Overlay] Stop failed:', response?.error);
         btn.textContent = 'Error!';
         setTimeout(() => {
           updateButtonState('recording');
@@ -152,7 +152,7 @@ const ERROR_DISPLAY_DURATION_MS = 2000;
       }
       // On success, overlay will be removed anyway
     } catch (e) {
-      console.error('[CaptureCast Overlay] Failed to send stop message:', e);
+      console.error('[ScreenSilo Overlay] Failed to send stop message:', e);
       btn.textContent = 'Error!';
       setTimeout(() => {
         updateButtonState('recording');
@@ -170,7 +170,7 @@ const ERROR_DISPLAY_DURATION_MS = 2000;
         try {
           root.remove();
         } catch (e) {
-          console.warn('[CaptureCast Overlay] Failed to remove overlay root', e);
+          console.warn('[ScreenSilo Overlay] Failed to remove overlay root', e);
         }
       }
       // Handle state updates from background
@@ -179,7 +179,7 @@ const ERROR_DISPLAY_DURATION_MS = 2000;
       }
     });
   } catch (e) {
-    console.warn('[CaptureCast Overlay] Failed to set up message listener', e);
+    console.warn('[ScreenSilo Overlay] Failed to set up message listener', e);
   }
 
   root.appendChild(btn);

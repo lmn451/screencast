@@ -6,9 +6,12 @@ import {
   getDisplayVideoConstraints,
   applyContentHints,
   combineStreams,
+  waitForCombinedStreamReady,
+  cleanupCombinedStream,
   setupAutoStop,
   CHUNK_INTERVAL_MS,
   BEST_QUALITY_FRAME_RATE,
+  MIXED_AUDIO_RESUME_TIMEOUT_MS,
 } from '../../src/lib/media-recorder-utils.js';
 
 describe('media-recorder-utils.js', () => {
@@ -141,10 +144,43 @@ describe('media-recorder-utils.js', () => {
   });
 
   describe('combineStreams', () => {
-    it('should combine display and mic streams', () => {
-      const videoTrack = { kind: 'video' };
-      const displayAudioTrack = { kind: 'audio', label: 'system' };
-      const micAudioTrack = { kind: 'audio', label: 'mic' };
+    it('should mix display and mic audio into one recorded track', async () => {
+      const videoTrack = { kind: 'video', stop: jest.fn() };
+      const displayAudioTrack = { kind: 'audio', label: 'system', stop: jest.fn() };
+      const micAudioTrack = { kind: 'audio', label: 'mic', stop: jest.fn() };
+      const mixedAudioTrack = { kind: 'audio', label: 'mixed', stop: jest.fn() };
+      const sourceNodes = [];
+      const gainNodes = [];
+      const audioContext = {
+        state: 'suspended',
+        createMediaStreamDestination: jest.fn(() => ({
+          stream: { getAudioTracks: () => [mixedAudioTrack] },
+        })),
+        createMediaStreamSource: jest.fn((stream) => {
+          const source = {
+            stream,
+            connect: jest.fn(),
+            disconnect: jest.fn(),
+          };
+          sourceNodes.push(source);
+          return source;
+        }),
+        createGain: jest.fn(() => {
+          const gain = {
+            gain: { value: 1 },
+            connect: jest.fn(),
+            disconnect: jest.fn(),
+          };
+          gainNodes.push(gain);
+          return gain;
+        }),
+        resume: jest.fn(async () => {
+          audioContext.state = 'running';
+        }),
+        close: jest.fn(async () => {
+          audioContext.state = 'closed';
+        }),
+      };
 
       const displayStream = {
         getVideoTracks: () => [videoTrack],
@@ -155,22 +191,50 @@ describe('media-recorder-utils.js', () => {
         getAudioTracks: () => [micAudioTrack],
       };
 
+      global.AudioContext = jest.fn(() => audioContext);
       global.MediaStream = jest.fn(function (tracks) {
         this.tracks = tracks;
+        this.getTracks = () => this.tracks;
       });
 
       const combined = combineStreams({ displayStream, micStream });
-      expect(combined.tracks).toHaveLength(3);
+      expect(combined.tracks).toHaveLength(2);
       expect(combined.tracks).toContain(videoTrack);
-      expect(combined.tracks).toContain(displayAudioTrack);
-      expect(combined.tracks).toContain(micAudioTrack);
+      expect(combined.tracks).toContain(mixedAudioTrack);
+      expect(combined.tracks).not.toContain(displayAudioTrack);
+      expect(combined.tracks).not.toContain(micAudioTrack);
+      expect(audioContext.createMediaStreamSource).toHaveBeenNthCalledWith(1, displayStream);
+      expect(audioContext.createMediaStreamSource).toHaveBeenNthCalledWith(2, micStream);
+      expect(sourceNodes[0].connect).toHaveBeenCalledWith(gainNodes[0]);
+      expect(sourceNodes[1].connect).toHaveBeenCalledWith(gainNodes[1]);
+      expect(gainNodes[0].connect).toHaveBeenCalled();
+      expect(gainNodes[1].connect).toHaveBeenCalled();
+
+      await expect(waitForCombinedStreamReady(combined)).resolves.toBeUndefined();
+      expect(audioContext.resume).toHaveBeenCalledTimes(1);
+
+      await cleanupCombinedStream(combined);
+      expect(displayAudioTrack.stop).toHaveBeenCalledTimes(1);
+      expect(micAudioTrack.stop).toHaveBeenCalledTimes(1);
+      expect(mixedAudioTrack.stop).toHaveBeenCalledTimes(1);
+      expect(videoTrack.stop).toHaveBeenCalledTimes(1);
+      expect(sourceNodes[0].disconnect).toHaveBeenCalledTimes(1);
+      expect(sourceNodes[1].disconnect).toHaveBeenCalledTimes(1);
+      expect(gainNodes[0].disconnect).toHaveBeenCalledTimes(1);
+      expect(gainNodes[1].disconnect).toHaveBeenCalledTimes(1);
+      expect(audioContext.close).toHaveBeenCalledTimes(1);
+
+      // The cleanup hook is safe to invoke again from a stop/unload race.
+      await cleanupCombinedStream(combined);
+      expect(audioContext.close).toHaveBeenCalledTimes(1);
     });
 
-    it('should work without mic stream', () => {
-      const videoTrack = { kind: 'video' };
+    it('should preserve tracks when there is only one audio source', () => {
+      const videoTrack = { kind: 'video', stop: jest.fn() };
+      const displayAudioTrack = { kind: 'audio', label: 'system', stop: jest.fn() };
       const displayStream = {
         getVideoTracks: () => [videoTrack],
-        getAudioTracks: () => [],
+        getAudioTracks: () => [displayAudioTrack],
       };
 
       global.MediaStream = jest.fn(function (tracks) {
@@ -178,8 +242,118 @@ describe('media-recorder-utils.js', () => {
       });
 
       const combined = combineStreams({ displayStream, micStream: null });
-      expect(combined.tracks).toHaveLength(1);
+      expect(combined.tracks).toHaveLength(2);
       expect(combined.tracks).toContain(videoTrack);
+      expect(combined.tracks).toContain(displayAudioTrack);
+      expect(global.AudioContext).toBeDefined();
+      expect(global.AudioContext).not.toHaveBeenCalled();
+    });
+
+    it('fails dual-source startup when a suspended context cannot resume', async () => {
+      const displayAudioTrack = { kind: 'audio', stop: jest.fn() };
+      const micAudioTrack = { kind: 'audio', stop: jest.fn() };
+      const mixedAudioTrack = { kind: 'audio', stop: jest.fn() };
+      const audioContext = {
+        state: 'suspended',
+        createMediaStreamDestination: () => ({
+          stream: { getAudioTracks: () => [mixedAudioTrack] },
+        }),
+        createMediaStreamSource: () => ({
+          connect: jest.fn(),
+          disconnect: jest.fn(),
+        }),
+        resume: jest.fn(() => Promise.reject(new Error('autoplay blocked'))),
+        close: jest.fn(async () => {
+          audioContext.state = 'closed';
+        }),
+      };
+      const displayStream = {
+        getVideoTracks: () => [],
+        getAudioTracks: () => [displayAudioTrack],
+      };
+      const micStream = { getAudioTracks: () => [micAudioTrack] };
+
+      global.AudioContext = jest.fn(() => audioContext);
+      global.MediaStream = jest.fn(function (tracks) {
+        this.tracks = tracks;
+        this.getTracks = () => this.tracks;
+      });
+
+      const combined = combineStreams({ displayStream, micStream });
+      await expect(waitForCombinedStreamReady(combined)).rejects.toThrow('autoplay blocked');
+      expect(displayAudioTrack.stop).toHaveBeenCalledTimes(1);
+      expect(micAudioTrack.stop).toHaveBeenCalledTimes(1);
+      expect(audioContext.close).toHaveBeenCalledTimes(1);
+    });
+
+    it('times out a context that stays suspended and releases every owned resource', async () => {
+      jest.useFakeTimers();
+      try {
+        const videoTrack = { kind: 'video', stop: jest.fn() };
+        const displayAudioTrack = { kind: 'audio', stop: jest.fn() };
+        const micAudioTrack = { kind: 'audio', stop: jest.fn() };
+        const mixedAudioTrack = { kind: 'audio', stop: jest.fn() };
+        const sourceNodes = [];
+        const audioContext = {
+          state: 'suspended',
+          createMediaStreamDestination: () => ({
+            stream: { getAudioTracks: () => [mixedAudioTrack] },
+          }),
+          createMediaStreamSource: () => {
+            const source = {
+              connect: jest.fn(),
+              disconnect: jest.fn(),
+            };
+            sourceNodes.push(source);
+            return source;
+          },
+          createGain: jest.fn(() => ({
+            gain: { value: 1 },
+            connect: jest.fn(),
+            disconnect: jest.fn(),
+          })),
+          // Deliberately never settle: this models an autoplay/sticky
+          // activation request that the browser leaves pending.
+          resume: jest.fn(() => new Promise(() => {})),
+          close: jest.fn(async () => {
+            audioContext.state = 'closed';
+          }),
+        };
+        const displayStream = {
+          getVideoTracks: () => [videoTrack],
+          getAudioTracks: () => [displayAudioTrack],
+        };
+        const micStream = { getAudioTracks: () => [micAudioTrack] };
+
+        global.AudioContext = jest.fn(() => audioContext);
+        global.MediaStream = jest.fn(function (tracks) {
+          this.tracks = tracks;
+          this.getTracks = () => this.tracks;
+        });
+
+        const combined = combineStreams({ displayStream, micStream });
+        const ready = waitForCombinedStreamReady(combined);
+        const readyRejection = expect(ready).rejects.toMatchObject({
+          name: 'TimeoutError',
+          message: expect.stringContaining(`${MIXED_AUDIO_RESUME_TIMEOUT_MS}ms`),
+        });
+        await jest.advanceTimersByTimeAsync(MIXED_AUDIO_RESUME_TIMEOUT_MS);
+
+        await readyRejection;
+        expect(audioContext.resume).toHaveBeenCalledTimes(1);
+        expect(audioContext.close).toHaveBeenCalledTimes(1);
+        expect(displayAudioTrack.stop).toHaveBeenCalledTimes(1);
+        expect(micAudioTrack.stop).toHaveBeenCalledTimes(1);
+        expect(videoTrack.stop).toHaveBeenCalledTimes(1);
+        expect(mixedAudioTrack.stop).toHaveBeenCalledTimes(1);
+        expect(sourceNodes[0].disconnect).toHaveBeenCalledTimes(1);
+        expect(sourceNodes[1].disconnect).toHaveBeenCalledTimes(1);
+
+        await cleanupCombinedStream(combined);
+        expect(audioContext.close).toHaveBeenCalledTimes(1);
+      } finally {
+        jest.useRealTimers();
+      }
     });
   });
 

@@ -1,5 +1,5 @@
 /**
- * CaptureCast XState v5 Type Definitions
+ * ScreenSilo XState v5 Type Definitions
  * Phase: Implementation
  */
 
@@ -55,6 +55,7 @@ export type RecordingEvent =
       mic?: boolean;
       systemAudio?: boolean;
       bestQuality?: boolean;
+      strategy?: RecordingStrategy;
     }
   | { type: 'STOP' }
   | { type: 'OFFSCREEN_STARTED'; recordingId: string }
@@ -82,6 +83,8 @@ export type RecordingEvent =
 /** Session snapshot for chrome.storage.local persistence */
 export interface SessionSnapshot {
   recordingId: string;
+  /** Metadata-store generation; absent on snapshots from pre-coordination builds. */
+  generation?: number;
   status: RecordingStatus;
   startedAt: number;
   lastActivityAt: number;
@@ -93,6 +96,18 @@ export interface SessionSnapshot {
   };
   strategy: RecordingStrategy | null;
   correlationId: string;
+  /** Recorder page tab, when the page strategy is active. */
+  recorderTabId?: number | null;
+  /** Overlay ownership retained while a terminal session is being cleaned up. */
+  overlayTabId?: number | null;
+}
+
+/** Durable cancellation marker for a recording-owned browser context. */
+export interface SessionRetirement {
+  recordingId: string;
+  strategy: RecordingStrategy | null;
+  recorderTabId: number | null;
+  overlayTabId: number | null;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -139,8 +154,23 @@ export const TIMEOUTS = {
 } as const;
 
 export const STORAGE_KEYS = {
+  /** Legacy singleton snapshot key retained for upgrade recovery. */
   SESSION_SNAPSHOT: 'sessionSnapshot',
+  /** New snapshots are isolated by recording ID. */
+  SESSION_SNAPSHOT_PREFIX: 'sessionSnapshot:',
+  /** Legacy singleton retirement key retained for upgrade recovery. */
+  SESSION_RETIREMENT: 'sessionRetirement',
+  /** New retirement markers are isolated by recording ID. */
+  SESSION_RETIREMENT_PREFIX: 'sessionRetirement:',
 } as const;
+
+export function sessionSnapshotStorageKey(recordingId: string): string {
+  return `${STORAGE_KEYS.SESSION_SNAPSHOT_PREFIX}${recordingId}`;
+}
+
+export function sessionRetirementStorageKey(recordingId: string): string {
+  return `${STORAGE_KEYS.SESSION_RETIREMENT_PREFIX}${recordingId}`;
+}
 
 /** Alias for backwards compatibility with background-xstate.js */
 export const SESSION_SNAPSHOT_KEY = STORAGE_KEYS.SESSION_SNAPSHOT;

@@ -2,7 +2,9 @@
 // Phase 4 recovery flow
 
 import { STORE_RECORDINGS, STORE_CHUNKS, openDB } from '../lib/db-shared.js';
-const SESSION_SNAPSHOT_KEY = 'sessionSnapshot';
+// Legacy key retained only as a read fallback for snapshots written before
+// RecordingService moved session ownership to per-recording metadata.
+const LEGACY_SESSION_SNAPSHOT_KEY = 'sessionSnapshot';
 
 /**
  * Get active session snapshot from chrome.storage.local
@@ -10,8 +12,21 @@ const SESSION_SNAPSHOT_KEY = 'sessionSnapshot';
  */
 async function getActiveSessionSnapshot() {
   try {
-    const result = await chrome.storage.local.get(SESSION_SNAPSHOT_KEY);
-    return result[SESSION_SNAPSHOT_KEY] || null;
+    const state = await chrome.runtime.sendMessage({ type: 'GET_STATE' });
+    if (state && typeof state === 'object') {
+      return state.recordingId && ['starting', 'recording', 'stopping'].includes(state.status)
+        ? state
+        : null;
+    }
+  } catch (e) {
+    // Older extension versions did not answer GET_STATE from this page. Fall
+    // through to the legacy snapshot so an upgrade can still show recovery UI.
+  }
+
+  try {
+    const result = await chrome.storage.local.get(LEGACY_SESSION_SNAPSHOT_KEY);
+    const snapshot = result[LEGACY_SESSION_SNAPSHOT_KEY];
+    return snapshot && snapshot.recordingId && snapshot.status !== 'idle' ? snapshot : null;
   } catch (e) {
     return null;
   }
@@ -112,11 +127,15 @@ async function render() {
 
     if (recordings.length === 0) {
       subtitleEl.textContent = 'No recoverable recordings found.';
-      listEl.innerHTML = `
-        <div class="empty">
-          <div class="empty-icon">✅</div>
-          <div>No partial or failed recordings to recover.</div>
-        </div>`;
+      const empty = document.createElement('div');
+      empty.className = 'empty';
+      const icon = document.createElement('div');
+      icon.className = 'empty-icon';
+      icon.textContent = '✅';
+      const message = document.createElement('div');
+      message.textContent = 'No partial or failed recordings to recover.';
+      empty.append(icon, message);
+      listEl.replaceChildren(empty);
       return;
     }
 
@@ -124,7 +143,7 @@ async function render() {
       recordings.length !== 1 ? 's' : ''
     } need attention.`;
 
-    listEl.innerHTML = '';
+    listEl.replaceChildren();
     for (const rec of recordings) {
       const chunkCount = await countChunks(rec.id);
       const item = document.createElement('div');
@@ -139,24 +158,39 @@ async function render() {
           active: 'Active',
         }[rec.status] || 'Partial';
 
-      item.innerHTML = `
-        <div class="item-header">
-          <div>
-            <div class="item-name">${escapeHtml(rec.name || rec.id)}</div>
-            <div class="item-date">${formatDate(
-              rec.createdAt
-            )} · ${chunkCount} chunks · ${formatSize(rec.size)}</div>
-          </div>
-          <span class="item-status ${statusClass}">${statusLabel}</span>
-        </div>
-        <div class="item-actions">
-          <button class="btn-retry" data-id="${escapeHtml(
-            rec.id
-          )}" data-action="save-partial">Save partial</button>
-          <button class="btn-discard" data-id="${escapeHtml(
-            rec.id
-          )}" data-action="discard">Discard</button>
-        </div>`;
+      const header = document.createElement('div');
+      header.className = 'item-header';
+      const details = document.createElement('div');
+      const name = document.createElement('div');
+      name.className = 'item-name';
+      name.textContent = rec.name || rec.id;
+      const date = document.createElement('div');
+      date.className = 'item-date';
+      date.textContent = `${formatDate(rec.createdAt)} · ${chunkCount} chunks · ${formatSize(
+        rec.size
+      )}`;
+      details.append(name, date);
+
+      const status = document.createElement('span');
+      status.className = `item-status ${statusClass}`;
+      status.textContent = statusLabel;
+      header.append(details, status);
+
+      const actions = document.createElement('div');
+      actions.className = 'item-actions';
+      const saveButton = document.createElement('button');
+      saveButton.className = 'btn-retry';
+      saveButton.dataset.id = rec.id;
+      saveButton.dataset.action = 'save-partial';
+      saveButton.textContent = 'Save partial';
+      const discardButton = document.createElement('button');
+      discardButton.className = 'btn-discard';
+      discardButton.dataset.id = rec.id;
+      discardButton.dataset.action = 'discard';
+      discardButton.textContent = 'Discard';
+      actions.append(saveButton, discardButton);
+
+      item.append(header, actions);
       listEl.appendChild(item);
     }
 
@@ -168,10 +202,11 @@ async function render() {
         try {
           if (action === 'discard') {
             if (confirm('Discard this recording? This cannot be undone.')) {
-              // Check if this is an active session (has sessionSnapshot)
+              // Ask the background for canonical session ownership. The
+              // storage fallback is limited to pre-coordination snapshots.
               try {
-                const snapshot = await chrome.storage.local.get('sessionSnapshot');
-                if (snapshot.sessionSnapshot && snapshot.sessionSnapshot.recordingId === id) {
+                const snapshot = await getActiveSessionSnapshot();
+                if (snapshot && snapshot.recordingId === id) {
                   // Background owns the machine transition and snapshot cleanup.
                   await chrome.runtime.sendMessage({ type: 'RECOVERY_DISCARD', recordingId: id });
                 } else {
@@ -184,7 +219,7 @@ async function render() {
                   await deleteRecording(id);
                 } catch (deleteErr) {
                   alert(
-                    'CaptureCast: Failed to discard recording: ' + (deleteErr.message || deleteErr)
+                    'ScreenSilo: Failed to discard recording: ' + (deleteErr.message || deleteErr)
                   );
                   return;
                 }
@@ -200,22 +235,17 @@ async function render() {
           }
         } catch (e) {
           console.error('[Recovery] Button action failed:', e);
-          alert('CaptureCast: Operation failed: ' + (e.message || e));
+          alert('ScreenSilo: Operation failed: ' + (e.message || e));
         }
       });
     });
   } catch (err) {
     subtitleEl.textContent = 'Failed to load recoverable recordings.';
-    listEl.innerHTML = `<div class="empty">Error: ${escapeHtml(err.message)}</div>`;
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = `Error: ${err.message}`;
+    listEl.replaceChildren(empty);
   }
-}
-
-function escapeHtml(str) {
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
 }
 
 document.addEventListener('DOMContentLoaded', render);

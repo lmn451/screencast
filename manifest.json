@@ -1,8 +1,10 @@
 {
   "manifest_version": 3,
-  "name": "CaptureCast",
-  "description": "Simple, privacy-focused screen recording: This Tab, Window, or Entire Screen.",
-  "version": "0.2.1",
+  "minimum_chrome_version": "116",
+  "name": "ScreenSilo",
+  "short_name": "ScreenSilo",
+  "description": "Private, local screen recording for a tab, window, or entire screen.",
+  "version": "0.2.3",
   "icons": {
     "16": "icons/icon-16.png",
     "32": "icons/icon-32.png",
@@ -10,7 +12,7 @@
     "128": "icons/icon-128.png"
   },
   "action": {
-    "default_title": "CaptureCast",
+    "default_title": "ScreenSilo",
     "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/icon-16.png",
@@ -20,7 +22,6 @@
     }
   },
   "permissions": ["activeTab", "scripting", "offscreen", "storage", "alarms"],
-  "optional_permissions": ["notifications"],
   "background": {
     "service_worker": "build/background.js",
     "type": "module"

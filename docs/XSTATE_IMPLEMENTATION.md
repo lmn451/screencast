@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document summarizes the XState v5 refactoring implementation for CaptureCast.
+This document summarizes the XState v5 refactoring implementation for ScreenSilo.
 
 ## Files Created
 

@@ -11,6 +11,11 @@ globalThis.addEventListener('error', (event) => {
   logger.error('Uncaught Exception:', event.error || event.message);
 });
 const listEl = document.getElementById('list');
+const versionEl = document.getElementById('app-version');
+
+if (versionEl) {
+  versionEl.textContent = `ScreenSilo v${chrome.runtime.getManifest().version}`;
+}
 
 function formatDate(ts) {
   return new Date(ts).toLocaleString();
@@ -37,6 +42,13 @@ function formatSize(bytes) {
 // but is excluded here for symmetry with recovery.js's status query.
 const EXCLUDED_STATUSES = new Set(['active', 'partial', 'recoverable', 'failed']);
 
+function showEmpty(message) {
+  const empty = document.createElement('div');
+  empty.className = 'empty';
+  empty.textContent = message;
+  listEl.replaceChildren(empty);
+}
+
 async function render() {
   try {
     const recordings = (await getAllRecordings()).filter(
@@ -44,11 +56,11 @@ async function render() {
     );
 
     if (recordings.length === 0) {
-      listEl.innerHTML = '<div class="empty">No recordings found.</div>';
+      showEmpty('No recordings found.');
       return;
     }
 
-    listEl.innerHTML = '';
+    listEl.replaceChildren();
     recordings.forEach((rec) => {
       const item = document.createElement('div');
       item.className = 'item';
@@ -89,7 +101,7 @@ async function render() {
           });
         } catch (e) {
           logger.error('Failed to open recording preview:', e);
-          alert('CaptureCast: Failed to open recording preview.');
+          alert('ScreenSilo: Failed to open recording preview.');
         }
       };
 
@@ -102,7 +114,7 @@ async function render() {
             await deleteRecording(rec.id);
             item.remove();
             if (listEl.children.length === 0) {
-              listEl.innerHTML = '<div class="empty">No recordings found.</div>';
+              showEmpty('No recordings found.');
             }
           } catch (e) {
             alert('Failed to delete: ' + e.message);
@@ -118,19 +130,9 @@ async function render() {
       listEl.appendChild(item);
     });
   } catch (e) {
-    listEl.innerHTML = `<div class="empty">Error loading recordings: ${escapeHtml(
-      e.message
-    )}</div>`;
+    showEmpty(`Error loading recordings: ${e.message}`);
     logger.error('Failed to load recordings:', e);
   }
-}
-
-function escapeHtml(str) {
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
 }
 
 document.addEventListener('DOMContentLoaded', render);

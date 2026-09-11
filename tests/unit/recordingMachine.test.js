@@ -103,6 +103,14 @@ describe('recordingMachine — happy path (idle → starting → recording → s
     actor.stop();
   });
 
+  it('uses an explicitly requested page strategy without enabling the microphone', () => {
+    const actor = startActor();
+    actor.send({ type: 'START', mode: 'tab', mic: false, strategy: 'page' });
+    expect(actor.getSnapshot().context.strategy).toBe('page');
+    expect(actor.getSnapshot().context.options.includeMic).toBe(false);
+    actor.stop();
+  });
+
   it('RECORDER_DATA from stopping → saved (page strategy path)', () => {
     const actor = startActor();
     actor.send({ type: 'START', mode: 'tab', mic: true });
@@ -354,6 +362,7 @@ describe('recordingMachine — RESTORE (service-worker restart recovery)', () =>
     options: { mode: 'window', includeMic: false, includeSystemAudio: true, bestQuality: true },
     strategy: 'offscreen',
     correlationId: '550e8400-e29b-41d4-a716-446655440001',
+    recorderTabId: null,
   };
 
   it('restores idle → recording with the snapshot context', () => {
@@ -366,8 +375,21 @@ describe('recordingMachine — RESTORE (service-worker restart recovery)', () =>
     expect(restored.context.strategy).toBe('offscreen');
     expect(restored.context.startedAt).toBe(1234);
     expect(restored.context.options).toEqual(snapshot.options);
+    expect(restored.context.recorderTabId).toBeNull();
     expect(restored.context.error).toBeNull();
     expect(restored.context.failedChunkCount).toBe(0);
+    actor.stop();
+  });
+
+  it('restores recorder tab ownership in the same transition', () => {
+    const actor = startActor();
+    actor.send({
+      type: 'RESTORE',
+      snapshot: { ...snapshot, strategy: 'page', recorderTabId: 99 },
+    });
+
+    expect(actor.getSnapshot().value).toBe('recording');
+    expect(actor.getSnapshot().context.recorderTabId).toBe(99);
     actor.stop();
   });
 

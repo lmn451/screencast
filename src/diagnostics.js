@@ -1,10 +1,18 @@
-// Persistent diagnostics for CaptureCast
+// Persistent diagnostics for ScreenSilo
 // Stores structured diagnostic entries in IndexedDB for debugging
 
-import { DIAG_STORE, openDB } from './lib/db-shared.js';
+import {
+  DIAG_ORDER_INDEX,
+  DIAG_SEQUENCE_INDEX,
+  DIAG_STORE,
+  DIAG_TIMESTAMP_INDEX,
+  openDB,
+} from './lib/db-shared.js';
 
 // Re-export for backwards compat with existing tests/callers.
 export { DIAG_STORE };
+export { DIAG_TIMESTAMP_INDEX };
+export { DIAG_SEQUENCE_INDEX, DIAG_ORDER_INDEX };
 
 // Ring buffer limit
 export const MAX_DIAGNOSTIC_ENTRIES = 500;
@@ -62,43 +70,150 @@ const openDiagDB = openDB;
 /** @deprecated Internal use only */
 export { openDiagDB };
 
+let diagnosticsWriteQueue = Promise.resolve();
+
+function closeDatabase(db) {
+  try {
+    db?.close();
+  } catch {
+    // Closing an already-closed connection is harmless.
+  }
+}
+
+function transactionFailure(tx, requestError) {
+  return tx?.error || requestError || new Error('Diagnostics transaction failed');
+}
+
+/**
+ * Performs one diagnostic write and retention pass. The caller serializes
+ * these operations so a burst of logger calls cannot race its count/cursor
+ * decisions against one another.
+ */
+function saveDiagnosticTransaction(entry) {
+  let db;
+  return openDiagDB().then((openedDb) => {
+    db = openedDb;
+    return new Promise((resolve, reject) => {
+      let tx;
+      let requestError;
+      let settled = false;
+
+      const settle = (error) => {
+        if (settled) return;
+        settled = true;
+        closeDatabase(db);
+        if (error) reject(error);
+        else resolve();
+      };
+
+      try {
+        tx = db.transaction(DIAG_STORE, 'readwrite');
+        tx.oncomplete = () => settle();
+        tx.onerror = () => settle(transactionFailure(tx, requestError));
+        tx.onabort = () => settle(transactionFailure(tx, requestError));
+
+        const store = tx.objectStore(DIAG_STORE);
+        let sequenceCursorRequest;
+        try {
+          // This cursor and the subsequent add are part of the same
+          // readwrite transaction. IndexedDB serializes readwrite
+          // transactions across extension contexts, so two callers cannot
+          // allocate the same sequence value.
+          sequenceCursorRequest = store.index(DIAG_SEQUENCE_INDEX).openCursor(null, 'prev');
+        } catch (error) {
+          requestError = error;
+          try {
+            tx.abort();
+          } catch {
+            settle(error);
+          }
+          return;
+        }
+
+        sequenceCursorRequest.onerror = () => {
+          requestError = sequenceCursorRequest.error;
+        };
+        sequenceCursorRequest.onsuccess = (event) => {
+          const cursor = event.target.result;
+          const maxSequence = cursor ? cursor.key : -1;
+          const sequence = Number.isSafeInteger(maxSequence) ? maxSequence + 1 : 0;
+          const diagnostic = {
+            ...entry,
+            ts: entry?.ts ?? Date.now(),
+            sequence,
+          };
+
+          let addRequest;
+          try {
+            addRequest = store.add(diagnostic);
+            addRequest.onerror = () => {
+              requestError = addRequest.error;
+            };
+
+            const countRequest = store.count();
+            countRequest.onerror = () => {
+              requestError = countRequest.error;
+            };
+            countRequest.onsuccess = () => {
+              if (countRequest.result <= MAX_DIAGNOSTIC_ENTRIES) return;
+
+              const deleteCount = countRequest.result - MAX_DIAGNOSTIC_ENTRIES;
+              let remaining = deleteCount;
+              let cursorRequest;
+              try {
+                cursorRequest = store.index(DIAG_ORDER_INDEX).openCursor(null, 'next');
+              } catch (error) {
+                requestError = error;
+                try {
+                  tx.abort();
+                } catch {
+                  settle(error);
+                }
+                return;
+              }
+
+              cursorRequest.onerror = () => {
+                requestError = cursorRequest.error;
+              };
+              cursorRequest.onsuccess = (cursorEvent) => {
+                const deleteCursor = cursorEvent.target.result;
+                if (!deleteCursor || remaining <= 0) return;
+
+                deleteCursor.delete();
+                remaining -= 1;
+                if (remaining > 0) deleteCursor.continue();
+              };
+            };
+          } catch (error) {
+            requestError = error;
+            try {
+              tx.abort();
+            } catch {
+              settle(error);
+            }
+          }
+        };
+      } catch (error) {
+        settle(error);
+      }
+    });
+  });
+}
+
 /**
  * Saves a diagnostic entry to IndexedDB, trimming to MAX_DIAGNOSTIC_ENTRIES.
  * Handles all errors gracefully (no throwing).
  * @param {object} entry - Diagnostic entry from createDiagnosticEntry
  */
-export async function saveDiagnostic(entry) {
-  try {
-    const db = await openDiagDB();
-    const tx = db.transaction(DIAG_STORE, 'readwrite');
-    const store = tx.objectStore(DIAG_STORE);
+export function saveDiagnostic(entry) {
+  const operation = diagnosticsWriteQueue.then(() => saveDiagnosticTransaction(entry));
+  // Keep the queue usable after a failed operation while preserving the
+  // public API's graceful, non-throwing behavior.
+  diagnosticsWriteQueue = operation.catch(() => undefined);
 
-    // Add entry
-    store.add(entry);
-
-    // Trim if needed
-    const countReq = store.count();
-    countReq.onsuccess = () => {
-      if (countReq.result > MAX_DIAGNOSTIC_ENTRIES) {
-        const cursorReq = store.openCursor();
-        let deleteCount = countReq.result - MAX_DIAGNOSTIC_ENTRIES;
-        cursorReq.onsuccess = (e) => {
-          const cursor = e.target.result;
-          if (cursor && deleteCount > 0) {
-            cursor.delete();
-            deleteCount--;
-            cursor.continue();
-          }
-        };
-      }
-    };
-
-    tx.oncomplete = () => db.close();
-    tx.onerror = () => db.close();
-  } catch (e) {
-    // Graceful: no-op on error
-    console.error('[Diag] saveDiagnostic failed:', e);
-  }
+  return operation.catch((error) => {
+    console.error('[Diag] saveDiagnostic failed:', error);
+  });
 }
 
 /**
@@ -107,30 +222,48 @@ export async function saveDiagnostic(entry) {
  * @returns {Promise<object[]>} Diagnostic entries
  */
 export async function getDiagnostics(limit = MAX_DIAGNOSTIC_ENTRIES) {
+  // A logger call may intentionally be fire-and-forget. Wait for writes that
+  // were queued before this read so callers observe committed diagnostics.
+  await diagnosticsWriteQueue;
   const db = await openDB();
   return new Promise((resolve, reject) => {
+    let tx;
+    let requestError;
+    let settled = false;
+    const entries = [];
+
+    const settle = (error) => {
+      if (settled) return;
+      settled = true;
+      closeDatabase(db);
+      if (error) reject(error);
+      else resolve(entries);
+    };
+
     try {
-      const tx = db.transaction(DIAG_STORE, 'readonly');
+      tx = db.transaction(DIAG_STORE, 'readonly');
+      tx.oncomplete = () => settle();
+      tx.onerror = () => settle(transactionFailure(tx, requestError));
+      tx.onabort = () => settle(transactionFailure(tx, requestError));
+
       const store = tx.objectStore(DIAG_STORE);
-      const entries = [];
-      const cursorReq = store.openCursor(null, 'prev');
+      const maxEntries =
+        limit === Infinity
+          ? Infinity
+          : Math.max(0, Number.isFinite(Number(limit)) ? Math.floor(Number(limit)) : 0);
+      const cursorReq = store.index(DIAG_ORDER_INDEX).openCursor(null, 'prev');
+      cursorReq.onerror = () => {
+        requestError = cursorReq.error;
+      };
       cursorReq.onsuccess = (e) => {
         const cursor = e.target.result;
-        if (cursor && entries.length < limit) {
+        if (cursor && entries.length < maxEntries) {
           entries.push(cursor.value);
           cursor.continue();
-        } else {
-          db.close();
-          resolve(entries);
         }
       };
-      cursorReq.onerror = () => {
-        db.close();
-        reject(cursorReq.error);
-      };
     } catch (err) {
-      db.close();
-      reject(err);
+      settle(err);
     }
   });
 }

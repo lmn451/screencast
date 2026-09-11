@@ -5,6 +5,7 @@ global.chrome = {
   runtime: {
     id: 'test-extension-id',
     getURL: (path) => `chrome-extension://test-extension-id/${path}`,
+    getManifest: () => ({ name: 'ScreenSilo', version: '0.2.2' }),
   },
   storage: {
     local: {

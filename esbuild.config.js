@@ -1,5 +1,5 @@
 /**
- * esbuild configuration for CaptureCast.
+ * esbuild configuration for ScreenSilo.
  *
  * Bundles every script entry point referenced by the manifest or by an HTML
  * page into the `build/` directory. After running `pnpm run build`:
@@ -23,10 +23,16 @@
  * Source lives exclusively under `src/`.
  */
 import * as esbuild from 'esbuild';
+import { rmSync } from 'node:fs';
 
 const isWatch = process.argv.includes('--watch');
 
 const OUT_DIR = 'build';
+
+// A clean output directory keeps deleted or renamed entry points out of store
+// packages. In particular, stale development bundles must never survive into
+// a release simply because they were left by an older build configuration.
+rmSync(OUT_DIR, { recursive: true, force: true });
 
 const baseConfig = {
   bundle: true,
