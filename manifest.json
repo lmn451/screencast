@@ -1,5 +1,6 @@
 {
   "manifest_version": 3,
+  "minimum_chrome_version": "116",
   "name": "ScreenSilo",
   "short_name": "ScreenSilo",
   "description": "Private, local screen recording for a tab, window, or entire screen.",
