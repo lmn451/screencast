@@ -14,6 +14,16 @@ const ASSET_BASE = 'https://api.github.com/repos/lmn451/screencast/releases/asse
 const AMO_BASE = 'https://addons.mozilla.org/api/v5';
 const AMO_SECRET = 'amo-test-secret';
 const AMO_ISSUER = 'user:18664816:23';
+const UPLOAD_IDS = [
+  {
+    label: 'canonical UUID',
+    value: '123e4567-e89b-12d3-a456-426614174000',
+  },
+  {
+    label: 'AMO compact hexadecimal UUID',
+    value: '123e4567e89b12d3a456426614174000',
+  },
+];
 
 function makeStoredZip(filename, content) {
   const filenameBytes = Buffer.from(filename);
@@ -280,90 +290,93 @@ describe('publish-firefox script', () => {
     expect(parts[2]).toBe(signature);
   });
 
-  it('verifies the release, updates the existing listing, and attaches source atomically', async () => {
-    const zip = manifestZip();
-    const source = makeStoredZip('manifest.json', JSON.stringify({ version: VERSION }));
-    const checksum = assetChecksums(zip, source);
-    const data = githubResponses(zip, source, checksum);
-    const calls = [];
-    let uploadPolls = 0;
-    let finalPosts = 0;
+  it.each(UPLOAD_IDS)(
+    'verifies the release, updates the existing listing, and attaches source atomically ($label)',
+    async ({ value: uploadId }) => {
+      const zip = manifestZip();
+      const source = makeStoredZip('manifest.json', JSON.stringify({ version: VERSION }));
+      const checksum = assetChecksums(zip, source);
+      const data = githubResponses(zip, source, checksum);
+      const calls = [];
+      let uploadPolls = 0;
+      let finalPosts = 0;
 
-    global.fetch = makeFetch(
-      data,
-      async (url, init = {}) => {
-        const method = init.method || 'GET';
-        const path = amoPath(url);
-        expect(init.redirect).toBe('error');
-        if (method === 'GET' && path === addonPath()) return jsonResponse(existingAddon());
-        if (method === 'GET' && path === addonPath() + '/versions/' + VERSION) {
-          return jsonResponse({}, 404);
-        }
-        if (method === 'POST' && path === '/addons/upload') {
-          expect(init.headers.Authorization).toMatch(/^JWT /);
-          expect(init.body).toBeInstanceOf(FormData);
-          expect(init.body.get('channel')).toBe('listed');
-          const upload = init.body.get('upload');
-          expect(upload.name).toBe('screensilo-firefox-mv3-' + VERSION + '.zip');
-          await expect(upload.arrayBuffer()).resolves.toEqual(
-            zip.buffer.slice(zip.byteOffset, zip.byteOffset + zip.byteLength)
-          );
-          return jsonResponse({
-            uuid: '123e4567-e89b-12d3-a456-426614174000',
-            channel: 'listed',
-            processed: false,
-          });
-        }
-        if (method === 'GET' && path === '/addons/upload/123e4567-e89b-12d3-a456-426614174000') {
-          uploadPolls += 1;
-          return jsonResponse({
-            uuid: '123e4567-e89b-12d3-a456-426614174000',
-            channel: 'listed',
-            processed: true,
-            valid: true,
-            submitted: false,
-            version: VERSION,
-          });
-        }
-        if (method === 'POST' && path === addonPath() + '/versions') {
-          finalPosts += 1;
-          expect(init.headers.Authorization).toMatch(/^JWT /);
-          expect(init.body).toBeInstanceOf(FormData);
-          expect(init.body.get('upload')).toBe('123e4567-e89b-12d3-a456-426614174000');
-          const sourceFile = init.body.get('source');
-          expect(sourceFile.name).toBe('screensilo-firefox-source-' + VERSION + '.zip');
-          await expect(sourceFile.arrayBuffer()).resolves.toEqual(
-            source.buffer.slice(source.byteOffset, source.byteOffset + source.byteLength)
-          );
-          return jsonResponse(versionDetail(zip));
-        }
-        if (method === 'GET' && path === addonPath() + '/versions/777') {
-          return jsonResponse(versionDetail(zip));
-        }
-        throw new Error('Unexpected AMO request ' + method + ' ' + path);
-      },
-      calls
-    );
+      global.fetch = makeFetch(
+        data,
+        async (url, init = {}) => {
+          const method = init.method || 'GET';
+          const path = amoPath(url);
+          expect(init.redirect).toBe('error');
+          if (method === 'GET' && path === addonPath()) return jsonResponse(existingAddon());
+          if (method === 'GET' && path === addonPath() + '/versions/' + VERSION) {
+            return jsonResponse({}, 404);
+          }
+          if (method === 'POST' && path === '/addons/upload') {
+            expect(init.headers.Authorization).toMatch(/^JWT /);
+            expect(init.body).toBeInstanceOf(FormData);
+            expect(init.body.get('channel')).toBe('listed');
+            const upload = init.body.get('upload');
+            expect(upload.name).toBe('screensilo-firefox-mv3-' + VERSION + '.zip');
+            await expect(upload.arrayBuffer()).resolves.toEqual(
+              zip.buffer.slice(zip.byteOffset, zip.byteOffset + zip.byteLength)
+            );
+            return jsonResponse({
+              uuid: uploadId,
+              channel: 'listed',
+              processed: false,
+            });
+          }
+          if (method === 'GET' && path === '/addons/upload/' + uploadId) {
+            uploadPolls += 1;
+            return jsonResponse({
+              uuid: uploadId,
+              channel: 'listed',
+              processed: true,
+              valid: true,
+              submitted: false,
+              version: VERSION,
+            });
+          }
+          if (method === 'POST' && path === addonPath() + '/versions') {
+            finalPosts += 1;
+            expect(init.headers.Authorization).toMatch(/^JWT /);
+            expect(init.body).toBeInstanceOf(FormData);
+            expect(init.body.get('upload')).toBe(uploadId);
+            const sourceFile = init.body.get('source');
+            expect(sourceFile.name).toBe('screensilo-firefox-source-' + VERSION + '.zip');
+            await expect(sourceFile.arrayBuffer()).resolves.toEqual(
+              source.buffer.slice(source.byteOffset, source.byteOffset + source.byteLength)
+            );
+            return jsonResponse(versionDetail(zip));
+          }
+          if (method === 'GET' && path === addonPath() + '/versions/777') {
+            return jsonResponse(versionDetail(zip));
+          }
+          throw new Error('Unexpected AMO request ' + method + ' ' + path);
+        },
+        calls
+      );
 
-    await expect(
-      publishRelease(options(['--poll-interval-ms', '100']), baseEnvironment())
-    ).resolves.toMatchObject({
-      version: VERSION,
-      versionId: 777,
-      state: 'PENDING_REVIEW',
-      sourceAttached: true,
-    });
-    expect(uploadPolls).toBe(1);
-    expect(finalPosts).toBe(1);
-    expect(calls.filter((call) => call.url.startsWith(AMO_BASE)).length).toBeGreaterThan(0);
-    expect(
-      calls
-        .filter((call) => call.url.startsWith(AMO_BASE))
-        .every((call) => {
-          return call.init.redirect === 'error';
-        })
-    ).toBe(true);
-  });
+      await expect(
+        publishRelease(options(['--poll-interval-ms', '100']), baseEnvironment())
+      ).resolves.toMatchObject({
+        version: VERSION,
+        versionId: 777,
+        state: 'PENDING_REVIEW',
+        sourceAttached: true,
+      });
+      expect(uploadPolls).toBe(1);
+      expect(finalPosts).toBe(1);
+      expect(calls.filter((call) => call.url.startsWith(AMO_BASE)).length).toBeGreaterThan(0);
+      expect(
+        calls
+          .filter((call) => call.url.startsWith(AMO_BASE))
+          .every((call) => {
+            return call.init.redirect === 'error';
+          })
+      ).toBe(true);
+    }
+  );
 
   it.each([
     {
@@ -557,6 +570,50 @@ describe('publish-firefox script', () => {
       )
     ).rejects.toThrow('timed out');
     expect(versionPosts).toBe(0);
+  });
+
+  it('rejects a malformed upload UUID before polling or creating a version', async () => {
+    const zip = manifestZip();
+    const source = makeStoredZip('manifest.json', JSON.stringify({ version: VERSION }));
+    const data = githubResponses(zip, source, assetChecksums(zip, source));
+    const calls = [];
+    let uploadPolls = 0;
+    let versionPosts = 0;
+    global.fetch = makeFetch(
+      data,
+      async (url, init = {}) => {
+        const method = init.method || 'GET';
+        const path = amoPath(url);
+        if (method === 'GET' && path === addonPath()) return jsonResponse(existingAddon());
+        if (method === 'GET' && path === addonPath() + '/versions/' + VERSION) {
+          return jsonResponse({}, 404);
+        }
+        if (method === 'POST' && path === '/addons/upload') {
+          return jsonResponse({
+            uuid: 'not-a-valid-amo-upload-id',
+            channel: 'listed',
+            processed: false,
+          });
+        }
+        if (method === 'GET' && path.startsWith('/addons/upload/')) {
+          uploadPolls += 1;
+          throw new Error('Malformed UUID must not be used for polling');
+        }
+        if (method === 'POST' && path === addonPath() + '/versions') {
+          versionPosts += 1;
+          return jsonResponse({});
+        }
+        throw new Error('Unexpected AMO request ' + method + ' ' + path);
+      },
+      calls
+    );
+
+    await expect(publishRelease(options(), baseEnvironment())).rejects.toThrow('valid upload UUID');
+    expect(uploadPolls).toBe(0);
+    expect(versionPosts).toBe(0);
+    expect(
+      calls.filter((call) => call.url.startsWith(AMO_BASE) && (call.init.method || 'GET') === 'GET')
+    ).toHaveLength(2);
   });
 
   it('does not repeat an ambiguous upload POST', async () => {

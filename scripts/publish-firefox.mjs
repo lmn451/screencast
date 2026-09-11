@@ -187,7 +187,12 @@ async function amoRequest(
 
 async function waitForValidation(options, credentials, initial, version) {
   const uuid = initial?.uuid;
-  if (typeof uuid !== 'string' || !/^[a-f0-9-]{36}$/i.test(uuid)) {
+  // AMO serializes UUIDField(format='hex') as 32 characters without hyphens.
+  // Also accept canonical UUIDs while rejecting path separators and malformed IDs.
+  if (
+    typeof uuid !== 'string' ||
+    !/^(?:[a-f0-9]{32}|[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$/i.test(uuid)
+  ) {
     throw new PublishError(
       'Mozilla upload returned no valid upload UUID; inspect AMO before retrying'
     );
