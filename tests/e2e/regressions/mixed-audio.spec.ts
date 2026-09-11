@@ -29,7 +29,23 @@ async function installSyntheticCapture(context: BrowserContext) {
             if (!drawing) throw new Error('Synthetic capture canvas is unavailable');
             drawing.fillStyle = '#202124';
             drawing.fillRect(0, 0, canvas.width, canvas.height);
-            return canvas.captureStream(10);
+            const stream = canvas.captureStream(10);
+            // Keep video frames flowing after captureStream() starts. A single
+            // initial paint can leave MediaRecorder with an intermittently
+            // malformed/empty WebM when it initializes alongside the audio
+            // mixer, which makes decodeAudioData fail before tone assertions.
+            const paintTimer = window.setInterval(() => {
+              drawing.fillStyle = '#202124';
+              drawing.fillRect(0, 0, canvas.width, canvas.height);
+              drawing.fillStyle = '#303134';
+              drawing.fillRect(Date.now() % canvas.width, 0, 2, canvas.height);
+            }, 100);
+            stream.getVideoTracks().forEach((track) => {
+              track.addEventListener('ended', () => window.clearInterval(paintTimer), {
+                once: true,
+              });
+            });
+            return stream;
           })()
         : new MediaStream();
       stream.addTrack(destination.stream.getAudioTracks()[0]);

@@ -191,7 +191,7 @@ async function hasLikelyLiveSnapshot(
   return false;
 }
 
-async function recoverOrphanedRecordings(skipRecordingId: string | null): Promise<number> {
+async function recoverOrphanedRecordings(protectedRecordingIds: Set<string>): Promise<number> {
   let recoveredCount = 0;
   try {
     const recordings = await getAllRecordings();
@@ -201,10 +201,13 @@ async function recoverOrphanedRecordings(skipRecordingId: string | null): Promis
         // rows. Re-read ownership for every row so a session that became live
         // during that await is protected even when the initial state was idle.
         const liveState = service.getState();
-        const protectedRecordingId = liveState.recording
-          ? liveState.recordingId ?? null
-          : skipRecordingId;
-        if (recording.id === protectedRecordingId) {
+        if (liveState.recording && liveState.recordingId) {
+          protectedRecordingIds.add(liveState.recordingId);
+        }
+        // Keep every session observed live during this pass. An older row in
+        // this enumeration may already have been saved while a new session
+        // started; stale enumeration data must not downgrade that recording.
+        if (protectedRecordingIds.has(recording.id)) {
           logger.log('Skipping likely live active recording during orphan recovery', {
             recordingId: recording.id,
           });
@@ -255,7 +258,12 @@ async function reconcileUnfinishedSessions(): Promise<void> {
       skipRecordingId = snapshot.recordingId;
     }
 
-    recoveredOrphanCount = await recoverOrphanedRecordings(skipRecordingId);
+    const protectedRecordingIds = new Set<string>();
+    if (skipRecordingId) protectedRecordingIds.add(skipRecordingId);
+    if (currentState.recording && currentState.recordingId) {
+      protectedRecordingIds.add(currentState.recordingId);
+    }
+    recoveredOrphanCount = await recoverOrphanedRecordings(protectedRecordingIds);
 
     // Reconciliation yields while sweeping DB rows. A new START can make the
     // service live during that await, so refresh the protected ID before any

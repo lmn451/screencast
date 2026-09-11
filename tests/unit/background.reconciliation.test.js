@@ -124,20 +124,22 @@ it('preserves a recording that starts while the orphan scan is loading rows', as
   expect(chrome.tabs.create).not.toHaveBeenCalled();
 });
 
-it('recovers the previous active row when a replacement recording starts mid-scan', async () => {
+it('protects both sessions observed live during one orphan scan', async () => {
   serviceState = { recording: true, recordingId: 'old-live-recording' };
   getAllRecordings.mockImplementationOnce(async () => {
     serviceState = { recording: true, recordingId: 'new-live-recording' };
     return [
       { id: 'old-live-recording', status: 'active' },
       { id: 'new-live-recording', status: 'active' },
+      { id: 'orphan-recording', status: 'active' },
     ];
   });
 
   await reconcileUnfinishedSessions();
 
   expect(markRecordingRecoverable).toHaveBeenCalledTimes(1);
-  expect(markRecordingRecoverable).toHaveBeenCalledWith('old-live-recording');
+  expect(markRecordingRecoverable).toHaveBeenCalledWith('orphan-recording');
+  expect(markRecordingRecoverable).not.toHaveBeenCalledWith('old-live-recording');
   expect(markRecordingRecoverable).not.toHaveBeenCalledWith('new-live-recording');
 });
 
