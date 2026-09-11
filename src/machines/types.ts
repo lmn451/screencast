@@ -96,6 +96,8 @@ export interface SessionSnapshot {
   correlationId: string;
   /** Recorder page tab, when the page strategy is active. */
   recorderTabId?: number | null;
+  /** Overlay ownership retained while a terminal session is being cleaned up. */
+  overlayTabId?: number | null;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

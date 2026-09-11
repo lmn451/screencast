@@ -196,6 +196,9 @@ export class RecordingService {
     const context = snapshot.context;
     const previousState = this.lastActorState;
     this.lastActorState = state;
+    if (state === 'saved' || state === 'failed' || state === 'recoverable') {
+      this.retireRecording(context.recordingId);
+    }
 
     // Badge management
     await this.updateBadge(state);
@@ -314,7 +317,7 @@ export class RecordingService {
   }
 
   private async writeSessionSnapshot(context: RecordingContext): Promise<void> {
-    if (!context.recordingId) return;
+    if (!context.recordingId || this.retiredRecordingIds.has(context.recordingId)) return;
     const current = this.actor.getSnapshot();
     if (
       !(
@@ -1277,9 +1280,25 @@ export class RecordingService {
       return false;
     }
 
+    if (!persisted || !isValidUUID(persisted.recordingId)) return false;
+
+    if (persisted.status === 'idle') {
+      // Retirement is durable before snapshot removal or browser teardown.
+      // A worker that died between those steps may leave a pending picker;
+      // finish its cleanup without ever restoring an active machine state.
+      if (
+        !this.actor.getSnapshot().matches('idle') ||
+        this.retiredRecordingIds.has(persisted.recordingId)
+      )
+        return false;
+      this.retiredRecordingIds.add(persisted.recordingId);
+      this.recorderTabId = persisted.strategy === 'page' ? persisted.recorderTabId ?? null : null;
+      this.overlayTabId = persisted.overlayTabId ?? null;
+      await this.cleanup(persisted.recordingId);
+      return false;
+    }
+
     if (
-      !persisted ||
-      !isValidUUID(persisted.recordingId) ||
       this.retiredRecordingIds.has(persisted.recordingId) ||
       (persisted.status !== 'starting' &&
         persisted.status !== 'recording' &&
@@ -1484,7 +1503,26 @@ export class RecordingService {
   }
 
   private retireRecording(recordingId: string | null): void {
-    if (recordingId) this.retiredRecordingIds.add(recordingId);
+    if (!recordingId || this.retiredRecordingIds.has(recordingId)) return;
+    this.retiredRecordingIds.add(recordingId);
+    const context = this.actor.getSnapshot().context;
+    if (context.recordingId !== recordingId) return;
+
+    // Queue this before sending the terminal actor event. Existing live writes
+    // finish first; later writes for this ID are suppressed. Thus a restart
+    // during removal/teardown sees a non-restorable snapshot, not a live one.
+    void this.queueSessionStorage(() =>
+      this.chrome.storage.set({
+        [STORAGE_KEYS.SESSION_SNAPSHOT]: {
+          ...context,
+          options: { ...context.options },
+          status: 'idle',
+          lastActivityAt: Date.now(),
+        },
+      })
+    ).catch((e) => {
+      console.warn('[RecordingService] Failed to persist session retirement:', e);
+    });
   }
 
   private cleanup(
