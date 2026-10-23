@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.4 (2026-10-23)
 
 - Enable Best quality by default for new recordings; users can uncheck it to use standard quality.
 - Reconcile live recorder heartbeats after a service-worker restart so Stop finalizes the recording normally.
