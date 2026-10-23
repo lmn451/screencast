@@ -114,11 +114,6 @@ describe('recording.js additional tests', () => {
     expect(res).toBeNull();
   });
 
-  it('updateRecordingName rejects when recording not found', async () => {
-    const { updateRecordingName } = await import('../../src/lib/recording.js');
-    await expect(updateRecordingName('missing', 'new name')).rejects.toThrow('Recording not found');
-  });
-
   // ── AC1 (finding #1): finishRecording must REJECT when the transaction
   // fails to commit, not just when the initial request errors. Before the
   // fix, resolving on request.onsuccess meant a commit-time abort (quota

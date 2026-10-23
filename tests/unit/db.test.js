@@ -1,9 +1,11 @@
 import { setupIndexedDB, clearDatabase, teardownIndexedDB } from '../lib/indexeddb-mock.js';
+import FDBObjectStore from 'fake-indexeddb/lib/FDBObjectStore';
 
 import {
   saveChunk,
   finishRecording,
   getRecording,
+  updateRecordingName,
   deleteRecording,
   cleanupOldRecordings,
   getAllRecordings,
@@ -164,6 +166,48 @@ describe('db.js (IndexedDB-backed) unit tests', () => {
     expect(rec.mimeType).toBe('video/webm');
     expect(rec.duration).toBe(1234);
     expect(rec.size).toBe(999);
+  });
+  test('updateRecordingName: rejects when the write transaction aborts and retries after commit', async () => {
+    await finishRecording('rename', 'video/webm', 0, 0);
+    await updateRecordingName('rename', 'Original');
+    expect((await getRecording('rename')).name).toBe('Original');
+
+    const originalPut = FDBObjectStore.prototype.put;
+    let aborted = false;
+    FDBObjectStore.prototype.put = function (...args) {
+      const request = originalPut.apply(this, args);
+      if (
+        this.name === STORE_RECORDINGS &&
+        args[0]?.id === 'rename' &&
+        args[0]?.name === 'Aborted'
+      ) {
+        request.addEventListener(
+          'success',
+          () => {
+            aborted = true;
+            request.transaction.abort();
+          },
+          { once: true }
+        );
+      }
+      return request;
+    };
+
+    try {
+      await expect(updateRecordingName('rename', 'Aborted')).rejects.toThrow();
+    } finally {
+      FDBObjectStore.prototype.put = originalPut;
+    }
+
+    expect(aborted).toBe(true);
+    expect((await getRecording('rename')).name).toBe('Original');
+
+    await updateRecordingName('rename', 'New');
+    expect((await getRecording('rename')).name).toBe('New');
+  });
+
+  test('updateRecordingName: rejects when the recording is missing', async () => {
+    await expect(updateRecordingName('missing', 'New')).rejects.toThrow('Recording not found');
   });
 
   test('deleteRecording: removes metadata and chunks', async () => {

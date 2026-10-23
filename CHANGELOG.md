@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.4 (2026-10-23)
+
+- Enable Best quality by default for new recordings; users can uncheck it to use standard quality.
+- Reconcile live recorder heartbeats after a service-worker restart so Stop finalizes the recording normally.
+- Restore in-progress saves with their original absolute 60-second deadline.
+- Refuse deletion of live recordings and fail closed when recording ownership cannot be verified.
+- Persist repeated preview filename changes and clearing only after the database transaction commits.
+- Ignore page-generated overlay Stop clicks while preserving trusted user activation.
+- Pin browser CI to Ubuntu 24.04, which is supported by the locked Playwright version.
+
 ## 0.2.3 (2026-09-11)
 
 ### Recording and recovery

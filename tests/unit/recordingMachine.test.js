@@ -393,6 +393,21 @@ describe('recordingMachine — RESTORE (service-worker restart recovery)', () =>
     actor.stop();
   });
 
+  it('restores stopping with its original absolute save deadline', () => {
+    const deadline = Date.now() + 30_000;
+    const actor = startActor();
+    actor.send({
+      type: 'RESTORE',
+      snapshot: { ...snapshot, status: 'stopping', saveDeadlineAt: deadline },
+    });
+
+    expect(actor.getSnapshot().value).toBe('stopping');
+    expect(actor.getSnapshot().context.saveDeadlineAt).toBe(deadline);
+    actor.send({ type: 'STOP' });
+    expect(actor.getSnapshot().context.saveDeadlineAt).toBe(deadline);
+    actor.stop();
+  });
+
   it('is ignored outside idle', () => {
     const actor = startActor();
     actor.send({ type: 'START', mode: 'tab' });

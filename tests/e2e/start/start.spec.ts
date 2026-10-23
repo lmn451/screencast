@@ -14,19 +14,6 @@ test.beforeEach(async ({ context }) => {
 });
 
 test.describe('Tab mode start functionality', () => {
-  test('offers an opt-in best quality setting in the popup', async ({ context, extensionId }) => {
-    const popupPage = await context.newPage();
-    await popupPage.goto(`chrome-extension://${extensionId}/popup.html`);
-
-    await popupPage.getByLabel('Best quality').check();
-    await popupPage.getByRole('button', { name: 'Record', exact: true }).click();
-
-    await expect(popupPage).toHaveURL(/consent\.html\?.*best=true/);
-    await expect(popupPage.locator('#capture-list')).toContainText(
-      'Best quality enabled (source resolution, up to 60 FPS)'
-    );
-  });
-
   test('start recording in tab mode without audio', async ({ context, extensionId }) => {
     const controlPage = await context.newPage();
     await controlPage.goto(controlPageUrl(extensionId));

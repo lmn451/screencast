@@ -2,6 +2,7 @@
 // Phase 4 recovery flow
 
 import { STORE_RECORDINGS, STORE_CHUNKS, openDB } from '../lib/db-shared.js';
+import { deleteRecordingFromUI } from '../lib/ui-recording-deletion.js';
 // Legacy key retained only as a read fallback for snapshots written before
 // RecordingService moved session ownership to per-recording metadata.
 const LEGACY_SESSION_SNAPSHOT_KEY = 'sessionSnapshot';
@@ -61,36 +62,6 @@ async function countChunks(recordingId) {
     req.onerror = () => reject(req.error);
     tx.oncomplete = () => db.close();
     tx.onerror = () => db.close();
-  });
-}
-
-async function deleteRecording(recordingId) {
-  const db = await openDB();
-  const tx = db.transaction([STORE_RECORDINGS, STORE_CHUNKS], 'readwrite');
-
-  // Delete metadata
-  const recStore = tx.objectStore(STORE_RECORDINGS);
-  recStore.delete(recordingId);
-
-  // Delete chunks
-  const chunkStore = tx.objectStore(STORE_CHUNKS);
-  const index = chunkStore.index('recordingId');
-  const keysReq = index.getAllKeys(IDBKeyRange.only(recordingId));
-  keysReq.onsuccess = () => {
-    for (const key of keysReq.result) {
-      chunkStore.delete(key);
-    }
-  };
-
-  return new Promise((resolve, reject) => {
-    tx.oncomplete = () => {
-      db.close();
-      resolve();
-    };
-    tx.onerror = () => {
-      db.close();
-      reject(tx.error);
-    };
   });
 }
 
@@ -202,28 +173,7 @@ async function render() {
         try {
           if (action === 'discard') {
             if (confirm('Discard this recording? This cannot be undone.')) {
-              // Ask the background for canonical session ownership. The
-              // storage fallback is limited to pre-coordination snapshots.
-              try {
-                const snapshot = await getActiveSessionSnapshot();
-                if (snapshot && snapshot.recordingId === id) {
-                  // Background owns the machine transition and snapshot cleanup.
-                  await chrome.runtime.sendMessage({ type: 'RECOVERY_DISCARD', recordingId: id });
-                } else {
-                  await deleteRecording(id);
-                }
-              } catch (storageErr) {
-                // Fall back to direct delete if storage/message fails
-                console.error('[Recovery] Storage/message error during discard:', storageErr);
-                try {
-                  await deleteRecording(id);
-                } catch (deleteErr) {
-                  alert(
-                    'ScreenSilo: Failed to discard recording: ' + (deleteErr.message || deleteErr)
-                  );
-                  return;
-                }
-              }
+              await deleteRecordingFromUI(id);
               render();
             }
           } else if (action === 'save-partial') {

@@ -177,6 +177,8 @@ function isPersistedSessionSnapshot(value: unknown): value is SessionSnapshot {
     typeof value.status === 'string' &&
     (value.startedAt === undefined || typeof value.startedAt === 'number') &&
     (value.lastActivityAt === undefined || typeof value.lastActivityAt === 'number') &&
+    (value.saveDeadlineAt === undefined ||
+      (typeof value.saveDeadlineAt === 'number' && Number.isFinite(value.saveDeadlineAt))) &&
     (value.options === undefined || isObject(value.options)) &&
     (value.strategy === undefined ||
       value.strategy === 'offscreen' ||
@@ -434,26 +436,21 @@ export class RecordingService {
     overlayTabId: number | null,
     persistedSnapshot?: SessionSnapshot
   ): Promise<SessionOwner | null> {
-    try {
-      const current = this.actor.getSnapshot();
-      const snapshot =
-        persistedSnapshot ??
-        (current.context.recordingId === recordingId
-          ? this.snapshotFromContext(current.context)
-          : undefined);
-      const owner = await claimSessionOwner({
-        recordingId,
-        strategy,
-        recorderTabId,
-        overlayTabId,
-        snapshot,
-      });
-      if (owner) this.sessionGeneration = owner.generation;
-      return owner;
-    } catch (e) {
-      console.warn('[RecordingService] Failed to claim durable session owner:', e);
-      return null;
-    }
+    const current = this.actor.getSnapshot();
+    const snapshot =
+      persistedSnapshot ??
+      (current.context.recordingId === recordingId
+        ? this.snapshotFromContext(current.context)
+        : undefined);
+    const owner = await claimSessionOwner({
+      recordingId,
+      strategy,
+      recorderTabId,
+      overlayTabId,
+      snapshot,
+    });
+    if (owner) this.sessionGeneration = owner.generation;
+    return owner;
   }
 
   private async retireDurableOwner(
@@ -583,6 +580,7 @@ export class RecordingService {
       status: this.actor.getSnapshot().value as SessionSnapshot['status'],
       startedAt: context.startedAt ?? Date.now(),
       lastActivityAt: Date.now(),
+      ...(context.saveDeadlineAt == null ? {} : { saveDeadlineAt: context.saveDeadlineAt }),
       options: { ...context.options },
       strategy: context.strategy,
       correlationId: context.correlationId ?? context.recordingId!,
@@ -610,20 +608,24 @@ export class RecordingService {
       return;
     }
 
-    try {
-      const snapshot = this.snapshotFromContext(current.context);
-      await updateSessionOwner(context.recordingId, {
-        strategy: current.context.strategy,
-        recorderTabId: current.context.recorderTabId,
-        overlayTabId: current.context.overlayTabId,
-        snapshot,
-      });
-      // The per-recording key is authoritative. A delayed operation from an
-      // older worker can never overwrite another recording's key.
-      await this.chrome.storage.set({ [sessionSnapshotStorageKey(context.recordingId)]: snapshot });
-    } catch (e) {
-      console.warn('[RecordingService] Failed to persist session snapshot:', e);
+    const snapshot = this.snapshotFromContext(current.context);
+    const ownerUpdated = await updateSessionOwner(context.recordingId, {
+      strategy: current.context.strategy,
+      recorderTabId: current.context.recorderTabId,
+      overlayTabId: current.context.overlayTabId,
+      snapshot,
+    });
+    const latest = this.actor.getSnapshot();
+    const stillActive =
+      (latest.matches('starting') || latest.matches('recording') || latest.matches('stopping')) &&
+      latest.context.recordingId === context.recordingId;
+    if (!stillActive) return;
+    if (!ownerUpdated) {
+      throw new Error('Session ownership changed before its snapshot could be persisted');
     }
+    // The per-recording key is authoritative. A delayed operation from an
+    // older worker can never overwrite another recording's key.
+    await this.chrome.storage.set({ [sessionSnapshotStorageKey(context.recordingId)]: snapshot });
   }
 
   private async clearSessionSnapshot(recordingId = this.lastSessionRecordingId): Promise<void> {
@@ -1047,6 +1049,35 @@ export class RecordingService {
     }
   }
 
+  private armSaveTimeout(recordingId: string, deadlineAt: number): void {
+    if (this.saveTimeout) clearTimeout(this.saveTimeout);
+    this.saveTimeout = null;
+
+    const expire = (timer?: ReturnType<typeof setTimeout>) => {
+      if (timer && this.saveTimeout !== timer) return;
+      if (timer) this.saveTimeout = null;
+      const current = this.actor.getSnapshot();
+      if (
+        !current.matches('stopping') ||
+        current.context.recordingId !== recordingId ||
+        current.context.saveDeadlineAt !== deadlineAt
+      ) {
+        return;
+      }
+      this.stopCheckpointTimer();
+      this.actor.send({ type: 'SAVE_TIMEOUT' });
+    };
+
+    const remaining = deadlineAt - Date.now();
+    if (remaining <= 0) {
+      expire();
+      return;
+    }
+    let timer: ReturnType<typeof setTimeout>;
+    timer = setTimeout(() => expire(timer), remaining);
+    this.saveTimeout = timer;
+  }
+
   private clearTimers(): void {
     if (this.confirmationTimeout) {
       clearTimeout(this.confirmationTimeout);
@@ -1200,14 +1231,26 @@ export class RecordingService {
     // document. A second worker can then protect this session while this
     // startup is still waiting on browser APIs, and a stale worker's cleanup
     // cannot close the new owner's offscreen document.
-    const owner = await withResourceLock(() =>
-      this.claimDurableOwner(
-        recordingId,
-        context.strategy,
-        context.recorderTabId ?? null,
-        context.overlayTabId ?? null
-      )
-    );
+    let owner: SessionOwner | null;
+    try {
+      owner = await withResourceLock(() =>
+        this.claimDurableOwner(
+          recordingId,
+          context.strategy,
+          context.recorderTabId ?? null,
+          context.overlayTabId ?? null
+        )
+      );
+    } catch (e) {
+      const current = this.actor.getSnapshot();
+      if (current.matches('starting') && current.context.recordingId === recordingId) {
+        this.actor.send({ type: 'RESET' });
+      }
+      return {
+        ok: false,
+        error: e instanceof Error ? e.message : String(e),
+      };
+    }
     if (
       !owner ||
       !this.actor.getSnapshot().matches('starting') ||
@@ -1363,38 +1406,74 @@ export class RecordingService {
       return { ok: true };
     }
 
-    // Idempotent stop while already stopping.
+    // Idempotent STOP never changes the original deadline.
     if (state === 'stopping') {
+      const context = this.actor.getSnapshot().context;
+      if (context.recordingId && context.saveDeadlineAt != null) {
+        this.armSaveTimeout(context.recordingId, context.saveDeadlineAt);
+      }
+      try {
+        await this.persistSessionSnapshot(context);
+      } catch (e) {
+        if (!this.actor.getSnapshot().matches('saved')) {
+          return { ok: false, error: e instanceof Error ? e.message : String(e) };
+        }
+      }
       return { ok: true };
     }
 
     // state === 'recording' — proceed with normal stop flow.
     this.actor.send({ type: 'STOP' });
 
-    // Set save timeout. Kept as setTimeout (not an alarm): the stop→data message
-    // traffic keeps the SW alive through this short window, and the alarm-based
-    // periodic reconcile is the backstop for a hung `stopping`.
-    this.saveTimeout = setTimeout(() => {
-      this.actor.send({ type: 'SAVE_TIMEOUT' });
-    }, TIMEOUTS.SAVE);
+    // Keep the deadline in the machine context so every persisted snapshot
+    // carries the same absolute expiry across worker restarts.
+    const { recordingId, saveDeadlineAt } = this.actor.getSnapshot().context;
+    if (recordingId && saveDeadlineAt != null) {
+      this.armSaveTimeout(recordingId, saveDeadlineAt);
+    }
 
-    try {
-      await this.sendStopCommand(this.actor.getSnapshot().context.strategy);
-    } catch (e) {
+    const context = this.actor.getSnapshot().context;
+    const snapshotPersistence = this.persistSessionSnapshot(context);
+    const stopCommand = this.sendStopCommand(context.strategy);
+    const [stopResult, persistenceResult] = await Promise.allSettled([
+      stopCommand,
+      snapshotPersistence,
+    ]);
+    if (stopResult.status === 'rejected') {
+      this.clearTimers();
       this.actor.send({ type: 'SAVE_TIMEOUT' });
       await this.clearActiveSessionArtifacts();
       await this.cleanup();
-      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      return {
+        ok: false,
+        error:
+          stopResult.reason instanceof Error
+            ? stopResult.reason.message
+            : String(stopResult.reason),
+      };
+    }
+    if (persistenceResult.status === 'rejected') {
+      const current = this.actor.getSnapshot();
+      if (!current.matches('saved')) {
+        return {
+          ok: false,
+          error:
+            persistenceResult.reason instanceof Error
+              ? persistenceResult.reason.message
+              : String(persistenceResult.reason),
+        };
+      }
     }
 
-    // Best-effort overlay removal
-    if (this.overlayTabId) {
-      try {
-        await this.chrome.tabs.sendMessage(this.overlayTabId, buildMessage(MSG_OVERLAY_REMOVE));
-      } catch (e) {
-        // Non-critical
-      }
-      await this.removeOverlay(this.overlayTabId);
+    // Best-effort overlay removal must not delay media stop or snapshot durability.
+    const overlayTabId = this.overlayTabId;
+    if (overlayTabId != null) {
+      void this.chrome.tabs
+        .sendMessage(overlayTabId, buildMessage(MSG_OVERLAY_REMOVE))
+        .catch(() => undefined);
+      void this.removeOverlay(overlayTabId).catch((e) => {
+        console.warn('[RecordingService] Failed to remove overlay after STOP:', e);
+      });
       this.actor.send({ type: 'SET_OVERLAY_TAB_ID', tabId: null });
     }
 
@@ -1631,7 +1710,7 @@ export class RecordingService {
    * Reclaim a still-live recording session after a service-worker restart.
    * Verifies the capture is actually alive (offscreen document present, or the
    * recorder tab still open for the same recordingId) before restoring the
-   * machine to `recording`.
+   * machine to its persisted live state (`starting`, `recording`, or `stopping`).
    *
    * @returns true when an active session is being tracked (either it never
    *          stopped, or it was successfully restored from the snapshot).
@@ -1654,12 +1733,22 @@ export class RecordingService {
       persistedState = await this.readPersistedSessionState();
     } catch (e) {
       console.warn('[RecordingService] Failed to read persisted session state for restore:', e);
-      return false;
+      throw e;
     }
 
     const durableOwner = await this.readDurableOwner();
-    if (durableOwner === undefined) return false;
-    const persisted = this.selectPersistedSnapshot(persistedState, durableOwner);
+    if (durableOwner === undefined)
+      throw new Error('Session ownership is unavailable; retry reconciliation');
+    const selected = this.selectPersistedSnapshot(persistedState, durableOwner);
+    const persisted =
+      selected?.status === 'stopping'
+        ? {
+            ...selected,
+            saveDeadlineAt:
+              selected.saveDeadlineAt ??
+              (selected.lastActivityAt ?? selected.startedAt ?? 0) + TIMEOUTS.SAVE,
+          }
+        : selected;
     // A crash or failed browser close can leave only the durable retirement.
     // Keep retrying cleanup even after the Chrome storage marker was removed.
     if (
@@ -1700,15 +1789,28 @@ export class RecordingService {
       if (durableOwner?.status === 'active') {
         await withResourceLock(async () => {
           const owner = await this.readDurableOwner();
+          if (owner === undefined)
+            throw new Error('Session ownership is unavailable; retry reconciliation');
           if (!owner || owner.status !== 'active') return;
           const live = await this.hasLiveOwnerContext(owner);
           if (!live) {
-            await this.retireDurableOwner(
+            const retired = await this.retireDurableOwner(
               owner.recordingId,
               owner.strategy,
               owner.recorderTabId,
               owner.overlayTabId
             );
+            if (!retired) {
+              const latestOwner = await this.readDurableOwner();
+              if (latestOwner === undefined)
+                throw new Error('Session ownership is unavailable; retry reconciliation');
+              if (
+                latestOwner?.status === 'active' &&
+                latestOwner.recordingId === owner.recordingId
+              ) {
+                throw new Error('Unable to retire an inactive durable session owner');
+              }
+            }
           }
         });
       }
@@ -1741,7 +1843,7 @@ export class RecordingService {
         console.warn('[RecordingService] Offscreen liveness check failed:', e);
         // An unavailable liveness check cannot prove that the owner is orphaned.
         // Keep the snapshot and durable owner for a later wakeup.
-        return false;
+        throw e;
       }
       if (!docAlive) {
         await this.retireDurableOwner(
@@ -1750,6 +1852,12 @@ export class RecordingService {
           persisted.recorderTabId ?? null,
           persisted.overlayTabId ?? null
         );
+        const latestOwner = await this.readDurableOwner();
+        if (latestOwner === undefined)
+          throw new Error('Session ownership is unavailable; retry reconciliation');
+        if (latestOwner?.status === 'active' && latestOwner.recordingId === persisted.recordingId) {
+          throw new Error('Unable to retire an inactive durable session owner');
+        }
         await this.clearSessionSnapshot(persisted.recordingId);
         return false;
       }
@@ -1763,7 +1871,7 @@ export class RecordingService {
         );
       } catch (e) {
         console.warn('[RecordingService] Recorder-tab liveness check failed:', e);
-        return false;
+        throw e;
       }
       if (recorderTabId == null) {
         await this.retireDurableOwner(
@@ -1772,6 +1880,12 @@ export class RecordingService {
           persisted.recorderTabId ?? null,
           persisted.overlayTabId ?? null
         );
+        const latestOwner = await this.readDurableOwner();
+        if (latestOwner === undefined)
+          throw new Error('Session ownership is unavailable; retry reconciliation');
+        if (latestOwner?.status === 'active' && latestOwner.recordingId === persisted.recordingId) {
+          throw new Error('Unable to retire an inactive durable session owner');
+        }
         await this.clearSessionSnapshot(persisted.recordingId);
         return false;
       }
@@ -1787,12 +1901,14 @@ export class RecordingService {
       latestState = await this.readPersistedSessionState();
     } catch (e) {
       console.warn('[RecordingService] Failed to recheck persisted session state:', e);
-      return false;
+      throw e;
     }
     const retirement = latestState.retirements.find(
       (candidate) => candidate.recordingId === persisted.recordingId
     );
     const latestOwner = await this.readDurableOwner();
+    if (latestOwner === undefined)
+      throw new Error('Session ownership is unavailable; retry reconciliation');
     if (retirement || latestOwner?.status === 'retired') {
       if (retirement) await this.cleanupRetiredSession(retirement);
       return false;
@@ -1816,24 +1932,29 @@ export class RecordingService {
     }
 
     this.actor.send({ type: 'RESTORE', snapshot: persisted });
+    const restored = this.actor.getSnapshot();
     if (
       !(
-        this.actor.getSnapshot().matches('recording') ||
-        this.actor.getSnapshot().matches('starting')
+        restored.matches('recording') ||
+        restored.matches('starting') ||
+        restored.matches('stopping')
       ) ||
-      this.actor.getSnapshot().context.recordingId !== persisted.recordingId
+      restored.context.recordingId !== persisted.recordingId
     ) {
       return false;
     }
-    // RESTORE carries the recorder tab ID into the recording context in the
-    // same synchronous transition. Assign the service field only after the
-    // final idle ownership check above, so a late page lookup cannot mutate a
-    // newer startup while the machine is still idle.
+    // RESTORE carries resource ownership into the recording context. Assign the
+    // service fields only after the final idle ownership check above, so a late
+    // page lookup cannot mutate a newer startup while the machine is still idle.
     if (restoredRecorderTabId != null) {
       this.recorderTabId = restoredRecorderTabId;
     }
     this.overlayTabId = persisted.overlayTabId ?? null;
     this.startCheckpointTimer();
+    const { recordingId, saveDeadlineAt } = restored.context;
+    if (restored.matches('stopping') && recordingId && saveDeadlineAt != null) {
+      this.armSaveTimeout(recordingId, saveDeadlineAt);
+    }
     return true;
   }
 
@@ -1849,12 +1970,24 @@ export class RecordingService {
     }
 
     if (!this.isCurrentRecording(recordingId)) {
-      const restored = await this.restoreSession();
-      if (!restored && !this.isCurrentRecording(recordingId)) {
+      await this.restoreSession();
+      // A restore may have reclaimed a different active session while this
+      // heartbeat's liveness checks were pending. Only its exact ID is proof.
+      if (!this.isCurrentRecording(recordingId)) {
         return { ok: false, error: 'Heartbeat for unknown session' };
       }
     }
 
+    const current = this.actor.getSnapshot();
+    if (current.matches('starting') && current.context.recordingId === recordingId) {
+      const accepted =
+        current.context.strategy === 'offscreen'
+          ? this.handleOffscreenStarted(recordingId)
+          : current.context.strategy === 'page'
+          ? this.handleRecorderStarted(recordingId)
+          : false;
+      if (!accepted) return { ok: false, error: 'Heartbeat for unknown session' };
+    }
     if (this.actor.getSnapshot().matches('recording')) {
       // Refresh lastActivityAt and keep the checkpoint alarm armed as a
       // backstop if the heartbeat stream ever stalls.
@@ -1925,7 +2058,7 @@ export class RecordingService {
         return await this.chrome.offscreen.hasDocument();
       } catch (e) {
         console.warn('[RecordingService] Failed to inspect owner offscreen document:', e);
-        return true;
+        throw e;
       }
     }
     if (owner.strategy === 'page') {
@@ -1933,9 +2066,7 @@ export class RecordingService {
         return (await this.findRecorderTabId(owner.recordingId, owner.recorderTabId, true)) != null;
       } catch (e) {
         console.warn('[RecordingService] Failed to inspect owner recorder tab:', e);
-        // Keep an active owner when the browser query is unavailable; another
-        // worker may still be creating or using the recorder page.
-        return true;
+        throw e;
       }
     }
     return false;
@@ -2332,8 +2463,12 @@ export class RecordingService {
         return { ok: true };
 
       case 'GET_STATE':
-        await this.restoreSession();
-        return { ok: true, ...this.getState() };
+        try {
+          await this.restoreSession();
+          return { ok: true, ...this.getState() };
+        } catch (e) {
+          return { ok: false, error: e instanceof Error ? e.message : String(e) };
+        }
 
       case 'TAB_CLOSING':
         await this.handleTabClosing(message.tabId as number);

@@ -138,7 +138,9 @@ const ERROR_DISPLAY_DURATION_MS = 2000;
   // Query initial state from background
   queryState();
 
-  btn.addEventListener('click', async () => {
+  btn.addEventListener('click', async (event) => {
+    if (!event.isTrusted) return;
+
     updateButtonState('stopping');
 
     try {

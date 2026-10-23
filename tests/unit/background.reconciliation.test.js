@@ -244,9 +244,13 @@ it('runs retirement cleanup even when no live snapshot exists', async () => {
 it('defers orphan recovery when canonical session metadata cannot be read', async () => {
   getPersistedSessionSnapshot.mockRejectedValueOnce(new Error('Storage unavailable'));
   getAllRecordings.mockResolvedValue([{ id: 'live-recording', status: 'active' }]);
-  await reconcileUnfinishedSessions();
+  await expect(reconcileUnfinishedSessions()).rejects.toThrow();
   expect(markRecordingRecoverable).not.toHaveBeenCalled();
   expect(getAllRecordings).not.toHaveBeenCalled();
+  expect(clearInterruptedSessionSnapshot).not.toHaveBeenCalled();
+  expect(hasChunks).not.toHaveBeenCalled();
+  expect(chrome.storage.local.remove).not.toHaveBeenCalled();
+  expect(chrome.tabs.create).not.toHaveBeenCalled();
 });
 
 it('defers orphan recovery when capture liveness is unknown', async () => {
@@ -257,7 +261,34 @@ it('defers orphan recovery when capture liveness is unknown', async () => {
   });
   chrome.offscreen.hasDocument.mockRejectedValueOnce(new Error('Browser unavailable'));
   getAllRecordings.mockResolvedValue([{ id: 'live-recording', status: 'active' }]);
-  await reconcileUnfinishedSessions();
+  await expect(reconcileUnfinishedSessions()).rejects.toThrow();
   expect(markRecordingRecoverable).not.toHaveBeenCalled();
   expect(getAllRecordings).not.toHaveBeenCalled();
+  expect(clearInterruptedSessionSnapshot).not.toHaveBeenCalled();
+  expect(hasChunks).not.toHaveBeenCalled();
+  expect(chrome.storage.local.remove).not.toHaveBeenCalled();
+  expect(chrome.tabs.create).not.toHaveBeenCalled();
+});
+
+it('halts destructive recovery when service restoration fails', async () => {
+  chrome.storage.local.get.mockResolvedValue({
+    sessionSnapshot: {
+      recordingId: 'live-recording',
+      status: 'recording',
+      strategy: 'offscreen',
+    },
+  });
+  chrome.offscreen.hasDocument.mockResolvedValueOnce(false);
+  restoreSession.mockRejectedValueOnce(new Error('Session owner unavailable'));
+  getAllRecordings.mockResolvedValue([{ id: 'orphan-recording', status: 'active' }]);
+
+  await expect(reconcileUnfinishedSessions()).rejects.toThrow();
+
+  expect(restoreSession).toHaveBeenCalled();
+  expect(getAllRecordings).not.toHaveBeenCalled();
+  expect(markRecordingRecoverable).not.toHaveBeenCalled();
+  expect(clearInterruptedSessionSnapshot).not.toHaveBeenCalled();
+  expect(hasChunks).not.toHaveBeenCalled();
+  expect(chrome.storage.local.remove).not.toHaveBeenCalled();
+  expect(chrome.tabs.create).not.toHaveBeenCalled();
 });

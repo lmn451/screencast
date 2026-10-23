@@ -10,6 +10,7 @@
 import { jest } from '@jest/globals';
 import indexedDB from 'fake-indexeddb';
 import { setImmediate as realSetImmediate } from 'node:timers';
+import { readSessionOwner, updateSessionOwner } from '../../src/lib/session-metadata.ts';
 
 const VALID_UUID = '550e8400-e29b-41d4-a716-446655440000';
 
@@ -142,6 +143,28 @@ async function clearSessionMetadataDatabase() {
     // allowing the next test to reopen the old owner record after a blocked
     // delete request.
   });
+}
+
+async function abortNextSessionMetadataWrite() {
+  const request = indexedDB.open('CaptureCastSessionMetadata', 1);
+  const database = await new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+  const prototype = Object.getPrototypeOf(database);
+  const originalTransaction = prototype.transaction;
+  prototype.transaction = function (...args) {
+    const transaction = originalTransaction.apply(this, args);
+    if (args[1] === 'readwrite') {
+      prototype.transaction = originalTransaction;
+      void Promise.resolve().then(() => transaction.abort());
+    }
+    return transaction;
+  };
+  database.close();
+  return () => {
+    prototype.transaction = originalTransaction;
+  };
 }
 
 beforeEach(async () => {
@@ -1259,6 +1282,31 @@ describe('state projection and recovery exits', () => {
 
     expect(chrome.alarms.create).not.toHaveBeenCalled();
   });
+
+  it('does not checkpoint or clean up when session restore fails', async () => {
+    const { chrome, store } = makeStorageBackedChrome({
+      offscreen: { ...makeStubChrome().offscreen, hasDocument: jest.fn(async () => true) },
+    });
+    const snapshot = {
+      recordingId: VALID_UUID,
+      status: 'recording',
+      startedAt: Date.now(),
+      lastActivityAt: Date.now(),
+      strategy: 'offscreen',
+      options: { mode: 'tab', includeMic: false, includeSystemAudio: false },
+    };
+    store.sessionSnapshot = snapshot;
+    chrome.storage.get.mockRejectedValueOnce(new Error('Storage unavailable'));
+    const svc = createRecordingService(chrome);
+
+    await expect(svc.handleCheckpointAlarm()).rejects.toThrow();
+
+    expect(store.sessionSnapshot).toEqual(snapshot);
+    expect(chrome.storage.set).not.toHaveBeenCalled();
+    expect(chrome.storage.remove).not.toHaveBeenCalled();
+    expect(chrome.offscreen.closeDocument).not.toHaveBeenCalled();
+    expect(chrome.alarms.create).not.toHaveBeenCalled();
+  });
 });
 
 describe('session restore & heartbeat (service-worker restart recovery)', () => {
@@ -1381,6 +1429,118 @@ describe('session restore & heartbeat (service-worker restart recovery)', () => 
     return { svc, recordingId };
   }
 
+  it('returns unsuccessful GET_STATE when legacy snapshot storage is unavailable', async () => {
+    const { chrome, store } = makeStorageBackedChrome({
+      offscreen: { ...makeStubChrome().offscreen, hasDocument: jest.fn(async () => true) },
+    });
+    const snapshot = {
+      recordingId: VALID_UUID,
+      status: 'recording',
+      startedAt: Date.now(),
+      lastActivityAt: Date.now(),
+      strategy: 'offscreen',
+      options: { mode: 'tab', includeMic: false, includeSystemAudio: false },
+    };
+    store.sessionSnapshot = snapshot;
+    expect(await readSessionOwner()).toBeNull();
+    chrome.storage.get.mockRejectedValueOnce(new Error('Storage unavailable'));
+    const restarted = createRecordingService(chrome);
+
+    const result = await restarted.handleMessage({ type: 'GET_STATE' }, { id: chrome.runtime.id });
+
+    expect(result).toMatchObject({ ok: false, error: expect.any(String) });
+    expect(result).not.toMatchObject({ ok: true, status: 'idle' });
+    expect(store.sessionSnapshot).toEqual(snapshot);
+    expect(chrome.storage.set).not.toHaveBeenCalled();
+    expect(await readSessionOwner()).toBeNull();
+    expect(chrome.offscreen.closeDocument).not.toHaveBeenCalled();
+    expect(chrome.storage.remove).not.toHaveBeenCalled();
+  });
+
+  it.each(['offscreen', 'page'])(
+    'returns unsuccessful GET_STATE and preserves the %s owner when liveness lookup rejects',
+    async (strategy) => {
+      const { chrome, store } = makeStorageBackedChrome({
+        capabilities: { offscreen: strategy === 'offscreen' },
+        offscreen: { ...makeStubChrome().offscreen, hasDocument: jest.fn(async () => true) },
+      });
+      const original = createRecordingService(chrome);
+      await original.startRecording('tab', strategy === 'page', false);
+      const recordingId = original.getState().recordingId;
+      expect(await original.handleHeartbeat(recordingId)).toEqual({ ok: true });
+      await flushMicrotasks(100);
+      const persistedSnapshot = snapshotFor(store, recordingId);
+      const ownerBefore = await readSessionOwner();
+      expect(ownerBefore).toMatchObject({ recordingId, status: 'active', strategy });
+
+      if (strategy === 'offscreen') {
+        chrome.offscreen.hasDocument.mockRejectedValueOnce(new Error('Browser unavailable'));
+      } else {
+        chrome.tabs.get.mockRejectedValueOnce(new Error('Tab lookup unavailable'));
+        chrome.tabs.query.mockRejectedValueOnce(new Error('Tab query unavailable'));
+      }
+      const restarted = simulateServiceWorkerRestart(chrome);
+
+      const result = await restarted.handleMessage(
+        { type: 'GET_STATE' },
+        { id: chrome.runtime.id }
+      );
+
+      expect(result).toMatchObject({ ok: false, error: expect.any(String) });
+      expect(result).not.toMatchObject({ ok: true, status: 'idle' });
+      expect(snapshotFor(store, recordingId)).toEqual(persistedSnapshot);
+      const ownerAfter = await readSessionOwner();
+      expect(ownerAfter).toMatchObject({
+        recordingId,
+        status: 'active',
+        generation: ownerBefore.generation,
+        strategy,
+        recorderTabId: ownerBefore.recorderTabId,
+        overlayTabId: ownerBefore.overlayTabId,
+        snapshot: ownerBefore.snapshot,
+      });
+      expect(chrome.offscreen.closeDocument).not.toHaveBeenCalled();
+      expect(chrome.tabs.remove).not.toHaveBeenCalled();
+      expect(chrome.storage.remove).not.toHaveBeenCalled();
+    }
+  );
+
+  it('returns unsuccessful GET_STATE when persisted-state recheck fails', async () => {
+    const { chrome, store } = makeStorageBackedChrome({
+      offscreen: { ...makeStubChrome().offscreen, hasDocument: jest.fn(async () => true) },
+    });
+    const original = createRecordingService(chrome);
+    await original.startRecording('tab', false, false);
+    const recordingId = original.getState().recordingId;
+    expect(await original.handleHeartbeat(recordingId)).toEqual({ ok: true });
+    await flushMicrotasks(100);
+    const persistedSnapshot = snapshotFor(store, recordingId);
+    const ownerBefore = await readSessionOwner();
+    const readStorage = chrome.storage.get.getMockImplementation();
+    const restarted = simulateServiceWorkerRestart(chrome);
+    chrome.storage.get
+      .mockImplementationOnce((key) => readStorage(key))
+      .mockRejectedValueOnce(new Error('Storage unavailable during recheck'));
+
+    const result = await restarted.handleMessage({ type: 'GET_STATE' }, { id: chrome.runtime.id });
+
+    expect(result).toMatchObject({ ok: false, error: expect.any(String) });
+    expect(result).not.toMatchObject({ ok: true, status: 'idle' });
+    expect(snapshotFor(store, recordingId)).toEqual(persistedSnapshot);
+    const ownerAfter = await readSessionOwner();
+    expect(ownerAfter).toMatchObject({
+      recordingId,
+      status: 'active',
+      generation: ownerBefore.generation,
+      strategy: 'offscreen',
+      recorderTabId: ownerBefore.recorderTabId,
+      overlayTabId: ownerBefore.overlayTabId,
+      snapshot: ownerBefore.snapshot,
+    });
+    expect(chrome.offscreen.closeDocument).not.toHaveBeenCalled();
+    expect(chrome.storage.remove).not.toHaveBeenCalled();
+  });
+
   it('accepts heartbeats for the active session', async () => {
     const chrome = makeStorageBackedChrome().chrome;
     const { svc, recordingId } = await startAndPersist(chrome);
@@ -1389,6 +1549,62 @@ describe('session restore & heartbeat (service-worker restart recovery)', () => 
 
     expect(result).toEqual({ ok: true });
     expect(svc.getState().status).toBe('recording');
+  });
+
+  it.each([
+    ['offscreen', false],
+    ['page', true],
+  ])(
+    'promotes a restored %s startup on heartbeat and finalizes it normally',
+    async (strategy, includeMic) => {
+      const { chrome, store } = makeStorageBackedChrome({
+        capabilities: { offscreen: strategy === 'offscreen' },
+        offscreen: { ...makeStubChrome().offscreen, hasDocument: jest.fn(async () => true) },
+      });
+      const original = createRecordingService(chrome);
+      await original.startRecording('tab', includeMic, false);
+      const recordingId = original.getState().recordingId;
+      await flushMicrotasks(100);
+      expect(snapshotFor(store, recordingId).status).toBe('starting');
+
+      const restarted = simulateServiceWorkerRestart(chrome);
+      expect(await restarted.handleHeartbeat(recordingId)).toEqual({ ok: true });
+      expect(restarted.getState()).toEqual(
+        expect.objectContaining({ status: 'recording', recordingId })
+      );
+
+      expect(await restarted.stopRecording()).toEqual({ ok: true });
+      expect(restarted.getState()).toEqual(
+        expect.objectContaining({ status: 'stopping', recordingId })
+      );
+      if (strategy === 'page') {
+        await restarted.handleRecorderData(recordingId, 'video/webm');
+      } else {
+        await restarted.handleOffscreenData(recordingId, 'video/webm');
+      }
+      expect(restarted.getState().status).toBe('saved');
+      expect(chrome.tabs.create).toHaveBeenCalledWith({
+        url: `chrome-extension://test/preview.html?id=${encodeURIComponent(recordingId)}`,
+      });
+    }
+  );
+
+  it('rejects a mismatched heartbeat without promoting the restored session', async () => {
+    const { chrome } = makeStorageBackedChrome({
+      offscreen: { ...makeStubChrome().offscreen, hasDocument: jest.fn(async () => true) },
+    });
+    const original = createRecordingService(chrome);
+    await original.startRecording('tab', false, false);
+    const recordingId = original.getState().recordingId;
+    await flushMicrotasks(100);
+
+    const restarted = simulateServiceWorkerRestart(chrome);
+    const result = await restarted.handleHeartbeat('550e8400-e29b-41d4-a716-446655440001');
+
+    expect(result).toEqual({ ok: false, error: 'Heartbeat for unknown session' });
+    expect(restarted.getState()).toEqual(
+      expect.objectContaining({ status: 'starting', recordingId })
+    );
   });
 
   it('rejects heartbeats with an invalid id', async () => {
@@ -1485,6 +1701,224 @@ describe('session restore & heartbeat (service-worker restart recovery)', () => 
       expect.objectContaining({ status: 'stopping', recordingId })
     );
     expect(chrome.runtime.sendMessage).toHaveBeenCalledWith({ type: 'OFFSCREEN_STOP' });
+  });
+
+  it('preserves the stopping deadline across restarts and duplicate STOP', async () => {
+    const { chrome, store } = makeStorageBackedChrome({
+      offscreen: { ...makeStubChrome().offscreen, hasDocument: jest.fn(async () => true) },
+    });
+    const original = createRecordingService(chrome);
+    await original.startRecording('tab', false, false);
+    acknowledgeOffscreen(original);
+    const recordingId = original.getState().recordingId;
+    await flushMicrotasks(100);
+    const stoppedAt = Date.now();
+    await original.stopRecording();
+    await flushMicrotasks(100);
+
+    const deadline = snapshotFor(store, recordingId).saveDeadlineAt;
+    expect(deadline).toBe(stoppedAt + 60_000);
+    expect(snapshotFor(store, recordingId)).toEqual(
+      expect.objectContaining({ status: 'stopping', saveDeadlineAt: deadline })
+    );
+
+    const restarted = simulateServiceWorkerRestart(chrome);
+    expect(await restarted.stopRecording()).toEqual({ ok: true });
+    await flushMicrotasks(100);
+    expect(restarted.getState()).toEqual(
+      expect.objectContaining({ status: 'stopping', recordingId })
+    );
+    expect(snapshotFor(store, recordingId).saveDeadlineAt).toBe(deadline);
+
+    jest.advanceTimersByTime(25_000);
+    expect(await restarted.stopRecording()).toEqual({ ok: true });
+    await flushMicrotasks(100);
+    expect(snapshotFor(store, recordingId).saveDeadlineAt).toBe(deadline);
+
+    const restartedAgain = simulateServiceWorkerRestart(chrome);
+    expect(await restartedAgain.stopRecording()).toEqual({ ok: true });
+    await flushMicrotasks(100);
+    expect(snapshotFor(store, recordingId).saveDeadlineAt).toBe(deadline);
+
+    jest.advanceTimersByTime(deadline - Date.now() - 1);
+    expect(restartedAgain.getState().status).toBe('stopping');
+    jest.advanceTimersByTime(1);
+    expect(restartedAgain.getState().status).toBe('recoverable');
+    await flushMicrotasks(100);
+  });
+
+  it('persists STOP before a held badge side effect and restores the same absolute deadline', async () => {
+    const { chrome, store } = makeStorageBackedChrome({
+      offscreen: { ...makeStubChrome().offscreen, hasDocument: jest.fn(async () => true) },
+    });
+    const original = createRecordingService(chrome);
+    await original.startRecording('tab', false, false);
+    const recordingId = original.getState().recordingId;
+    expect(await original.handleHeartbeat(recordingId)).toEqual({ ok: true });
+    await flushMicrotasks(100);
+    const stoppedAt = Date.now();
+    let releaseBadge;
+    const pendingBadge = new Promise((resolve) => {
+      releaseBadge = resolve;
+    });
+    let stoppingBadgeHeld = false;
+    chrome.action.setBadgeBackgroundColor.mockImplementation(async ({ color }) => {
+      if (color === '#f9ab00') {
+        stoppingBadgeHeld = true;
+        await pendingBadge;
+      }
+    });
+    let stopSettled = false;
+    const stop = original.stopRecording().then((result) => {
+      stopSettled = true;
+      return result;
+    });
+
+    let deadline;
+    try {
+      await flushMicrotasks(100);
+      expect(stoppingBadgeHeld).toBe(true);
+      expect(stopSettled).toBe(true);
+      expect(await stop).toEqual({ ok: true });
+
+      const snapshot = snapshotFor(store, recordingId);
+      deadline = snapshot.saveDeadlineAt;
+      expect(deadline).toBe(stoppedAt + 60_000);
+      expect(snapshot).toEqual(
+        expect.objectContaining({ status: 'stopping', saveDeadlineAt: deadline })
+      );
+      expect(await readSessionOwner()).toMatchObject({
+        recordingId,
+        status: 'active',
+        snapshot: expect.objectContaining({ status: 'stopping', saveDeadlineAt: deadline }),
+      });
+    } finally {
+      releaseBadge();
+      await stop.catch(() => undefined);
+    }
+
+    await flushMicrotasks(100);
+    jest.clearAllTimers();
+    const restarted = simulateServiceWorkerRestart(chrome);
+    const state = await restarted.handleMessage({ type: 'GET_STATE' }, { id: chrome.runtime.id });
+
+    expect(state).toMatchObject({ ok: true, status: 'stopping', recordingId });
+    expect(snapshotFor(store, recordingId).saveDeadlineAt).toBe(deadline);
+    expect((await readSessionOwner()).snapshot.saveDeadlineAt).toBe(deadline);
+
+    const remaining = deadline - Date.now();
+    expect(remaining).toBeGreaterThan(0);
+    jest.advanceTimersByTime(remaining - 1);
+    expect(restarted.getState().status).toBe('stopping');
+    jest.advanceTimersByTime(1);
+    expect(restarted.getState().status).toBe('recoverable');
+    await flushMicrotasks(100);
+  });
+
+  it.each(['absolute deadline', 'legacy activity timestamp'])(
+    'restores an expired %s as recoverable',
+    async (deadlineKind) => {
+      const { chrome, store } = makeStorageBackedChrome({
+        offscreen: { ...makeStubChrome().offscreen, hasDocument: jest.fn(async () => true) },
+      });
+      const original = createRecordingService(chrome);
+      await original.startRecording('tab', false, false);
+      acknowledgeOffscreen(original);
+      const recordingId = original.getState().recordingId;
+      await flushMicrotasks(100);
+      await original.stopRecording();
+      await flushMicrotasks(100);
+
+      const persisted = snapshotFor(store, recordingId);
+      const expiredSnapshot =
+        deadlineKind === 'absolute deadline'
+          ? { ...persisted, saveDeadlineAt: Date.now() - 1 }
+          : { ...persisted, lastActivityAt: Date.now() - 60_001 };
+      if (deadlineKind === 'legacy activity timestamp') {
+        delete expiredSnapshot.saveDeadlineAt;
+      }
+      store[`sessionSnapshot:${recordingId}`] = expiredSnapshot;
+      await updateSessionOwner(recordingId, {
+        strategy: expiredSnapshot.strategy,
+        recorderTabId: expiredSnapshot.recorderTabId ?? null,
+        overlayTabId: expiredSnapshot.overlayTabId ?? null,
+        snapshot: expiredSnapshot,
+      });
+
+      const restarted = simulateServiceWorkerRestart(chrome);
+      expect(await restarted.restoreSession()).toBe(true);
+      expect(restarted.getState()).toEqual(
+        expect.objectContaining({ status: 'recoverable', recordingId })
+      );
+      await flushMicrotasks(100);
+    }
+  );
+
+  it('cancels the save deadline when final DATA arrives first', async () => {
+    const { chrome } = makeStorageBackedChrome({
+      offscreen: { ...makeStubChrome().offscreen, hasDocument: jest.fn(async () => true) },
+    });
+    const { svc, recordingId } = await startAndPersist(chrome);
+    await svc.stopRecording();
+
+    await svc.handleOffscreenData(recordingId, 'video/webm');
+    expect(svc.getState().status).toBe('saved');
+    jest.advanceTimersByTime(60_000);
+    expect(svc.getState().status).toBe('idle');
+  });
+
+  it('finishes final DATA without resurrecting STOP while its snapshot write is pending', async () => {
+    const { chrome, store } = makeStorageBackedChrome({
+      offscreen: { ...makeStubChrome().offscreen, hasDocument: jest.fn(async () => true) },
+    });
+    const svc = createRecordingService(chrome);
+    await svc.startRecording('tab', false, false);
+    const recordingId = svc.getState().recordingId;
+    expect(await svc.handleHeartbeat(recordingId)).toEqual({ ok: true });
+    await flushMicrotasks(100);
+    let releaseStoppingWrite;
+    const pendingStoppingWrite = new Promise((resolve) => {
+      releaseStoppingWrite = resolve;
+    });
+    let stoppingWriteHeld = false;
+    chrome.storage.set.mockImplementation(async (data) => {
+      const stoppingSnapshot = Object.entries(data).find(
+        ([key, value]) => key.startsWith('sessionSnapshot:') && value?.status === 'stopping'
+      )?.[1];
+      if (stoppingSnapshot && !stoppingWriteHeld) {
+        stoppingWriteHeld = true;
+        await pendingStoppingWrite;
+      }
+      Object.assign(store, data);
+    });
+    let stopSettled = false;
+    const stop = svc.stopRecording().then((result) => {
+      stopSettled = true;
+      return result;
+    });
+    let finalData;
+
+    try {
+      await flushMicrotasks(100);
+      expect(stoppingWriteHeld).toBe(true);
+      expect(stopSettled).toBe(false);
+
+      finalData = svc.handleOffscreenData(recordingId, 'video/webm');
+      expect(svc.getState().status).toBe('saved');
+      releaseStoppingWrite();
+      await expect(stop).resolves.toEqual({ ok: true });
+      await finalData;
+      await flushMicrotasks(100);
+
+      expect(svc.getState().status).toBe('saved');
+      expect(snapshotFor(store, recordingId)).toBeUndefined();
+      expect(chrome.storage.remove).toHaveBeenCalledWith(`sessionSnapshot:${recordingId}`);
+      expect(await readSessionOwner()).toMatchObject({ recordingId, status: 'retired' });
+    } finally {
+      releaseStoppingWrite();
+      await stop.catch(() => undefined);
+      if (finalData) await finalData.catch(() => undefined);
+    }
   });
 
   it('does not restore when the offscreen document is gone', async () => {
@@ -1680,6 +2114,39 @@ describe('durable session ownership across workers', () => {
     });
     return { ...backed, isOpen: () => documentOpen };
   }
+
+  it('returns unsuccessful GET_STATE when a legacy owner-claim transaction aborts', async () => {
+    const { chrome, store } = makeStorageBackedChrome({
+      offscreen: { ...makeStubChrome().offscreen, hasDocument: jest.fn(async () => true) },
+    });
+    const snapshot = {
+      recordingId: VALID_UUID,
+      status: 'recording',
+      startedAt: Date.now(),
+      lastActivityAt: Date.now(),
+      strategy: 'offscreen',
+      options: { mode: 'tab', includeMic: false, includeSystemAudio: false },
+    };
+    store.sessionSnapshot = snapshot;
+    expect(await readSessionOwner()).toBeNull();
+    const restoreTransaction = await abortNextSessionMetadataWrite();
+
+    let result;
+    try {
+      const svc = createRecordingService(chrome);
+      result = await svc.handleMessage({ type: 'GET_STATE' }, { id: chrome.runtime.id });
+    } finally {
+      restoreTransaction();
+    }
+
+    expect(result).toMatchObject({ ok: false, error: expect.any(String) });
+    expect(result).not.toMatchObject({ ok: true, status: 'idle' });
+    expect(store.sessionSnapshot).toEqual(snapshot);
+    expect(await readSessionOwner()).toBeNull();
+    expect(chrome.storage.set).not.toHaveBeenCalled();
+    expect(chrome.storage.remove).not.toHaveBeenCalled();
+    expect(chrome.offscreen.closeDocument).not.toHaveBeenCalled();
+  });
 
   it.each(['offscreen', 'page'])(
     'cleans a %s retirement with no session snapshot',

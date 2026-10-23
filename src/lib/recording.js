@@ -142,15 +142,30 @@ export async function updateRecordingName(id, name) {
       if (recording) {
         recording.name = name;
         const putRequest = store.put(recording);
-        putRequest.onsuccess = () => resolve();
-        putRequest.onerror = () => reject(putRequest.error);
+        putRequest.onerror = () => {
+          db.close();
+          reject(putRequest.error || new Error('Failed to write recording name'));
+        };
       } else {
         reject(new Error('Recording not found'));
       }
     };
-    getRequest.onerror = () => reject(getRequest.error);
-    tx.oncomplete = () => db.close();
-    tx.onerror = () => db.close();
+    getRequest.onerror = () => {
+      db.close();
+      reject(getRequest.error || new Error('Failed to read recording for name update'));
+    };
+    tx.oncomplete = () => {
+      db.close();
+      resolve();
+    };
+    tx.onerror = () => {
+      db.close();
+      reject(tx.error || new Error('Failed to update recording name transaction'));
+    };
+    tx.onabort = () => {
+      db.close();
+      reject(tx.error || new Error('Recording name update transaction aborted'));
+    };
   });
 }
 

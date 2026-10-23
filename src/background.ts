@@ -289,6 +289,7 @@ async function reconcileUnfinishedSessions(): Promise<void> {
     }
   } catch (e) {
     logger.error('Session reconciliation failed:', e);
+    throw e;
   }
 }
 
