@@ -1,4 +1,5 @@
-import { getAllRecordings, deleteRecording } from '../lib/db.js';
+import { getAllRecordings } from '../lib/db.js';
+import { deleteRecordingFromUI } from '../lib/ui-recording-deletion.js';
 import { createLogger } from '../logger.js';
 
 const logger = createLogger('Recordings');
@@ -111,7 +112,7 @@ async function render() {
       delBtn.onclick = async () => {
         if (confirm('Are you sure you want to delete this recording?')) {
           try {
-            await deleteRecording(rec.id);
+            await deleteRecordingFromUI(rec.id);
             item.remove();
             if (listEl.children.length === 0) {
               showEmpty('No recordings found.');

@@ -1,4 +1,5 @@
 import { getRecording } from '../lib/db.js';
+import { deleteRecordingFromUI } from '../lib/ui-recording-deletion.js';
 import { createLogger } from '../logger.js';
 import { DURATION_FIX_TIMEOUT_MS, SEEK_POSITION_LARGE } from '../lib/constants.js';
 
@@ -349,6 +350,7 @@ if (typeof window !== 'undefined' && window.location.search.includes('test')) {
           try {
             const { updateRecordingName } = await import('../lib/db.js');
             await updateRecordingName(id, inputBaseName);
+            recordName = inputBaseName;
             logger.log('Saved custom name to database:', inputBaseName);
           } catch (e) {
             logger.error('Failed to save custom name:', e);
@@ -360,6 +362,7 @@ if (typeof window !== 'undefined' && window.location.search.includes('test')) {
           try {
             const { updateRecordingName } = await import('../lib/db.js');
             await updateRecordingName(id, null);
+            recordName = null;
             logger.log('Cleared custom name from database');
           } catch (e) {
             logger.error('Failed to clear custom name:', e);
@@ -385,8 +388,7 @@ if (typeof window !== 'undefined' && window.location.search.includes('test')) {
       deleteBtn.addEventListener('click', async () => {
         if (!confirm('Delete this recording? This cannot be undone.')) return;
         try {
-          const { deleteRecording } = await import('../lib/db.js');
-          await deleteRecording(id);
+          await deleteRecordingFromUI(id);
           document.body.innerHTML = '<h1>Recording Deleted</h1><p>You can close this tab.</p>';
         } catch (e) {
           alert('ScreenSilo: Failed to delete recording: ' + e.message);

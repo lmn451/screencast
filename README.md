@@ -86,6 +86,14 @@ store-assets/              # Screenshots etc. for the web store listing
 
 6. Optional: Pin the extension to the toolbar via the puzzle/extension icon so it’s easy to access.
 
+Best quality is enabled by default, preserving the source resolution and targeting
+up to 60 FPS at a 25 Mbps video bitrate. Uncheck **Best quality** before recording
+to use the browser's standard quality settings and reduce file size.
+
+Stop a recording before deleting it from Preview, Recordings, or Recovery.
+Deletion is refused while that recording is active or finishing, or when its
+ownership cannot be verified. Once it has stopped, retry deletion from the same page.
+
 ## Browser-specific Notes
 
 - Chrome & Brave

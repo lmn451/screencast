@@ -67,16 +67,30 @@ interface RecordingContext {
   recorderTabId: number | null;
   startedAt: number | null;
   lastActivityAt: number | null;
+  saveDeadlineAt: number | null;
   options: {
     mode: 'tab' | 'window' | 'screen' | null;
     includeMic: boolean;
     includeSystemAudio: boolean;
+    bestQuality: boolean;
   };
   error: string | null;
   failedChunkCount: number;
-  overlayInjected: boolean;
 }
 ```
+
+### Worker restart recovery
+
+- A heartbeat from the matching recorder confirms that capture has started and
+  reconciles a restored `starting` session through its strategy-specific started event.
+- A restored `stopping` session remains `stopping`. Its persisted `saveDeadlineAt`
+  is an absolute timestamp established by Stop; restarts and repeated Stop requests
+  do not extend the 60-second save window. Older snapshots derive the deadline from
+  their recorded activity time.
+- Restoration errors leave ownership unresolved rather than reporting a successful
+  idle state. Destructive UI actions require a successful canonical state query and
+  a fresh durable ownership check.
+
 
 ## Benefits of XState v5
 

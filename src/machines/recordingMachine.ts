@@ -12,7 +12,13 @@
  */
 
 import { setup, assign } from 'xstate';
-import type { RecordingContext, RecordingEvent, RecordingMode, SessionSnapshot } from './types.js';
+import {
+  TIMEOUTS,
+  type RecordingContext,
+  type RecordingEvent,
+  type RecordingMode,
+  type SessionSnapshot,
+} from './types.js';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // INITIAL CONTEXT
@@ -26,6 +32,7 @@ export const initialContext: RecordingContext = {
   recorderTabId: null,
   startedAt: null,
   lastActivityAt: null,
+  saveDeadlineAt: null,
   options: {
     mode: null,
     includeMic: false,
@@ -90,6 +97,7 @@ export const recordingMachine = setup({
       }),
       error: () => null,
       failedChunkCount: () => 0,
+      saveDeadlineAt: () => null,
     }),
 
     startNewRecording: assign({
@@ -109,6 +117,7 @@ export const recordingMachine = setup({
       }),
       error: () => null,
       failedChunkCount: () => 0,
+      saveDeadlineAt: () => null,
     }),
 
     determineStrategy: assign({
@@ -141,6 +150,11 @@ export const recordingMachine = setup({
         (event as { type: 'RESTORE'; snapshot: SessionSnapshot }).snapshot.overlayTabId ?? null,
       error: () => null,
       failedChunkCount: () => 0,
+      saveDeadlineAt: ({ event }) =>
+        (event as { type: 'RESTORE'; snapshot: SessionSnapshot }).snapshot.saveDeadlineAt ?? null,
+    }),
+    setSaveDeadline: assign({
+      saveDeadlineAt: () => Date.now() + TIMEOUTS.SAVE,
     }),
 
     updateLastActivity: assign({
@@ -195,6 +209,11 @@ export const recordingMachine = setup({
           {
             guard: ({ event }) => event.snapshot.status === 'starting',
             target: 'starting',
+            actions: 'restoreRecording',
+          },
+          {
+            guard: ({ event }) => event.snapshot.status === 'stopping',
+            target: 'stopping',
             actions: 'restoreRecording',
           },
           { target: 'recording', actions: 'restoreRecording' },
@@ -254,7 +273,7 @@ export const recordingMachine = setup({
     recording: {
       entry: 'updateLastActivity',
       on: {
-        STOP: { target: 'stopping' },
+        STOP: { target: 'stopping', actions: 'setSaveDeadline' },
         OFFSCREEN_DATA: {
           target: 'saved',
         },

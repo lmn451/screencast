@@ -131,24 +131,42 @@ it('ignores an in-flight starting response after a newer recording update', asyn
   expect(chrome.runtime.sendMessage).toHaveBeenCalledTimes(2);
 });
 
-it('keeps the local saving state when the initial query finishes after stop starts', async () => {
+it.each([
+  ['HTMLElement.click()', (button) => button.click()],
+  [
+    'synthetic MouseEvent',
+    (button) => button.dispatchEvent(new MouseEvent('click', { bubbles: true })),
+  ],
+  [
+    'page-generated keyboard and click events',
+    (button) => {
+      button.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      button.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', bubbles: true }));
+      button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    },
+  ],
+])('rejects %s while the initial state query is in flight', async (_activation, activate) => {
   let resolveInitialState;
   const initialState = new Promise((resolve) => {
     resolveInitialState = resolve;
   });
-  chrome.runtime.sendMessage.mockReturnValueOnce(initialState).mockResolvedValueOnce({ ok: true });
+  chrome.runtime.sendMessage.mockReturnValueOnce(initialState);
 
   await import('../../src/entries/overlay.js');
-  overlayButton().click();
+  const button = overlayButton();
+  activate(button);
 
-  expect(chrome.runtime.sendMessage).toHaveBeenLastCalledWith({ type: MSG_STOP });
-  expect(overlayButton()).toMatchObject({ disabled: true, textContent: 'Saving…' });
+  expect(chrome.runtime.sendMessage).toHaveBeenCalledTimes(1);
+  expect(chrome.runtime.sendMessage).toHaveBeenLastCalledWith({ type: MSG_GET_STATE });
+  expect(chrome.runtime.sendMessage).not.toHaveBeenCalledWith({ type: MSG_STOP });
+  expect(button).toMatchObject({ disabled: false, textContent: 'Stop' });
 
+  messageListener({ type: MSG_STATE_UPDATE, status: 'recording' });
   resolveInitialState({ status: 'starting' });
   await flushPromises();
   await flushPromises();
 
-  expect(overlayButton()).toMatchObject({ disabled: true, textContent: 'Saving…' });
-  await jest.advanceTimersByTimeAsync(5000);
-  expect(chrome.runtime.sendMessage).toHaveBeenCalledTimes(2);
+  expect(button).toMatchObject({ disabled: false, textContent: 'Stop' });
+  expect(chrome.runtime.sendMessage).not.toHaveBeenCalledWith({ type: MSG_STOP });
+  expect(chrome.runtime.sendMessage).toHaveBeenCalledTimes(1);
 });

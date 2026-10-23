@@ -33,6 +33,8 @@ export interface RecordingContext {
   recorderTabId: number | null;
   startedAt: number | null;
   lastActivityAt: number | null;
+  /** Absolute deadline for the active session's final DATA after STOP. */
+  saveDeadlineAt: number | null;
   options: {
     mode: RecordingMode | null;
     includeMic: boolean;
@@ -100,6 +102,8 @@ export interface SessionSnapshot {
   recorderTabId?: number | null;
   /** Overlay ownership retained while a terminal session is being cleaned up. */
   overlayTabId?: number | null;
+  /** Absolute deadline for final DATA after STOP; absent in older snapshots. */
+  saveDeadlineAt?: number;
 }
 
 /** Durable cancellation marker for a recording-owned browser context. */
