@@ -8,6 +8,7 @@
 - Refuse deletion of live recordings and fail closed when recording ownership cannot be verified.
 - Persist repeated preview filename changes and clearing only after the database transaction commits.
 - Ignore page-generated overlay Stop clicks while preserving trusted user activation.
+- Pin browser CI to Ubuntu 24.04, which is supported by the locked Playwright version.
 
 ## 0.2.3 (2026-09-11)
 
